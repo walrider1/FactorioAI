@@ -89,7 +89,15 @@ def now_iso() -> str:
 
 
 def log(*a) -> None:
-    print(time.strftime("%H:%M:%S"), *a, flush=True)
+    """To the console and to runs/watch/watchdog.log, so what happened can be read back later."""
+    line = " ".join([time.strftime("%Y-%m-%d %H:%M:%S"), *map(str, a)])
+    print(line[11:], flush=True)
+    try:
+        WATCH.mkdir(parents=True, exist_ok=True)
+        with open(WATCH / "watchdog.log", "a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+    except OSError:
+        pass
 
 
 def clip(v, n: int = 300):
@@ -678,39 +686,80 @@ class Watchdog:
 
     def start_game(self) -> str:
         """The bot plays only while the stream is live. Carry on the stream's run from its newest save when it was
-        stopped for the night; start a fresh run with the same settings when the last one really ended."""
+        stopped at the end of the last stream; start a fresh run with the same settings when it really ended."""
         d = self.runs.latest()
         if d is None:
             return "no earlier run to copy the settings from: start the first run by hand"
         if _running(d):
+            ctl = _json(d / "control.json") or {}
+            if ctl.get("cmd") == "stop" and time.time() - ctl.get("at", 0) < 15 * 60:
+                # still saving from the last stream's end: carry on as soon as that save is done
+                threading.Thread(target=self._start_after_stop, args=(d,), daemon=True).start()
+                return "the bot is still saving from the last stream; it carries on as soon as that is done"
             return "the bot is already playing"
         result = _json(d / "result.json") or {}
-        stopped = (result.get("breakdown") or {}).get("stopped_for_resume") or result.get("stopped_for_resume")
-        if stopped and any(sv["complete"] for sv in saves(d)):
+        done = [sv for sv in saves(d) if sv["complete"]]
+        newest = max(done, key=lambda sv: sv["minute"] or 0) if done else None
+        # a run the stream stopped ends with a "stop" save; a finished run (rocket, give-up) has none to carry on
+        if newest and newest.get("kind") == "stop" and result.get("end_reason") in (None, "ended_by_team"):
             return self.resume(d, quiet=True)
         return self.start_fresh(d, quiet=True)
+
+    def _start_after_stop(self, d: Path) -> None:
+        t0 = time.time()
+        while _running(d) and time.time() - t0 < 10 * 60:
+            time.sleep(5)
+        if obs_streaming():
+            log("game: " + self.start_game())
 
     def stop_game(self) -> str:
         d = self.runs.latest()
         if d is None or not _running(d):
             return "the bot was not playing"
         r = request_control(d, "stop")
-        log(f"stream ended: the bot saves and stops ({r.get('note') or r.get('error')})")
+        log(f"stream ending: the bot saves and stops ({r.get('note') or r.get('error')})")
         return "the bot saves and stops at its next safe point; it carries on from there next stream"
 
+    def reset_cards(self, countdown_min: float = 2) -> None:
+        """Reload every screen so none shows a stale clock or finished countdown; Starting Soon gets the real wait."""
+        from obs_setup import SCREENS
+        for scene, src, path in SCREENS:
+            if scene == SCENE_START:
+                obs_call("set_input_settings", src, {"url": f"http://127.0.0.1:8730/screen?mode=starting"
+                                                            f"&t={max(0, countdown_min):g}&v={int(time.time())}"}, True)
+            obs_call("press_input_properties_button", src, "refreshnocache")
+
+    end_timer: threading.Timer | None = None
+
     def start_stream(self, countdown_min: float = 2) -> dict:
-        if obs_streaming():
+        ending = self.end_timer is not None and self.end_timer.is_alive()
+        if ending:                                  # Start during the outro: stay on air and begin again
+            self.end_timer.cancel()
+            self.end_timer = None
+            log("start pressed during the outro: staying live")
+        was_live = bool(obs_streaming())
+        if was_live and not ending:
             return self.stream_state(note="already live")
-        self.ensure_relay()
-        # the Starting Soon card counts down the real wait (reloading the source also restarts its clock)
-        obs_call("set_input_settings", "Screen: Starting Soon",
-                 {"url": f"http://127.0.0.1:8730/screen?mode=starting&t={max(0, countdown_min):g}"}, True)
+        if not was_live:
+            self.ensure_relay()
+        self.reset_cards(countdown_min)
         obs_scene(SCENE_START)
-        if obs_call("start_stream") is None:
-            return self.stream_state(note="OBS did not start streaming (is OBS open?)")
-        stream_cfg(since=now_iso())
-        game = self.start_game() if stream_cfg().get("game_with_stream", True) and not self.a.no_game else ""
-        if game:
+        if not was_live:
+            obs_call("start_stream")                # its reply can be slow or time out: check the real state instead
+            for _ in range(20):
+                if obs_streaming():
+                    break
+                time.sleep(1)
+            else:
+                log("OBS did not go live within 20 s")
+                return self.stream_state(note="OBS did not start streaming (is it open? check its Stream settings)")
+            stream_cfg(since=now_iso())
+        game = ""
+        if stream_cfg().get("game_with_stream", True) and not self.a.no_game:
+            try:
+                game = self.start_game()
+            except Exception as exc:  # noqa: BLE001 - the stream goes on even if the game won't start
+                game = f"could not start the game: {exc!r}"[:200]
             log("game: " + game)
         threading.Timer(max(0, countdown_min) * 60, obs_scene, args=(SCENE_LIVE,)).start()
         self.next_check = time.time() + self.a.interval * 60           # first review an hour into the stream
@@ -720,17 +769,30 @@ class Watchdog:
     def stop_stream(self, outro_s: float = 30) -> dict:
         if not obs_streaming():
             return self.stream_state(note="not live")
+        if self.end_timer is not None and self.end_timer.is_alive():
+            return self.stream_state(note="already ending")
+        obs_call("press_input_properties_button", "Screen: Ending", "refreshnocache")
         obs_scene(SCENE_END)
-        game = self.stop_game() if stream_cfg().get("game_with_stream", True) and not self.a.no_game else ""
+        game = ""
+        if stream_cfg().get("game_with_stream", True) and not self.a.no_game:
+            game = self.stop_game()
 
         def end():
             obs_call("stop_stream")
-            time.sleep(3)
+            for _ in range(20):
+                if not obs_streaming():
+                    break
+                time.sleep(1)
             if self.relay and self.relay.poll() is None:
                 self.relay.terminate()
             stream_cfg(since=None)
+            self.reset_cards()                      # fresh cards, and OBS waits on Starting Soon for the next stream
+            obs_scene(SCENE_START)
+            self.end_timer = None
             log("stream ended")
-        threading.Timer(outro_s, end).start()
+        self.end_timer = threading.Timer(outro_s, end)
+        self.end_timer.start()
+        log(f"stream ending in {outro_s:g} s")
         return self.stream_state(note=f"ending: the stream stops in {outro_s:g} s. {game}".strip())
 
     def stream_state(self, note: str = "") -> dict:
