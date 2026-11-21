@@ -1836,11 +1836,36 @@ end
 
 local auto_cam   -- set below, next to /cam
 
+-- Factorio's own panels (surface list, minimap, side menu, bars, alerts) sit under the stream overlay and show
+-- through it, so spectators watch a clean view. /gui on brings them back for that player.
+local GUI_PANELS = { "show_surface_list", "show_minimap", "show_side_menu", "show_map_view_options",
+  "show_shortcut_bar", "show_quickbar", "show_tool_bar", "show_controller_gui", "show_alert_gui",
+  "show_research_info", "show_crafting_queue", "show_hotkey_suggestions" }
+
+local function set_gui(pl, visible)
+  local v = try(function() return pl.game_view_settings end)
+  if not v then return end
+  for _, k in ipairs(GUI_PANELS) do try(function() v[k] = visible end) end   -- a field this version lacks is skipped
+  try(function() pl.game_view_settings = v end)
+end
+
 script.on_event(defines.events.on_player_joined_game, function(event)
   local player = game.get_player(event.player_index)
   send_to_bot(player)
   if player and auto_cam then try(function() auto_cam(player) end) end
-  if player then player.print("Factorio AI Arena: you are a spectator, following the AI (/cam off to fly freely, /bot to jump back).") end
+  if player then try(function() set_gui(player, false) end) end
+  if player then player.print("Factorio AI Arena: you are a spectator, following the AI (/cam off to fly freely, /bot to jump back, /gui on for the game's panels).") end
+end)
+
+try(function()   -- guarded: a name the game already uses would stop the whole scenario from loading
+  commands.add_command("gui", "Show or hide the game's own panels (surface list, minimap, bars): /gui on|off",
+    function(cmd)
+      local pl = game.get_player(cmd.player_index)
+      if not pl then return end
+      local on = (cmd.parameter or ""):match("^%s*on") ~= nil
+      set_gui(pl, on)
+      pl.print(on and "game panels shown (/gui off hides them)" or "game panels hidden (/gui on shows them)")
+    end)
 end)
 
 commands.add_command("bot", "Jump to the AI's character.", function(cmd)
