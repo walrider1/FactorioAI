@@ -476,3 +476,90 @@ def test_short_of_plates_the_crew_lifts_link_inserters_and_always_puts_them_back
     with pytest.raises(Preempted):
         crew.plates("iron-plate", 100)
     assert len(w.picked) == len(placed) == 2 and crew.lifted_links == []
+
+
+def _smelting_crew(monkeypatch):
+    """A crew with a belted iron line (its furnaces drained), a plate chest, and an ore row with full chests."""
+    import brain.crew as crew_mod
+    crew = _crew()
+    w = crew.w
+    line = Site("electric_mine", {"resource": "iron-ore", "count": 2, "into": "line",
+                                  "line": {"item": "iron-plate", "per_minute": 37.5}}, (40, 0))
+    line.plate_furnaces = [(40.0, 0.0, "iron-plate"), (43.0, 0.0, "iron-plate")]
+    line.chests = [(46.5, 2.5, "iron-plate")]
+    crew.base.add(line)
+    ore_row = Site("electric_mine", {"resource": "iron-ore", "count": 2, "into": "chest"}, (-20, 0))
+    ore_row.chests = [(-20.5, 0.5, "iron-ore"), (-17.5, 0.5, "iron-ore")]
+    crew.base.add(ore_row)
+    ore_left = {c[:2]: 1600 for c in ore_row.chests}
+    inserted, mined, crafted = [], [], []
+    w.refresh = lambda: None
+    w.free_box = lambda *a: True
+    w.go = lambda *a: None
+    w.observe = lambda *a, **k: {}
+    w.patch = lambda ore: None
+    w.fuel_units = lambda: 100
+    w.fuel = lambda *a: None
+    w.recorder = None
+    w.place = lambda name, x, y, d="north", tiles=(): {}
+    w.craft = lambda r, n: crafted.append((r, n)) or w.inventory.__setitem__(r, w.inventory.get(r, 0) + n)
+    w.mine = lambda item, n: mined.append((item, n)) or w.inventory.__setitem__(item, w.inventory.get(item, 0) + n)
+
+    def extract(x, y, item, n):
+        take = min(n, ore_left.get((x, y), 0)) if item == "iron-ore" else 0
+        if take:
+            ore_left[(x, y)] -= take
+        w.inventory[item] = w.inventory.get(item, 0) + take
+        return take
+    w.extract = extract
+
+    def insert(x, y, item, n):
+        inserted.append((x, y, item, n))
+        w.inventory[item] -= n
+        return n
+    w.insert = insert
+    w.inventory.update({"stone-furnace": 8})
+    crew.storage_chests = lambda: []
+    crew.foreman.patrol = lambda **k: None
+    monkeypatch.setattr(crew_mod.time, "sleep", lambda s: None)
+    return crew, line, ore_row, inserted, mined
+
+
+def test_the_crew_smelts_ore_from_full_ore_chests_in_its_own_furnaces(monkeypatch):
+    # run 20261121-140755: 40 hand-mined ore at a time went into belted furnaces and plate chests while three ore
+    # rows sat full; a build waited 19 minutes for 801 iron and failed
+    crew, line, ore_row, inserted, mined = _smelting_crew(monkeypatch)
+    crew.hand_smelt("iron-plate", "iron-ore", 800)
+    own = set(crew.hand_furnaces_of("iron-ore"))
+    assert len(own) == crew.CREW_FURNACES_MAX                           # 800 short: the smelter grows to 8
+    assert mined == []                                                  # the ore came out of the full chests
+    spots = {(x, y) for x, y, item, n in inserted}
+    assert spots == own and sum(n for *_, n in inserted) == 8 * crew.ORE_BATCH
+    assert not spots & {(x, y) for x, y, _ in line.plate_furnaces}      # never a belted furnace
+    assert not spots & {c[:2] for c in line.chests + ore_row.chests}    # never a chest
+
+
+def test_the_crews_smelter_stays_small_for_a_small_shortfall_and_hand_mines_last(monkeypatch):
+    crew, line, ore_row, inserted, mined = _smelting_crew(monkeypatch)
+    ore_row.chests = []                                                 # no ore chests at all
+    crew.hand_smelt("iron-plate", "iron-ore", 30)
+    assert len(crew.hand_furnaces_of("iron-ore")) == 2
+    assert mined == [("iron-ore", 30)]                                  # by hand, as a small batch
+
+
+def test_a_wait_that_brings_nothing_turns_to_smelting(monkeypatch):
+    # the crew's rate is planned from link budgets; when the belts take it all anyway, waiting is hopeless
+    crew, line, ore_row, inserted, mined = _smelting_crew(monkeypatch)
+    crew._plate_sources = lambda plate, lifted=(): [(40.0, 0.0, 500.0, None)]   # a rate the plan promises
+    smelted = []
+
+    def fake_smelt(plate, ore, n):
+        smelted.append(n)
+        crew.w.inventory[plate] = crew.w.inventory.get(plate, 0) + n
+    crew.hand_smelt = fake_smelt
+    import brain.crew as crew_mod
+    clock = {"t": 0.0}
+    monkeypatch.setattr(crew_mod.time, "monotonic", lambda: clock["t"])
+    monkeypatch.setattr(crew_mod.time, "sleep", lambda s: clock.__setitem__("t", clock["t"] + s))
+    crew.plates("iron-plate", 400)
+    assert smelted and crew.w.inventory["iron-plate"] >= 400            # it stopped waiting and smelted

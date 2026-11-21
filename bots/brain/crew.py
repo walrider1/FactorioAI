@@ -3834,6 +3834,9 @@ class Crew:
         deadline = time.monotonic() + 600 / self.w.speed
         self.restore_lifted()                         # anything left lifted from before goes back first
         lifted: list[dict] = []
+        waited: float | None = None                   # plates the last wait for our drills should have brought
+        distrust = False                              # a wait brought far less: smelt in the crew's furnaces
+        dry: set = set()                              # spots that gave nothing (run 20261121-140755: 61 empty visits)
 
         def smelters():                  # furnaces we smelt in, and the chests electric mines and cells fill
             return ([(x, y) for s in self.base.sites for x, y, p in s.plate_furnaces if p == plate]
@@ -3846,8 +3849,14 @@ class Crew:
             got = self.from_storage(plate, short)
             self.checkpoint()
             self.w.doing(f"collecting {plate} ({self.w.inventory.get(plate, 0)}/{total})")
+            own = set(self.hand_furnaces_of(ore))
             for x, y in sorted(smelters(), key=lambda q: math.dist(q, self.w.pos)):
-                got += self.w.extract(x, y, plate, short - got)
+                if (x, y) in dry and (x, y) not in own:
+                    continue                          # empty last time: a belt drains it, do not walk there again
+                n = self.w.extract(x, y, plate, short - got)
+                if not n:
+                    dry.add((x, y))
+                got += n
                 if got >= short:
                     break
             short -= got
@@ -3873,14 +3882,22 @@ class Crew:
                                       f"(into site(s) {sorted({ln.get('to_site') for ln in lifted}, key=str)}) "
                                       "while collecting; they go back right after")
                     per_min += gain
-            if per_min > 0 and short / per_min <= MINE_WAIT_MIN:     # our drills beat hand-mining: wait for them
+                    dry.clear()                       # the lifted links' chests fill again
+            if waited is not None:                    # what the last wait brought against what was expected
+                if got < 0.25 * waited:
+                    distrust = True                   # the estimate is the plan, not what arrives: smelt instead
+                waited = None
+            if not distrust and per_min > 0 and short / per_min <= MINE_WAIT_MIN:   # our drills beat smelting
                 self.w.doing(f"waiting for {short} {plate} from our furnaces ({per_min:.0f}/min for us"
                              + (f", {len(lifted)} link(s) paused" if lifted else "") + ")")
                 self.foreman.patrol(force=True)
-                time.sleep(max(3.0, min(20.0, short / per_min * 60 / self.w.speed / 3)))
+                pause = max(3.0, min(20.0, short / per_min * 60 / self.w.speed / 3))
+                t_wait = time.monotonic()
+                time.sleep(pause)
+                waited = per_min * (time.monotonic() - t_wait) * self.w.speed / 60   # plates it should bring
                 continue
             # too slow (or no furnaces yet): hand-mine ore and smelt it ourselves
-            self.hand_smelt(plate, ore, min(short, 40), smelters())
+            self.hand_smelt(plate, ore, short)
         raise BuildError(f"could not get {total} {plate} in time")
 
     SMELTER_FURNACES = 4
@@ -3997,14 +4014,51 @@ class Crew:
         self.base.add(site)
         return [(x, y) for x, y, _ in site.plate_furnaces]
 
-    def hand_smelt(self, plate: str, ore: str, n: int, smelters: list) -> None:
-        self.w.doing(f"hand-smelting {n} {plate}")
-        furnaces = list(smelters) or self.hand_furnaces(ore)
-        if self.w.inventory.get(ore, 0) < n:
-            self.w.mine(ore, n - self.w.inventory.get(ore, 0))
-        if self.w.fuel_units() < 4:
-            self.get_fuel(10)
-        per = math.ceil(n / len(furnaces))
+    # The crew smelts what its builds need in furnaces of its own. Run 20261121-140755: the base made 226 iron a
+    # minute, all of it belted to factories; the crew got 14 a minute, hand-mined 40 ore at a time, and put it into
+    # belted furnaces (whose plates went down the belt) and plate chests (ore onto a plate belt) while three ore
+    # rows sat with full chests. A plastics build waited 19 minutes for 801 iron and failed.
+    CREW_FURNACES_MAX = 8          # the crew's smelter grows to this many furnaces when builds wait on plates
+    FURNACE_PLATES_MIN = 18.75     # plates a minute one stone furnace makes
+    ORE_BATCH = 50                 # ore per crew furnace per round (one stack)
+
+    def from_mine_chests(self, item: str, want: int) -> int:
+        """Up to `want` of an item (ore, stone) out of our mines' chests at once, no waiting: an ore row "into
+        chest" fills its chests while nothing draws on them."""
+        got = 0
+        chests = [(x, y) for s in self.base.sites for x, y, what in s.chests if what == item]
+        for x, y in sorted(chests, key=lambda q: math.dist(q, self.w.pos)):
+            if got >= want:
+                break
+            got += self.w.extract(x, y, item, want - got)
+        return got
+
+    def _gather(self, item: str, want: int) -> int:
+        """Hold `want` of a raw item: storage, then our mines' chests, then (a small batch) by hand."""
+        have = self.w.inventory.get(item, 0)
+        if have < want:
+            have += self.from_storage(item, want - have)
+        if have < want:
+            have += self.from_mine_chests(item, want - have)
+        if have < min(want, 40):                      # hand-mining is slow: only a small batch, as a last resort
+            self.w.mine(item, min(want, 40) - have)
+        return self.w.inventory.get(item, 0)
+
+    def hand_smelt(self, plate: str, ore: str, n: int) -> None:
+        """Smelt up to `n` plates for the crew, in the crew's own furnaces only: never a mine's, line's or
+        column's furnace (their plates are belted away) and never a chest. The smelter grows with the shortfall."""
+        want = max(2, min(self.CREW_FURNACES_MAX, math.ceil(n / (self.FURNACE_PLATES_MIN * MINE_WAIT_MIN))))
+        furnaces = self.hand_furnaces(ore, want)
+        if not furnaces:
+            raise BuildError(f"no room for the crew's {plate} furnaces")
+        batch = min(n, self.ORE_BATCH * len(furnaces))
+        self.w.doing(f"smelting {batch} {plate} in the crew's {len(furnaces)} furnaces")
+        have = self._gather(ore, batch)
+        if have <= 0:
+            return
+        if self.w.fuel_units() < 2 * len(furnaces):
+            self.get_fuel(4 * len(furnaces))
+        per = max(1, min(have, batch) // len(furnaces))
         for x, y in furnaces:
             self.w.fuel(x, y, 3)
             self.w.insert(x, y, ore, per)
@@ -4036,32 +4090,52 @@ class Crew:
         if self.w.fuel_units() < units:
             self.w.mine("coal", units - self.w.fuel_units())
 
-    def hand_furnaces(self, ore: str) -> list[tuple[float, float]]:
-        """Bootstrap smelters: up to two stone furnaces by the ore patch (we keep using them)."""
+    def hand_furnaces_of(self, ore: str) -> list[tuple[float, float]]:
+        """The crew's own furnaces for an ore, as they stand (none built here)."""
+        return [(x, y) for s in self.base.sites if s.kind == f"smelter-{ore}" for x, y, _ in s.plate_furnaces]
+
+    def hand_furnaces(self, ore: str, want: int = 2) -> list[tuple[float, float]]:
+        """The crew's own stone furnaces for an ore (a smelter-<ore> site, kept for good): built on first use
+        beside our ore chests (else by the ore patch), and grown to `want` (at most CREW_FURNACES_MAX) when builds
+        wait on plates."""
         key = f"smelter-{ore}"
-        for s in self.base.sites:
-            if s.kind == key:
-                return [(x, y) for x, y, _ in s.plate_furnaces]
-        if self.w.inventory.get("stone-furnace", 0) < 2:
-            if self.w.inventory.get("stone", 0) < 10:
-                self.w.mine("stone", 10 - self.w.inventory.get("stone", 0))
-            self.w.craft("stone-furnace", 2 - self.w.inventory.get("stone-furnace", 0))
-        p = self.w.patch(ore)
-        here = (p["nearest"]["x"], p["nearest"]["y"]) if p else self.w.pos
-        self.w.go(*here)
-        self.w.observe(16)
+        site = next((s for s in self.base.sites if s.kind == key), None)
+        have = len(site.plate_furnaces) if site is not None else 0
+        want = min(max(want, 1), self.CREW_FURNACES_MAX)
+        if site is not None and have >= want:
+            return [(x, y) for x, y, _ in site.plate_furnaces]
+        need = want - have
+        if self.w.inventory.get("stone-furnace", 0) < need:
+            short = need - self.w.inventory.get("stone-furnace", 0)
+            self._gather("stone", 5 * short)
+            self.w.craft("stone-furnace", min(short, self.w.inventory.get("stone", 0) // 5))
+        need = min(need, self.w.inventory.get("stone-furnace", 0))
+        if site is not None:
+            here = site.centre
+        else:
+            ore_chests = [(x, y) for s in self.base.sites for x, y, what in s.chests if what == ore]
+            p = None if ore_chests else self.w.patch(ore)
+            here = (min(ore_chests, key=lambda q: math.dist(q, self.w.pos)) if ore_chests
+                    else (p["nearest"]["x"], p["nearest"]["y"]) if p else self.w.pos)
+        if need > 0:
+            self.w.go(*here)
+            self.w.observe(16)
+        taken = [(x, y) for x, y, _ in (site.plate_furnaces if site is not None else [])]
         spots: list[tuple[int, int]] = []
         hx, hy = int(here[0]), int(here[1])
-        for r in range(2, 12):
+        for r in range(2, 14):
+            if len(spots) >= need:
+                break
             for dx in range(-r, r + 1):
                 for dy in range(-r, r + 1):
                     x0, y0 = hx + dx, hy + dy
-                    if (len(spots) < 2 and max(abs(dx), abs(dy)) == r and self.w.free_box(x0 - 1, y0 - 1, 2, 2)
-                            and all(math.dist((x0, y0), s) >= 3 for s in spots)):
+                    if (len(spots) < need and max(abs(dx), abs(dy)) == r and self.w.free_box(x0 - 1, y0 - 1, 2, 2)
+                            and all(math.dist((x0, y0), s) >= 3 for s in spots + taken)):
                         spots.append((x0, y0))
-            if len(spots) == 2:
-                break
-        site = Site(key, {"ore": ore}, here, built_minute=self._minute())
+        if site is None:
+            site = Site(key, {"ore": ore}, here, built_minute=self._minute())
+            site.entities = []
+            self.base.add(site)
         plate = {v: k for k, v in PLATES.items()}[ore]
         rec: list = []
         self.w.recorder = rec
@@ -4072,8 +4146,7 @@ class Crew:
                 site.burners.append((x0, y0))
         finally:
             self.w.recorder = None
-        site.entities = rec
-        self.base.add(site)
+        site.entities = list(site.entities or []) + rec
         return [(x, y) for x, y, _ in site.plate_furnaces]
 
 
