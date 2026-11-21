@@ -62,6 +62,7 @@ TOKEN_FILE = ROOT / "secrets" / "phone_token"
 LOCK = threading.Lock()
 
 SCENE_LIVE, SCENE_UPGRADE, SCENE_BETWEEN = "Live", "Self-Upgrading", "Between Runs"
+OVERLAY_SOURCE = "Factorio Overlay"   # the browser source with /overlay in the Live scene
 
 REVIEW_TOOLS = ["Read", "Grep", "Glob", "Bash(tail:*)", "Bash(wc:*)"]
 # the fix session may change anything in the project (server, bot, stream, OBS), but only what was approved: the
@@ -778,7 +779,7 @@ class Watchdog:
 
     def clean_strays(self) -> None:
         """Relays (and their ffmpeg) left by an earlier watchdog would fight over the port: end them."""
-        for pid in stray_pids(r"stream[\\/]relay\.py") + stray_pids(r"ffmpeg.*127\.0\.0\.1:1935"):
+        for pid in stray_pids(r"stream.relay\.py") + stray_pids(r"ffmpeg.*127\.0\.0\.1:1935"):
             if self.relay is not None and pid == self.relay.pid:
                 continue
             kill_tree(pid)
@@ -809,6 +810,8 @@ class Watchdog:
                 break
             time.sleep(0.5)
         log("monitor started" if port_open(8730) else "monitor did not come up (see runs/watch/monitor.log)")
+        if port_open(8730):                          # pages that loaded while it was down are blank: reload them
+            self.reset_cards()
 
     def shut_down_helpers(self) -> None:
         """After the stream: the relay and the monitor go and the game client closes. The bot's run ends by itself
@@ -820,6 +823,9 @@ class Watchdog:
                 log(f"{name} closed")
             setattr(self, name, None)
         self.clean_strays()
+        for pid in stray_pids(r"main\(\[.monitor.\]\)"):    # a monitor started by an earlier watchdog
+            kill_tree(pid)
+            log(f"ended a leftover monitor ({pid})")
         if factorio_running():
             _run(["taskkill", "/IM", "factorio.exe"])      # ask nicely first
             for _ in range(10):
@@ -876,8 +882,10 @@ class Watchdog:
         return "the bot saves and stops at its next safe point; it carries on from there next stream"
 
     def reset_cards(self, countdown_min: float = 2) -> None:
-        """Reload every screen so none shows a stale clock or finished countdown; Starting Soon gets the real wait."""
+        """Reload every screen so none shows a stale clock or finished countdown; Starting Soon gets the real wait.
+        The game overlay reloads too: a browser source that loaded while the monitor was down stays blank for good."""
         from obs_setup import SCREENS
+        obs_call("press_input_properties_button", OVERLAY_SOURCE, "refreshnocache")
         for scene, src, path in SCREENS:
             if scene == SCENE_START:
                 obs_call("set_input_settings", src, {"url": f"http://127.0.0.1:8730/screen?mode=starting"
