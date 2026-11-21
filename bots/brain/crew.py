@@ -2266,9 +2266,14 @@ class Crew:
         f = self._link_fails.get(tuple(key))
         if f is None:
             return True
-        if f["base"] != self._base_sig():
+        # a changed base earns an early retry only for the first failures: any site built or removed anywhere
+        # changes it, so a link that cannot work was otherwise retried with every build (run 20261121-140755:
+        # 2 recorded failures, 56 attempts). After that only the back-off (or a relink goal) lets it try again.
+        if f["base"] != self._base_sig() and f["n"] < self.EARLY_RETRIES:
             return True
         return self._minute() - f["minute"] >= AUTO_RETRY_MIN * min(4, f["n"])
+
+    EARLY_RETRIES = 2
 
     def _note_link_fail(self, key: tuple, item: str, site: Site | None, reason: str) -> None:
         key = tuple(key)
@@ -2985,18 +2990,19 @@ class Crew:
         half = min(80, int(max(max(xs) - min(xs), max(ys) - min(ys)) / 2) + 10)
         self.w.survey_area((min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2, half=half, step=32)
         bad = self._bad_belt
+        resting = self._resting_starts()               # starts whose links kept rolling back (_note_rollback)
         starts: dict = {}
         for c, key, label, cost, owner in cands:
             ln = self.line_at(key) if owner is None else None
             if ln is not None:                         # a line's tail: its belt runs on into the link, no inserter
                 st = tuple(ln["start"])
-                if (st in unblock or self._belt_free(st)) and st not in (others | mine | bad | set(block)):
+                if (st in unblock or self._belt_free(st)) and st not in (others | mine | bad | set(block) | resting):
                     starts[st] = (cost - 1.0, None, None, key, label + "'s line", None)
                 continue
             for dx, dy in belts.VEC.values():          # the inserter beside the source, the belt starts beyond it
                 ins, start = (c[0] + dx, c[1] + dy), (c[0] + 2 * dx, c[1] + 2 * dy)
                 if not all(t in unblock or self._belt_free(t) for t in (ins, start)) \
-                        or {ins, start} & (others | mine | bad | set(block)):
+                        or {ins, start} & (others | mine | bad | set(block)) or ins in resting:
                     continue
                 facing = next(k for k, v in belts.VEC.items() if v == (-dx, -dy))   # it picks up from the source
                 if start not in starts or cost < starts[start][0]:
@@ -3099,6 +3105,34 @@ class Crew:
                                  f"not be laid again ({str(exc)[:100]}); it was put back as it was") from None
         return rec
 
+    # Every rolled-back link must change the next plan. A tile the game refused does (it is avoided from then on);
+    # any other failure (no pole, a walk that failed, a refusal off the route) would be planned again the same
+    # way, so such rollbacks are counted per start, and a start that rolled back ROLLBACK_LIMIT times is not
+    # used for ROLLBACK_REST_MIN. Run 20261121-140755: one start was laid and taken up 56 times in two hours.
+    ROLLBACK_LIMIT = 2
+    ROLLBACK_REST_MIN = 60.0
+
+    def _note_rollback(self, plan: dict, port: dict, exc: BuildError) -> None:
+        start = tuple(plan["ins"] if plan.get("ins") is not None else plan["steps"][0][1])
+        counts = getattr(self, "_rollbacks", None)
+        if counts is None:                            # a crew from an older save has neither
+            counts = self._rollbacks = {}
+        n = counts[start] = counts.get(start, 0) + 1
+        if n >= self.ROLLBACK_LIMIT:
+            rested = getattr(self, "_rested_starts", None)
+            if rested is None:
+                rested = self._rested_starts = {}
+            rested[start] = self._minute()
+            counts.pop(start, None)
+            self.foreman.note(f"build loop stopped: the {port.get('pack') or port.get('item')} link from "
+                              f"{plan.get('from')} was laid and taken up {n}x ({str(exc)[:90]}); its start at "
+                              f"{start} rests for {self.ROLLBACK_REST_MIN:.0f} min")
+
+    def _resting_starts(self) -> set:
+        rested = getattr(self, "_rested_starts", None) or {}
+        now = self._minute()
+        return {t for t, m in rested.items() if now - m < self.ROLLBACK_REST_MIN}
+
     def _build_link(self, plan: dict, port: dict, site: Site, kind: str, pack: str | None,
                     extra: dict | None = None) -> dict:
         from . import belts
@@ -3130,6 +3164,8 @@ class Crew:
             if bad is not None:
                 self._bad_belt.add(tuple(bad))
             self._undo(ents)
+            if ents and bad is None:
+                self._note_rollback(plan, port, exc)
             raise
         finally:
             self.w.recorder = None
@@ -3255,12 +3291,12 @@ class Crew:
         """Put a taken-up link back exactly where it was."""
         from . import belts
         ins, facing, ins_kind = rec["ins"] or (None, None, None)     # a trunk has no inserter
-        poles = [e for e in rec["entities"] if e[0] == POLE]
+        poles = [e for e in rec["entities"] if e[0] in POLES]
         need = belts.count(rec["steps"])
         ents: list = []
         try:
             self.make({**{k: v for k, v in need.items() if v}, **({ins_kind: 1} if ins_kind else {}),
-                       **({POLE: len(poles)} if poles else {})}, extra=True)
+                       **Counter(e[0] for e in poles)}, extra=True)
             self.w.recorder = ents
             try:
                 if ins is not None:
@@ -3269,7 +3305,7 @@ class Crew:
                                    belts.link_joins(rec["steps"], from_belt=ins is None)):
                     belts.lay_belt(self.w, rec["steps"])
                 for name, x, y, d in poles:
-                    self.w.place(POLE, x, y, d, self.w.footprint(POLE, x, y, d))
+                    self.w.place(name, x, y, d, self.w.footprint(name, x, y, d))
             finally:
                 self.w.recorder = None
         except BuildError as exc:            # the courier carries for it again until the next link step
@@ -3405,23 +3441,34 @@ class Crew:
                          + (f", {len(failed)} without power" if failed else ""))
         return notes
 
-    def _pole_plan(self, t: tuple[int, int], avoid: set = frozenset()) -> list[tuple[int, int]]:
-        """The poles that would power a lone electric building (a link's inserter) at t: [] when a pole already
-        covers it, else a pole beside it and the cheapest bridge to the network. Places nothing; raises
-        BuildError when there is no room for them."""
+    # supply reach of each pole kind: a small pole powers the 5x5 around it, a medium one the 7x7
+    POLE_SUPPLY = {POLE: 2, MEDIUM_POLE: 3}
+
+    def _pole_plan(self, t: tuple[int, int], avoid: set = frozenset()) -> list[tuple[str, tuple[int, int]]]:
+        """The poles that would power a lone electric building (a link's inserter) at t, as (kind, tile): [] when
+        a pole already covers it, else one pole anywhere its supply area reaches t (a small pole up to 2 tiles
+        away, a medium one up to 3 once unlocked) and the cheapest bridge of small poles to the network. Places
+        nothing; raises BuildError when there is no room. Run 20261121-140755: only the 8 tiles touching the
+        inserter were tried, all were taken, and the green science link never got built."""
         poles = self.existing_poles()
-        if any(abs(p[0] - t[0]) <= 2 and abs(p[1] - t[1]) <= 2 for p in poles):
+        medium = {(math.floor(x), math.floor(y)) for (x, y), e in self.w.entities.items()
+                  if e.get("name") == MEDIUM_POLE} if hasattr(self.w, "entities") else set()
+        if any(abs(p[0] - t[0]) <= self.POLE_SUPPLY[MEDIUM_POLE if p in medium else POLE]
+               and abs(p[1] - t[1]) <= self.POLE_SUPPLY[MEDIUM_POLE if p in medium else POLE] for p in poles):
             return []
-        spot = next((q for q in sorted(((t[0] + dx, t[1] + dy) for dx in (-1, 0, 1) for dy in (-1, 0, 1)),
-                                       key=lambda q: abs(q[0] - t[0]) + abs(q[1] - t[1]))
-                     if q != t and q not in avoid and self.w.free({q})), None)
-        if spot is None:
-            raise BuildError(f"no room for a pole to power the link's inserter at {t}")
+        kinds = [POLE] + ([MEDIUM_POLE] if MEDIUM_POLE in (getattr(self.kn, "unlocked", None) or set()) else [])
         free = lambda q: q in self.w.seen and not self.w.blocked(q) and q not in self.w.keepout and q not in avoid
-        bridge = route_poles([spot], self.base.powered_poles(), poles, free, margin=16)
-        if bridge is None:
-            raise BuildError(f"no pole route to power the link's inserter at {t}")
-        return [spot] + bridge
+        anchors = self.base.powered_poles()
+        for kind in kinds:                            # a cheap small pole first, a medium one where none fits
+            r = self.POLE_SUPPLY[kind]
+            spots = sorted(((t[0] + dx, t[1] + dy) for dx in range(-r, r + 1) for dy in range(-r, r + 1)),
+                           key=lambda q: abs(q[0] - t[0]) + abs(q[1] - t[1]))
+            open_spots = [q for q in spots if q != t and q not in avoid and self.w.free({q})]
+            for spot in open_spots[:3]:               # the nearest few: each bridge search is a full route
+                bridge = route_poles([spot], anchors, poles, free, margin=16)
+                if bridge is not None:
+                    return [(kind, spot)] + [(POLE, q) for q in bridge]
+        raise BuildError(f"no room for a pole (or no pole route) to power the link's inserter at {t}")
 
     def _can_power(self, t: tuple[int, int], avoid: set = frozenset()) -> bool:
         try:
@@ -3431,16 +3478,17 @@ class Crew:
         return True
 
     def _power_tile(self, t: tuple[int, int], avoid: set = frozenset(),
-                    plan: list[tuple[int, int]] | None = None) -> None:
+                    plan: list[tuple[str, tuple[int, int]]] | None = None) -> None:
         """Make sure a lone electric building (a link's inserter) is inside a pole's supply area and that pole is
         on the network (`plan`: poles worked out before anything was laid, see _build_link)."""
         todo = self._pole_plan(t, avoid) if plan is None else plan
         if not todo:
             return
-        self.unlock_items([POLE])
-        self.make({POLE: len(todo)}, extra=True)
-        for q in todo:
-            self.w.place(POLE, q[0] + 0.5, q[1] + 0.5, "north", {q})
+        kit = Counter(kind for kind, _ in todo)
+        self.unlock_items(list(kit))
+        self.make(dict(kit), extra=True)
+        for kind, q in todo:
+            self.w.place(kind, q[0] + 0.5, q[1] + 0.5, "north", {q})
 
     # ======================================================= hand or automate
     def hand_seconds(self, item: str, n: int) -> float | None:

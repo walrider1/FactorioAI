@@ -433,7 +433,7 @@ def detect(crew) -> list[dict]:
             fix = relocate_fix(crew, q) if q["failed"] >= 3 else None
             out.append({"level": "warn", "key": f"link-stuck-{q['at'][0]},{q['at'][1]}",
                         "what": f"the {q['item']} link into site {q['into_site']} failed {q['failed']}x: {q['why'][:200]}"
-                                "; it retries by itself once a site is built or removed"
+                                + f"; it retries by itself within {15 * min(4, q['failed'])} min (a relink goal: now)"
                                 + ("; it is walled in: rebuild it where its inputs are (the new one first)"
                                    if fix else ""),
                         "fix": fix})

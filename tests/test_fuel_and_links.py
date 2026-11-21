@@ -390,3 +390,72 @@ def test_every_removal_lets_failed_links_be_tried_again():
     before = crew._base_sig()
     crew.removals += 1
     assert crew._base_sig() != before
+
+
+def test_a_link_that_keeps_failing_waits_for_its_back_off_whatever_the_base_does():
+    # run 20261121-140755: any site built anywhere let a hopeless link try again: 2 recorded failures, 56 attempts
+    crew = _link_crew(GridWorld())
+    site = Site("labs", {}, (0, 0))
+    crew._note_link_fail((5, 5), "logistic-science-pack", site, "no room for a pole")
+    crew.removals += 1
+    assert crew._may_retry((5, 5))                      # first failure: a changed base may have unblocked it
+    crew._note_link_fail((5, 5), "logistic-science-pack", site, "no room for a pole")
+    crew.removals += 1
+    assert not crew._may_retry((5, 5))                  # second: only the back-off lets it try again
+    crew._minute = lambda: 30.0 + 30.0
+    assert crew._may_retry((5, 5))
+
+
+def test_a_link_rolled_back_without_a_tile_to_avoid_rests_its_start():
+    # a failure that names no refused tile would be planned the same way again: count it, then rest the start
+    w = GridWorld(used={(0, 0)})
+    crew = _link_crew(w)
+    notes = []
+    crew.foreman = SimpleNamespace(note=notes.append)
+    site = Site("factory", {"item": "x"}, (12, 0))
+    crew.base.add(site)
+    port = {"item": "iron-plate", "end": [10, 0], "approach": [9, 0], "fed": None}
+    plan = crew._plan_link(port, [(0.5, 0.5, None)], [], 30, False)
+
+    def no_power(t, avoid=frozenset(), plan=None):
+        raise BuildError("the pole would not go down")     # after the belt is laid, no tile to blame
+    crew._power_tile = no_power
+    for _ in range(crew.ROLLBACK_LIMIT):
+        with pytest.raises(BuildError):
+            crew._build_link(plan, port, site, "item", None)
+    assert sorted(w.picked) == sorted(w.placed)                         # each try left nothing behind
+    assert plan["ins"] in crew._resting_starts() and any("build loop stopped" in n for n in notes)
+    again = crew._plan_link(port, [(0.5, 0.5, None)], [], 30, False)
+    assert again is None or again["ins"] != plan["ins"]                 # never the same start again soon
+    crew._minute = lambda: 30.0 + crew.ROLLBACK_REST_MIN
+    assert plan["ins"] not in crew._resting_starts()                    # it rests, it is not banned
+
+
+class PoleWorld(GridWorld):
+    """A grid world that knows which tiles it has seen, for pole routing."""
+    def __init__(self, used=()):
+        super().__init__(used)
+        self.seen = {(x, y) for x in range(-40, 41) for y in range(-40, 41)}
+        self.keepout, self.entities = set(), {}
+
+    def blocked(self, t):
+        return t in self.used
+
+
+def test_an_inserter_boxed_in_on_every_side_still_gets_a_pole_two_tiles_away():
+    # run 20261121-140755: only the 8 tiles touching the inserter were tried; all were taken
+    ring = {(dx, dy) for dx in (-1, 0, 1) for dy in (-1, 0, 1)}
+    w = PoleWorld(used=ring)
+    crew = _link_crew(w)
+    del crew._pole_plan                                                 # the real one, not the stub
+    crew.existing_poles = lambda: {(20, 0)}
+    crew.base.powered_poles = lambda: [(20, 0)]
+    plan = crew._pole_plan((0, 0))
+    kind, spot = plan[0]
+    assert kind == "small-electric-pole" and max(abs(spot[0]), abs(spot[1])) == 2 and spot not in ring
+    w.used |= {(x, y) for x in range(-2, 3) for y in range(-2, 3)}     # nothing within a small pole's reach
+    with pytest.raises(BuildError):
+        crew._pole_plan((0, 0))
+    crew.kn.unlocked.add("medium-electric-pole")                        # a medium pole reaches 3 tiles
+    kind, spot = crew._pole_plan((0, 0))[0]
+    assert kind == "medium-electric-pole" and max(abs(spot[0]), abs(spot[1])) == 3
