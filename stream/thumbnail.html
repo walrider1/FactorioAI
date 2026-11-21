@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Stream Thumbnail</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@700;800&family=JetBrains+Mono:wght@500;700&display=swap">
+<style>
+/* YouTube thumbnail, 1280x720. Two views of a factory: on the left, the text map the AI actually reads (a real floor
+   plan from one of its runs, factory0.txt); on the right, the game. Same palette and plates as the stream overlay.
+   Rendered by stream/thumbnail.py. URL options: ?bg=<image>  ?left= ?right= (labels)  ?live=0 */
+:root { --acc: #ff9a1f; --acc-ink: #1f1306; --ink: #f4efe6; --muted: #a8a197; --dim: #4a4540; --bad: #ff5340;
+  --plate: rgba(20, 19, 17, .95); --line: #3d3934;
+  --f-d: "Barlow Condensed", "Arial Narrow", sans-serif; --f-m: "JetBrains Mono", Consolas, monospace; }
+* { box-sizing: border-box; }
+html, body { margin: 0; width: 1280px; height: 720px; overflow: hidden; background: #12110f; }
+#t { position: relative; width: 1280px; height: 720px; overflow: hidden; color: var(--ink); }
+#map { position: absolute; left: 0; top: 0; width: 556px; height: 720px; background: #12110f; overflow: hidden; }
+pre { margin: 0; position: absolute; left: 22px; top: 6px; font: 500 20.5px/18.9px var(--f-m); letter-spacing: -.02em; }
+pre i { font-style: normal; } pre .b { color: var(--acc); font-weight: 700; } pre .m { color: var(--ink); font-weight: 700; }
+pre .o { color: #5c4f40; } pre .t { color: #3f4a36; } pre .w { color: #38485a; } pre .d { color: #2b2825; }
+#game { position: absolute; left: 556px; top: 0; right: 0; bottom: 0; overflow: hidden; }
+#game img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; object-position: 18% 50%; filter: saturate(1.1) contrast(1.06); }
+#seam { position: absolute; left: 553px; top: 0; bottom: 0; width: 6px; background: var(--acc); }
+.lab { position: absolute; bottom: 40px; padding: 14px 22px 12px; background: var(--plate); box-shadow: inset 0 0 0 2px var(--line);
+  clip-path: polygon(14px 0, 100% 0, 100% calc(100% - 14px), calc(100% - 14px) 100%, 0 100%, 0 14px); }
+.lab small { display: block; font: 700 17px/1 var(--f-m); letter-spacing: .16em; color: var(--muted); margin-bottom: 8px; }
+.lab b { display: block; font: 800 84px/.86 var(--f-d); text-transform: uppercase; letter-spacing: .005em; }
+#l { left: 30px; } #r { right: 30px; } #r b { color: var(--acc); }
+.live { position: absolute; right: 30px; top: 30px; display: inline-flex; align-items: center; gap: 10px; padding: 9px 14px 8px;
+  font: 700 24px/1 var(--f-m); letter-spacing: .14em; color: #fff; background: var(--bad); }
+.live::before { content: ""; width: 12px; height: 12px; border-radius: 50%; background: #fff; }
+</style>
+</head>
+<body>
+<div id="t">
+  <div id="map"><pre><i class="t">TT</i><i class="d">................</i><i class="o">ccccccccccccccccccccc</i><i class="d">.......</i>
+<i class="t">TT</i><i class="d">................</i><i class="o">ccccccccccccccccccccc</i><i class="d">.......</i>
+<i class="t">TT</i><i class="d">................</i><i class="o">ccccccccccccccccccccc</i><i class="d">.......</i>
+<i class="d">...................</i><i class="o">ccccccc</i><i class="w">##</i><i class="o">cccccccccc</i><i class="d">........</i>
+<i class="d">...................</i><i class="o">ccccccc</i><i class="w">##</i><i class="o">cccccccccc</i><i class="d">........</i>
+<i class="d">.....................</i><i class="o">ccccc</i><i class="w">###</i><i class="o">ccccccc</i><i class="d">..........</i>
+<i class="t">T</i><i class="d">........................</i><i class="o">c</i><i class="w">###</i><i class="m">DDD</i><i class="o">cc</i><i class="d">............</i>
+<i class="t">T</i><i class="d">.........................</i><i class="w">###</i><i class="m">DDD</i><i class="o">cc</i><i class="d">............</i>
+<i class="d">....................</i><i class="t">TTTT</i><i class="d">..</i><i class="w">###</i><i class="m">DDD</i><i class="o">c</i><i class="d">.............</i>
+<i class="d">....................</i><i class="t">TTTT</i><i class="d">..</i><i class="w">##</i><i class="m">P</i><i class="d">.</i><i class="o">ff</i><i class="d">..............</i>
+<i class="d">......</i><i class="o">ssssss</i><i class="d">........</i><i class="t">TTTT</i><i class="d">..</i><i class="w">##</i><i class="d">..</i><i class="o">ff</i><i class="d">..............</i>
+<i class="d">....</i><i class="o">sssssssss</i><i class="d">.....</i><i class="b">&lt;&lt;&lt;</i><i class="d">.....</i><i class="w">#</i><i class="d">.</i><i class="m">P</i><i class="d">.</i><i class="m">I</i><i class="d">...............</i>
+<i class="o">sssssssssssssss</i><i class="d">...</i><i class="m">I</i><i class="d">.</i><i class="b">^</i><i class="m">IWWW</i><i class="d">.</i><i class="w">#</i><i class="d">...</i><i class="b">v</i><i class="d">...............</i>
+<i class="o">ssssssssssssss</i><i class="m">P</i><i class="o">s</i><i class="m">EEEP</i><i class="d">..</i><i class="m">WWW</i><i class="d">.</i><i class="w">#</i><i class="d">...</i><i class="b">v</i><i class="d">...............</i>
+<i class="o">ssssssss</i><i class="b">v&lt;&lt;&lt;&lt;&lt;&lt;</i><i class="m">IEEE</i><i class="d">.</i><i class="b">^</i><i class="m">IWWW</i><i class="d">.</i><i class="w">#</i><i class="d">...</i><i class="b">v</i><i class="d">...............</i>
+<i class="o">ssssssss</i><i class="b">v&gt;&gt;&gt;&gt;&gt;&gt;</i><i class="m">IEEE</i><i class="d">.</i><i class="b">^&lt;u</i><i class="d">...</i><i class="w">#</i><i class="b">U&lt;&lt;&lt;</i><i class="d">...............</i>
+<i class="o">ssssssss</i><i class="b">v^v&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;u</i><i class="m">P</i><i class="d">..</i><i class="w">#</i><i class="b">U&lt;&lt;&lt;&lt;&lt;&lt;</i><i class="d">............</i>
+<i class="o">ssssssss</i><i class="b">vuv</i><i class="o">ss</i><i class="b">v&lt;&lt;&lt;&lt;</i><i class="m">P</i><i class="o">i</i><i class="d">......</i><i class="w">#</i><i class="d">......</i><i class="b">^</i><i class="d">............</i>
+<i class="o">ssssssss</i><i class="m">IPI</i><i class="o">ss</i><i class="b">v</i><i class="m">FF</i><i class="d">.</i><i class="b">^</i><i class="o">i</i><i class="m">DDDFF</i><i class="d">..</i><i class="w">######</i><i class="d">.</i><i class="b">^</i><i class="d">............</i>
+<i class="o">ssssssss</i><i class="m">NNN</i><i class="o">ss</i><i class="b">v</i><i class="m">FFI</i><i class="b">^</i><i class="o">i</i><i class="m">DDDFF</i><i class="w">########</i><i class="d">.</i><i class="b">^</i><i class="d">............</i>
+<i class="o">ssssss</i><i class="m">P</i><i class="o">s</i><i class="m">NNN</i><i class="o">ss</i><i class="b">v</i><i class="m">DDD</i><i class="b">^</i><i class="o">i</i><i class="m">DDDIP</i><i class="d">.</i><i class="w">#####</i><i class="d">.</i><i class="w">#</i><i class="d">.</i><i class="b">^</i><i class="d">............</i>
+<i class="d">.</i><i class="o">sssssss</i><i class="m">NNN</i><i class="o">si</i><i class="b">v</i><i class="m">DDD</i><i class="b">^</i><i class="o">i</i><i class="b">&gt;&gt;&gt;v</i><i class="d">..</i><i class="w">#####</i><i class="d">.</i><i class="w">#</i><i class="d">.</i><i class="b">^</i><i class="d">............</i>
+<i class="m">CP</i><i class="o">ssssss</i><i class="m">I</i><i class="b">U</i><i class="m">I</i><i class="o">ii</i><i class="b">v</i><i class="m">DDD</i><i class="b">^u^U&lt;&lt;</i><i class="o">i</i><i class="d">.</i><i class="w">#####</i><i class="d">.</i><i class="w">#</i><i class="d">.</i><i class="b">^</i><i class="d">............</i>
+<i class="m">I</i><i class="d">..</i><i class="o">s</i><i class="b">v&lt;&lt;&lt;&lt;^v&lt;</i><i class="m">P</i><i class="b">&gt;&gt;&gt;&gt;v</i><i class="o">i</i><i class="b">^</i><i class="m">DDDFF</i><i class="w">#######</i><i class="d">.</i><i class="b">^</i><i class="d">............</i>
+<i class="m">LLLI</i><i class="b">v</i><i class="o">iiii</i><i class="b">^&lt;uvu</i><i class="m">I</i><i class="b">U&lt;&lt;</i><i class="o">i</i><i class="b">^</i><i class="m">DDDFF</i><i class="w">#####</i><i class="d">...</i><i class="b">^</i><i class="d">............</i>
+<i class="m">LLL</i><i class="o">i</i><i class="b">v</i><i class="o">iii</i><i class="m">BBBI</i><i class="b">v</i><i class="o">i</i><i class="m">GGG</i><i class="o">ii</i><i class="b">^</i><i class="m">DDDI</i><i class="d">.</i><i class="w">######</i><i class="d">..</i><i class="b">^</i><i class="d">............</i>
+<i class="m">LLL</i><i class="o">i</i><i class="b">v</i><i class="o">iii</i><i class="m">BBB</i><i class="b">Uv</i><i class="m">PGGG</i><i class="o">ii</i><i class="b">^&lt;&lt;&lt;&lt;&lt;</i><i class="w">#####</i><i class="d">...</i><i class="b">^</i><i class="d">.</i><i class="m">P</i><i class="d">..........</i>
+<i class="m">PI</i><i class="o">ii</i><i class="b">v</i><i class="o">iii</i><i class="m">BBB</i><i class="b">^v</i><i class="o">i</i><i class="m">GGG</i><i class="o">iiiii</i><i class="m">P</i><i class="d">.</i><i class="m">I</i><i class="w">#####</i><i class="d">...</i><i class="b">^</i><i class="d">.</i><i class="w">#</i><i class="d">......</i><i class="m">P</i><i class="d">...</i>
+<i class="o">i</i><i class="b">&lt;&lt;uvU&lt;&lt;</i><i class="m">IPI</i><i class="b">^&lt;</i><i class="o">i</i><i class="m">I</i><i class="o">iiiii</i><i class="m">DDDFF</i><i class="w">#####</i><i class="d">...</i><i class="b">^</i><i class="d">........</i><i class="w">#</i><i class="d">...</i>
+<i class="o">ii</i><i class="m">I</i><i class="o">i</i><i class="b">v</i><i class="m">PC</i><i class="b">^&lt;</i><i class="o">i</i><i class="b">v&lt;&lt;&lt;&lt;</i><i class="o">iiiii</i><i class="m">DDDFF</i><i class="w">#####</i><i class="d">...</i><i class="b">^</i><i class="d">............</i>
+<i class="m">LLLI</i><i class="b">v</i><i class="o">i</i><i class="m">II</i><i class="o">ii</i><i class="b">v</i><i class="o">iiiiiiiii</i><i class="m">DDD</i><i class="o">i</i><i class="d">.</i><i class="w">#####</i><i class="d">...</i><i class="b">^</i><i class="d">............</i>
+<i class="m">LLL</i><i class="o">i</i><i class="b">v</i><i class="m">ILLL</i><i class="o">i</i><i class="b">v</i><i class="o">iiiiiiiiiiiiii</i><i class="w">#####</i><i class="d">...</i><i class="b">^</i><i class="d">............</i>
+<i class="m">LLL</i><i class="o">iii</i><i class="m">LLL</i><i class="o">i</i><i class="b">v</i><i class="o">iiiiiiiiiiiiii</i><i class="w">#####</i><i class="d">...</i><i class="b">^</i><i class="d">............</i>
+<i class="m">I</i><i class="t">T</i><i class="o">iiii</i><i class="m">LLL</i><i class="o">i</i><i class="b">v</i><i class="o">iiiiiiiiiiiiii</i><i class="w">#####</i><i class="d">...</i><i class="b">^</i><i class="d">............</i>
+<i class="m">CP</i><i class="o">iiiiiiii</i><i class="b">v</i><i class="o">iiiiiiiiiiiiii</i><i class="w">#####</i><i class="d">...</i><i class="b">^</i><i class="d">............</i>
+<i class="d">...</i><i class="o">iiiiiii</i><i class="b">v</i><i class="o">iiiiiiiiiiiiii</i><i class="w">#####</i><i class="d">...</i><i class="b">^</i><i class="d">............</i>
+<i class="d">...</i><i class="o">iiiiiii</i><i class="b">v</i><i class="o">iiiiiiiiiiiii</i><i class="w">#######</i><i class="d">..</i><i class="b">^</i><i class="d">............</i>
+<i class="d">...</i><i class="o">iiiiiii</i><i class="b">&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;^</i><i class="d">............</i></pre></div>
+  <div id="game"><img id="bg" src="thumb-bg.jpg" alt=""></div>
+  <div id="seam"></div>
+  <div class="lab" id="l"><small>THE AI READS</small><b id="lt">This</b></div>
+  <div class="lab" id="r"><small>AND BUILDS</small><b id="rt">This</b></div>
+  <span class="live" id="live">LIVE</span>
+</div>
+<script>
+const Q = new URLSearchParams(location.search);
+if (Q.get("bg")) document.getElementById("bg").src = Q.get("bg");
+if (Q.get("left")) document.getElementById("lt").textContent = Q.get("left");
+if (Q.get("right")) document.getElementById("rt").textContent = Q.get("right");
+if (Q.get("live") === "0") document.getElementById("live").remove();
+</script>
+</body>
+</html>

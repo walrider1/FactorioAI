@@ -1,0 +1,83 @@
+id: automation-realtime
+title: "Automation · Science (real time)"
+summary: >
+  Real time: the game runs at normal speed from your first call and never waits for you to think.
+  Actions apply the moment they arrive, walking takes game time, and you may send at most 5 game
+  actions a second (observes do not count). The build time is 20 real minutes. Build a factory that
+  makes science packs on its own. You start with a kit of buildings and coal. You may hand-mine (stone
+  and coal are the useful ones) and hand-craft more buildings from plates you take out of your own
+  furnaces or chests, but you may only insert fuel by hand, so plates, gears and everything else
+  must be moved by the factory. Only the hands-off window from game minute 20 to 30 is scored (ending
+  early just skips ahead), so whatever you make by hand never scores. Tier 1: red science at 3 per
+  minute. Tier 2: green science at 10 per minute. Tier 3: green science at 30 per minute. In every
+  tier the factory must make its own intermediates during the window instead of using up a stockpile.
+verbs: [observe, move, place, place_line, insert, extract, rotate, pickup, set_recipe, craft, mine]
+entities: [burner-mining-drill, electric-mining-drill, stone-furnace, iron-chest, wooden-chest,
+           burner-inserter, inserter, long-handed-inserter, transport-belt, underground-belt, splitter,
+           small-electric-pole, offshore-pump, boiler, steam-engine, pipe, assembling-machine-1]
+recipes: [iron-gear-wheel, copper-cable, electronic-circuit, inserter, transport-belt, underground-belt,
+          splitter, pipe, small-electric-pole, iron-chest, wooden-chest, stone-furnace, burner-mining-drill,
+          burner-inserter, assembling-machine-1, electric-mining-drill]
+assembler_recipes: [iron-gear-wheel, copper-cable, electronic-circuit, inserter, transport-belt,
+                    automation-science-pack, logistic-science-pack]
+insert_items: [coal, wood]
+clear_obstacles: true
+clock: realtime          # the world runs at normal speed; it never waits for the AI
+budgets:
+  actions: null           # no action count: the clock and the rate limit are the limits
+  min_action_gap_ticks: 12   # at most one game action every 12 ticks (5 a second); observes are free of it
+  observes: 3000
+  ticks: 72000            # 20 minutes of game time (= 20 real minutes) to build
+  idle_tail_ticks: 36000  # the 10-minute hands-off window that is scored
+  wall_clock_seconds: 7200
+  idle_timeout_seconds: 300
+start_inventory:
+  burner-mining-drill: 10
+  electric-mining-drill: 20
+  stone-furnace: 30
+  assembling-machine-1: 20
+  inserter: 80
+  long-handed-inserter: 30
+  burner-inserter: 20
+  transport-belt: 600
+  underground-belt: 20
+  splitter: 10
+  small-electric-pole: 120
+  offshore-pump: 2
+  boiler: 4
+  steam-engine: 8
+  pipe: 50
+  iron-chest: 20
+  coal: 2000
+score:
+  type: automation
+  item: logistic-science-pack
+  balance: 0.8            # during the window, each chain item: made >= 0.8 x used
+  window_at_build_end: true   # the window always starts at game minute 20, however early the run ends
+  tiers:
+    - name: "Tier 1 · automated red science"
+      item: automation-science-pack
+      per_minute: 3
+      chain: [iron-plate, copper-plate, iron-gear-wheel]
+    - name: "Tier 2 · green science at 10 per minute"
+      item: logistic-science-pack
+      per_minute: 10
+      chain: [iron-plate, copper-plate, iron-gear-wheel, copper-cable, electronic-circuit,
+              inserter, transport-belt]
+    - name: "Tier 3 · green science at 30 per minute"
+      item: logistic-science-pack
+      per_minute: 30
+      chain: [iron-plate, copper-plate, iron-gear-wheel, copper-cable, electronic-circuit,
+              inserter, transport-belt]
+  points:                 # per item the factory makes during the window
+    iron-plate: 1
+    copper-plate: 1
+    copper-cable: 1
+    iron-gear-wheel: 3
+    transport-belt: 4
+    electronic-circuit: 8
+    inserter: 15
+    automation-science-pack: 10
+    logistic-science-pack: 40
+backends: [factorio]
+practice_seeds: [1008, 1012, 1048, 1078, 1124]   # vetted on 2.1.24: iron, copper, coal within 42 tiles, water within 52

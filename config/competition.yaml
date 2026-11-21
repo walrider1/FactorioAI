@@ -1,0 +1,50 @@
+# Factorio AI Arena: organizer configuration.
+# Secrets (team tokens, hidden eval seeds) live in ./secrets, never in this file.
+
+name: Factorio AI Arena (freeplay)
+
+# "sim" = built-in Python simulator (levels 1-2, no Docker needed, used for tests)
+# "factorio" = real headless Factorio 2.1.24, one fresh Docker container per run
+backend: factorio
+
+gateway:
+  host: 127.0.0.1          # expose publicly through the HTTPS tunnel, never bind 0.0.0.0
+  port: 8720               # the competition server uses 8710; both can run side by side
+  rate_limit_rps: 40       # realtime bots poll stats and observes between actions
+  rate_limit_burst: 80
+  max_body_bytes: 65536    # a batch of 100 ops fits
+
+factorio:
+  image: factoriotools/factorio:2.1.24
+  slots: 2                 # games that may run at the same time on this PC
+  rcon_base_port: 27200    # slot N uses 27200+N, bound to 127.0.0.1 only (competition server: 27100)
+  game_base_port: 34300    # slot N uses 34300+N/udp, for spectators (competition server: 34200)
+  container_prefix: freeplay
+  advance_speed: 60        # game.speed while ticks run; 36,000 ticks take ~10 s
+  boot_timeout_seconds: 180
+  scenario_dir: lua/scenario/arena
+  server_config_dir: docker/config
+
+practice:
+  runs_per_day: 30
+
+eval:
+  open: false              # flip to true on competition day
+  reveal_scores: false     # eval scores stay hidden until you publish the report
+
+paths:
+  runs: runs
+  secrets: secrets
+  reports: reports
+
+tasks:
+  - config/tasks/level1-iron.yaml
+  - config/tasks/level2-bootstrap.yaml
+  - config/tasks/level3-delivery.yaml
+  - config/tasks/level2-bootstrap-timed.yaml
+  - config/tasks/level3-delivery-timed.yaml
+  - config/tasks/automation.yaml
+  - config/tasks/automation-realtime.yaml   # the same level, but the game runs in real time
+  - config/tasks/freeplay-green.yaml        # from nothing to automated green science, real tech tree
+  - config/tasks/freeplay-open.yaml         # from nothing, as far as you can get: milestones up to a rocket
+  - config/tasks/sandbox-workshop.yaml      # developer sandbox: everything researched, a kit to check modules

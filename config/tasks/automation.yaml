@@ -1,0 +1,69 @@
+id: automation
+title: "Automation · Science"
+summary: >
+  Build a factory that makes science packs on its own. You start with a kit of buildings and coal:
+  drills, furnaces, assembling machines, inserters, belts, poles, an offshore pump, boilers and
+  steam engines. You cannot hand-craft, and you may only insert fuel by hand, so plates, gears and
+  everything else must be moved by the factory. The factory is scored over a hands-off window from
+  game minute 20 to 30 (ending early just skips ahead), so it has to keep itself fuelled until then. Tier 1: red science at 3 or more per minute.
+  Tier 2: green science at 30 or more per minute. In both, the factory must make its own
+  intermediates during the window instead of using up a stockpile.
+verbs: [observe, move, place, place_line, insert, extract, advance, rotate, pickup, set_recipe]
+entities: [burner-mining-drill, electric-mining-drill, stone-furnace, iron-chest, wooden-chest,
+           burner-inserter, inserter, long-handed-inserter, transport-belt, small-electric-pole,
+           offshore-pump, boiler, steam-engine, pipe, assembling-machine-1]
+recipes: []
+assembler_recipes: [iron-gear-wheel, copper-cable, electronic-circuit, inserter, transport-belt,
+                    automation-science-pack, logistic-science-pack]
+insert_items: [coal, wood]
+clear_obstacles: true
+budgets:
+  actions: 800
+  observes: 800
+  ticks: 72000            # 20 minutes of game time to build
+  idle_tail_ticks: 36000  # the 10-minute hands-off window that is scored
+  wall_clock_seconds: 7200
+  idle_timeout_seconds: 300
+start_inventory:
+  burner-mining-drill: 10
+  electric-mining-drill: 20
+  stone-furnace: 30
+  assembling-machine-1: 20
+  inserter: 80
+  long-handed-inserter: 30
+  burner-inserter: 20
+  transport-belt: 400
+  small-electric-pole: 80
+  offshore-pump: 2
+  boiler: 4
+  steam-engine: 8
+  pipe: 50
+  iron-chest: 10
+  coal: 1000
+score:
+  type: automation
+  item: logistic-science-pack
+  balance: 0.8            # during the window, each chain item: made >= 0.8 x used
+  window_at_build_end: true   # the window always starts at game minute 20, however early the run ends
+  tiers:
+    - name: "Tier 1 · automated red science"
+      item: automation-science-pack
+      per_minute: 3
+      chain: [iron-plate, copper-plate, iron-gear-wheel]
+    - name: "Tier 2 · green science at 30 per minute"
+      item: logistic-science-pack
+      per_minute: 30
+      chain: [iron-plate, copper-plate, iron-gear-wheel, copper-cable, electronic-circuit,
+              inserter, transport-belt]
+  points:                 # per item the factory makes during the window
+    iron-plate: 1
+    copper-plate: 1
+    copper-cable: 1
+    iron-gear-wheel: 3
+    transport-belt: 4
+    electronic-circuit: 8
+    inserter: 15
+    automation-science-pack: 10
+    logistic-science-pack: 40
+backends: [factorio]
+practice_seeds: [1008, 1012, 1048, 1078, 1124]   # vetted on 2.1.24: iron, copper, coal within 42 tiles, water within 52

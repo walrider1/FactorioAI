@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Arena Screens</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700;800&family=Barlow:wght@500;600&family=JetBrains+Mono:wght@500;700&display=swap">
+<style>
+/* Full-screen stream cards for OBS (browser source, 1920x1080, opaque). Same look as overlay.html.
+   http://127.0.0.1:8730/screen?mode=upgrading
+   ?mode=   upgrading · bugs · starting · between · brb · ending   (default: upgrading)
+   ?title=  ?sub=   replace the headline / subline          ?msg=  text for the bottom bar
+   ?t=10    countdown in minutes (starting, between, brb)  ?at=19:30  countdown to a local time instead
+   ?log=0   hide the work log                              ?name=  brand text (default: Lights Out) */
+:root {
+  --plate: rgba(20, 19, 17, .93); --plate-hi: rgba(32, 30, 27, .96); --well: #2a2725;
+  --line: #3d3934; --line-hi: #57514a;
+  --ink: #f4efe6; --muted: #a8a197; --dim: #6f6960;
+  --acc: #ff9a1f; --acc-lo: #c76800; --acc-ink: #1f1306; --acc-bg: rgba(255, 154, 31, .13);
+  --bad: #ff5340; --ok: #7fd36b;
+  --cut: 18px;
+  --f-d: "Barlow Condensed", "Arial Narrow", sans-serif; --f-b: "Barlow", system-ui, sans-serif;
+  --f-m: "JetBrains Mono", ui-monospace, Consolas, monospace;
+  --hazard: repeating-linear-gradient(-45deg, var(--acc) 0 14px, var(--acc-ink) 14px 28px);
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; overflow: hidden; background: #191813; color: var(--ink); font-family: var(--f-b); }
+#stage { position: absolute; left: 0; top: 0; width: 1920px; height: 1080px; transform-origin: 0 0; overflow: hidden;
+  background: radial-gradient(circle at 50% 42%, #3a382d, #191813 75%); }
+
+/* floor: a faint tile grid and belts that run across it */
+#grid { position: absolute; inset: 0; opacity: .5;
+  background-image: linear-gradient(rgba(255,255,255,.035) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.035) 1px, transparent 1px);
+  background-size: 48px 48px; }
+.belt { position: absolute; left: -60px; right: -60px; height: 24px; opacity: .22;
+  background: repeating-linear-gradient(90deg, #8a7d63 0 10px, #4b4335 10px 24px); animation: run 1.4s linear infinite; }
+.belt.b2 { animation-duration: 2.2s; animation-direction: reverse; opacity: .14; }
+@keyframes run { to { transform: translateX(48px); } }
+
+.plate { position: absolute; background: var(--plate); box-shadow: inset 0 0 0 1px var(--line), inset 0 1px 0 1px rgba(255,255,255,.03);
+  clip-path: polygon(var(--cut) 0, 100% 0, 100% calc(100% - var(--cut)), calc(100% - var(--cut)) 100%, 0 100%, 0 var(--cut)); }
+.hd { display: flex; justify-content: space-between; align-items: center; gap: 12px; font: 700 18px/1 var(--f-m); letter-spacing: .14em;
+  text-transform: uppercase; color: var(--dim); white-space: nowrap; }
+.hd .t { display: inline-flex; align-items: center; gap: 12px; color: var(--muted); }
+.hd .t::before { content: ""; width: 12px; height: 12px; background: var(--acc); }
+
+/* main card */
+#card { left: 160px; top: 200px; width: 1600px; height: 560px; padding: 56px 64px; display: grid; grid-template-columns: 300px 1fr; gap: 64px; }
+#card.nolog { grid-template-columns: 300px 1fr; }
+.gears { position: relative; width: 300px; height: 300px; align-self: center; }
+.gears svg { position: absolute; }
+.g1 { left: 0; top: 30px; width: 220px; height: 220px; animation: spin 6s linear infinite; }
+.g2 { left: 168px; top: 0; width: 132px; height: 132px; animation: spin 3.6s linear infinite reverse; }
+.g3 { left: 176px; top: 176px; width: 110px; height: 110px; animation: spin 3s linear infinite reverse; }
+@keyframes spin { to { transform: rotate(360deg); } }
+body.m-bugs .g1 { animation: spin 6s linear infinite, judder 2.8s steps(1) infinite; }
+@keyframes judder { 0%, 40% { translate: 0 0; } 41% { translate: 3px -2px; } 43% { translate: -3px 2px; } 45%, 100% { translate: 0 0; } }
+
+.copy { display: flex; flex-direction: column; justify-content: center; min-width: 0; }
+.tag { align-self: flex-start; display: inline-flex; align-items: center; gap: 12px; padding: 10px 16px; margin-bottom: 22px;
+  font: 700 20px/1 var(--f-m); letter-spacing: .16em; text-transform: uppercase; color: var(--acc-ink); background: var(--acc); }
+.tag::before { content: ""; width: 10px; height: 10px; border-radius: 50%; background: var(--acc-ink); animation: blink 1.4s infinite; }
+body.m-bugs .tag { background: var(--bad); color: #fff; } body.m-bugs .tag::before { background: #fff; }
+@keyframes blink { 50% { opacity: .2; } }
+h1 { margin: 0; font: 800 148px/.9 var(--f-d); letter-spacing: .01em; text-transform: uppercase; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+h1 .dots i { font-style: normal; animation: blink 1.4s infinite; color: var(--acc); }
+h1 .dots i:nth-child(2) { animation-delay: .2s; } h1 .dots i:nth-child(3) { animation-delay: .4s; }
+.sub { margin: 22px 0 0; font: 600 36px/1.25 var(--f-b); color: var(--muted); max-width: 1100px;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.count { margin-top: 30px; display: flex; align-items: baseline; gap: 18px; }
+.count[hidden] { display: none; }
+.count b { font: 700 92px/1 var(--f-m); color: var(--ink); letter-spacing: -.02em; }
+.count span { font: 700 22px/1 var(--f-m); letter-spacing: .16em; text-transform: uppercase; color: var(--dim); }
+
+/* progress */
+#prog { left: 160px; top: 784px; width: 1600px; height: 84px; padding: 0 32px; display: grid; grid-template-columns: auto 1fr auto; gap: 28px; align-items: center; }
+#prog .lbl { font: 700 20px/1 var(--f-m); letter-spacing: .14em; text-transform: uppercase; color: var(--muted); white-space: nowrap; }
+.bar { position: relative; height: 26px; background: var(--well); overflow: hidden; }
+.bar i { position: absolute; left: 0; top: 0; bottom: 0; width: 0; background: var(--hazard); background-size: 40px 40px;
+  animation: march .9s linear infinite; transition: width .9s ease; }
+@keyframes march { to { background-position: 40px 0; } }
+#pct { font: 700 30px/1 var(--f-m); min-width: 96px; text-align: right; }
+
+/* work log */
+#log { right: 160px; top: 200px; width: 640px; height: 560px; padding: 32px 34px; display: none; }
+body.withlog #card { width: 936px; grid-template-columns: 1fr; padding: 48px 56px; }
+body.withlog .gears { display: none; }
+body.withlog h1 { font-size: 112px; }
+body.withlog #log { display: block; }
+#lines { margin-top: 26px; font: 500 22px/1.6 var(--f-m); color: var(--ink); height: 440px; overflow: hidden;
+  display: flex; flex-direction: column; justify-content: flex-end; }
+#lines div:nth-last-child(n+6) { opacity: .55; } #lines div:nth-last-child(n+11) { opacity: .3; }
+#lines div { padding-left: 7ch; text-indent: -7ch; animation: in .35s ease-out; }   /* wraps under the text, not the tag */
+#lines div b { font-weight: 700; } #lines .ok b { color: var(--ok); } #lines .warn b { color: var(--acc); } #lines .err b { color: var(--bad); }
+#lines div:last-child::after { content: "▌"; color: var(--acc); animation: blink 1s steps(1) infinite; }
+@keyframes in { from { opacity: 0; transform: translateY(10px); } }
+
+/* bottom bar */
+#foot { left: 0; right: 0; bottom: 0; height: 120px; clip-path: none; display: grid; grid-template-columns: auto 1fr auto; gap: 40px; align-items: center; padding: 0 56px; }
+#foot::before { content: ""; position: absolute; left: 0; right: 0; top: 0; height: 8px; background: var(--hazard); background-size: 40px 40px; animation: march 1.6s linear infinite; }
+.brand { display: flex; align-items: center; gap: 18px; font: 800 44px/1 var(--f-d); text-transform: uppercase; letter-spacing: .03em; white-space: nowrap; }
+.brand i { width: 22px; height: 22px; background: var(--acc); transform: rotate(45deg); }
+#msg { font: 600 30px/1.2 var(--f-b); color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: center; }
+#clock { font: 700 34px/1 var(--f-m); color: var(--ink); }
+</style>
+</head>
+<body>
+<div id="stage">
+  <div id="grid"></div>
+  <div class="belt" style="top: 120px"></div>
+  <div class="belt b2" style="top: 168px"></div>
+  <div class="belt b2" style="top: 900px"></div>
+
+  <div class="plate" id="card">
+    <div class="gears">
+      <svg class="g1" viewBox="-50 -50 100 100"><use href="#gear" fill="#ff9a1f"/></svg>
+      <svg class="g2" viewBox="-50 -50 100 100"><use href="#gear" fill="#6f6960"/></svg>
+      <svg class="g3" viewBox="-50 -50 100 100"><use href="#gear" fill="#a8a197"/></svg>
+    </div>
+    <div class="copy">
+      <span class="tag" id="tag">Offline</span>
+      <h1 id="title">Self-upgrading</h1>
+      <p class="sub" id="sub"></p>
+      <div class="count" id="count" hidden><b id="countT">00:00</b><span id="countL">until start</span></div>
+    </div>
+  </div>
+
+  <div class="plate" id="log">
+    <div class="hd"><span class="t" id="logT">Work log</span><span id="logN"></span></div>
+    <div id="lines"></div>
+  </div>
+
+  <div class="plate" id="prog">
+    <span class="lbl" id="progL">Progress</span>
+    <div class="bar"><i id="barI"></i></div>
+    <span id="pct">0%</span>
+  </div>
+
+  <div class="plate" id="foot">
+    <div class="brand"><i></i><span id="brand">Lights Out</span></div>
+    <div id="msg"></div>
+    <div id="clock">00:00</div>
+  </div>
+</div>
+
+<svg width="0" height="0" style="position:absolute">
+  <defs>
+    <!-- 10-tooth gear with a hub hole, centred on 0,0 -->
+    <path id="gear" fill-rule="evenodd" d="M-6 -48h12l2 10a38 38 0 0 1 9 3.7l8.4-5.8 8.5 8.5-5.8 8.4a38 38 0 0 1 3.7 9l10 2v12l-10 2a38 38 0 0 1-3.7 9l5.8 8.4-8.5 8.5-8.4-5.8a38 38 0 0 1-9 3.7l-2 10h-12l-2-10a38 38 0 0 1-9-3.7l-8.4 5.8-8.5-8.5 5.8-8.4a38 38 0 0 1-3.7-9l-10-2v-12l10-2a38 38 0 0 1 3.7-9l-5.8-8.4 8.5-8.5 8.4 5.8a38 38 0 0 1 9-3.7z M0 -14a14 14 0 1 0 0.01 0z"/>
+  </defs>
+</svg>
+
+<script>
+const Q = new URLSearchParams(location.search);
+const $ = id => document.getElementById(id);
+function fit() { const s = Math.min(innerWidth / 1920, innerHeight / 1080); $("stage").style.transform = `scale(${s})`; }
+addEventListener("resize", fit); fit();
+
+// ok / warn / err colour the first word; lines loop, so the log never runs out on a long break
+const MODES = {
+  upgrading: {
+    tag: "Self-upgrade in progress", title: "Self-upgrading", dots: true,
+    sub: "The AI is reading its last run and rewriting its own playbook. Back in a moment.",
+    prog: "Upgrade", logT: "Upgrade log", log: true,
+    lines: [
+      ["", "loading last run's action log"], ["ok", "parsed 1,284 actions, 312 observes"],
+      ["", "scoring every build decision against the outcome"], ["warn", "found furnaces starved of coal at 0:18:40"],
+      ["warn", "found 3 belts routed into dead ends"], ["", "rewriting skill: smelter_column"],
+      ["", "rewriting skill: refuel_patrol"], ["ok", "skill library updated (2 changed, 0 removed)"],
+      ["", "re-planning factory layout with new constraints"], ["", "annealing placement, 4,000 steps"],
+      ["ok", "layout passes design-rule check"], ["", "self-test 1/3: iron chain"], ["ok", "self-test 1/3 passed"],
+      ["", "self-test 2/3: copper + circuits"], ["ok", "self-test 2/3 passed"], ["", "self-test 3/3: science line"],
+      ["ok", "self-test 3/3 passed"], ["ok", "new brain version ready"],
+    ],
+  },
+  bugs: {
+    tag: "Maintenance", title: "Fixing bugs", dots: true,
+    sub: "Something broke on our side. The crew is patching it and the next run starts right after.",
+    prog: "Patch", logT: "Patch log", log: true,
+    lines: [
+      ["err", "run voided, reason logged"], ["", "pulling the server log"], ["", "reproducing on a test map"],
+      ["warn", "reproduced: inserter grabs from the wrong chest"], ["", "writing the fix"], ["", "running the test suite"],
+      ["ok", "112 tests passed"], ["", "replaying the last run against the fix"], ["ok", "replay matches step for step"],
+      ["", "restarting the game server"], ["ok", "server healthy"], ["ok", "fix deployed"],
+    ],
+  },
+  starting: {
+    tag: "Live soon", title: "Starting soon", sub: "One AI, no humans: it plays Factorio alone, live, until it launches a rocket.",
+    prog: "Warming up", count: "until start", log: false,
+  },
+  between: {
+    tag: "Intermission", title: "Next run loading", dots: true,
+    sub: "Fresh map, fresh game. The next AI is about to take control.",
+    prog: "Booting world", count: "until the next run", log: false,
+  },
+  brb: { tag: "Paused", title: "Be right back", sub: "Short break. The factory keeps running without us.", prog: "Break", count: "left", log: false },
+  ending: { tag: "Offline", title: "Thanks for watching", sub: "See you at the next run.", prog: "Shutting down", log: false, done: true },
+};
+const mode = MODES[Q.get("mode")] ? Q.get("mode") : "upgrading";
+const M = MODES[mode];
+document.body.classList.add("m-" + mode);
+
+const text = (k, d) => Q.has(k) ? Q.get(k) : d;
+$("tag").textContent = M.tag;
+$("title").textContent = text("title", M.title);
+if (M.dots && !Q.has("title")) $("title").insertAdjacentHTML("beforeend", '<span class="dots"><i>.</i><i>.</i><i>.</i></span>');
+$("sub").textContent = text("sub", M.sub);
+$("brand").textContent = text("name", "Lights Out");
+$("msg").textContent = text("msg", "");
+$("progL").textContent = M.prog;
+$("logT").textContent = M.logT || "Log";
+document.title = (Q.get("title") || M.title) + " · Lights Out";
+
+// countdown: ?t=minutes from load, or ?at=HH:MM local time today (tomorrow if already past)
+let target = null;
+if (Q.has("at")) {
+  const [h, m] = Q.get("at").split(":").map(Number);
+  target = new Date(); target.setHours(h || 0, m || 0, 0, 0);
+  if (target < Date.now()) target.setDate(target.getDate() + 1);
+} else if (Q.has("t")) target = new Date(Date.now() + parseFloat(Q.get("t")) * 60000);
+const started = Date.now();
+if (target && M.count) { $("count").hidden = false; $("countL").textContent = M.count; }
+
+const showLog = M.log && Q.get("log") !== "0";
+if (showLog) document.body.classList.add("withlog");
+
+const pad = n => String(n).padStart(2, "0");
+function tick() {
+  const now = new Date();
+  $("clock").textContent = `${pad(now.getHours())}:${pad(now.getMinutes())}`;
+  let p;
+  if (target) {
+    const left = Math.max(0, target - now), total = Math.max(1, target - started);
+    const s = Math.ceil(left / 1000);
+    $("countT").textContent = s >= 3600 ? `${Math.floor(s / 3600)}:${pad(Math.floor(s / 60) % 60)}:${pad(s % 60)}` : `${pad(Math.floor(s / 60))}:${pad(s % 60)}`;
+    p = 100 * (1 - left / total);
+    if (left === 0) $("countL").textContent = "any second now";
+  } else if (M.done) p = 100;
+  else if (showLog) p = 100 * Math.min(1, (li % M.lines.length + 1) / M.lines.length);
+  else p = 92 * (1 - Math.exp(-(now - started) / 240000));   // creeps toward 92% over a few minutes, never "done"
+  $("barI").style.width = p.toFixed(1) + "%";
+  $("pct").textContent = Math.floor(p) + "%";
+}
+
+let li = 0;
+function addLine(once) {
+  const [cls, msg] = M.lines[li % M.lines.length];
+  const el = document.createElement("div");
+  if (cls) el.className = cls;
+  const word = { ok: "ok", warn: "warn", err: "err" }[cls] || "..";
+  el.innerHTML = `<b>[${word.padEnd(4)}]</b> `;
+  el.append(msg);
+  const box = $("lines");
+  box.append(el);
+  while (box.children.length > 16) box.firstChild.remove();
+  $("logN").textContent = `step ${li % M.lines.length + 1}/${M.lines.length}`;
+  li++;
+  if (once === true) return;
+  const restart = li % M.lines.length === 0;
+  setTimeout(addLine, restart ? 6000 : 1800 + Math.random() * 2400);
+  if (restart) setTimeout(() => { box.innerHTML = ""; }, 5800);
+}
+if (showLog) { addLine(true); addLine(true); addLine(); }   // start with a few lines, not an empty box
+tick(); setInterval(tick, 1000);
+
+// long headlines (?title= or "Thanks for watching") shrink to fit on one line instead of being cut off
+function fitTitle() {
+  const h = $("title"); h.style.fontSize = "";
+  let px = parseFloat(getComputedStyle(h).fontSize);
+  while (h.scrollWidth > h.clientWidth + 1 && px > 64) { px -= 4; h.style.fontSize = px + "px"; }
+}
+fitTitle(); if (document.fonts) document.fonts.ready.then(fitTitle);
+
+// the show's counters from the monitor (/api/stream): "Self-upgrade #8", and the bottom bar when ?msg= is not set
+async function counters() {
+  try {
+    const c = await (await fetch("/api/stream", { cache: "no-store" })).json();
+    if (mode === "upgrading" && !Q.has("title")) $("tag").textContent = `Self-upgrade #${Math.max(1, c.upgrades)} in progress`;
+    if (!Q.has("msg") && c.run_no) $("msg").textContent = `Run #${c.run_no} · ${c.upgrades} self-upgrade${c.upgrades === 1 ? "" : "s"} so far`;
+  } catch (e) { /* opened as a file, or the monitor is down: keep the defaults */ }
+}
+counters(); setInterval(counters, 15000);
+</script>
+</body>
+</html>

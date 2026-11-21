@@ -1,0 +1,29 @@
+id: level3-delivery
+title: "Level 3 · Logistics delivery"
+summary: >
+  Only iron plates that arrive in the organizer's locked delivery chest count.
+  Build drills, furnaces, burner inserters and belts that carry plates there.
+  You may not insert plates into the delivery chest by hand.
+verbs: [observe, move, place, place_line, insert, extract, advance, craft, mine, rotate, pickup]
+entities: [burner-mining-drill, stone-furnace, wooden-chest, iron-chest, burner-inserter, transport-belt]
+recipes: [iron-gear-wheel, burner-inserter, transport-belt]
+budgets:
+  actions: 400
+  observes: 800
+  ticks: 72000
+  idle_tail_ticks: 7200   # +2 minutes: running logistics is what pays
+  wall_clock_seconds: 7200
+  idle_timeout_seconds: 300
+start_inventory:
+  burner-mining-drill: 8
+  stone-furnace: 8
+  burner-inserter: 20
+  transport-belt: 150
+  iron-chest: 2
+  coal: 500
+score:
+  type: delivered
+  item: iron-plate
+  delivery_offset: [24, 0]
+backends: [factorio]
+practice_seeds: [1000, 1030, 1046]   # vetted on 2.1.24: iron, coal, stone within 45 tiles

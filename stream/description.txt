@@ -1,0 +1,19 @@
+An AI is trying to beat Factorio, all the way to launching a rocket, entirely on its own.
+
+No human touches the game. The AI can't even see the screen: it reads the map as text, plans the factory, builds it through a game API, and fixes its own mistakes. Everything you see on screen was placed by the bot.
+
+When it gets truly stuck, the stream switches to "Self-upgrading": the problem is analysed, the bot's code is improved, and the run carries on from the exact point where it stopped. Every upgrade is published on GitHub.
+
+WHAT'S ON SCREEN
+Top: progress toward the rocket, with splits against its best earlier run
+Right: what the AI is thinking (strategist, overseer, assessor)
+Bottom: the current instruction and the last goals it finished
+
+LINKS
+The bot's code, updated with every upgrade: [GITHUB_BOT_LINK]
+The game server it plays through (host your own, plug in any AI): [GITHUB_SERVER_LINK]
+Factorio AI competition by Tesserac: [TESSERAC_LINK]
+
+Factorio 2.1, base game, no mods. Fan project, not affiliated with Wube Software.
+
+#Factorio #AI #LLM

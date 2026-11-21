@@ -1,0 +1,23 @@
+id: level2-bootstrap-timed
+title: "Level 2 · Bootstrap (time only)"
+summary: >
+  Time-only variant: no action limit, every action takes at least one second of game time.
+  Empty inventory. Hand-mine stone and coal, craft a furnace, smelt your first
+  plates, craft burner drills, and grow an iron-plate factory.
+verbs: [observe, move, place, insert, extract, advance, craft, mine, rotate, pickup]
+entities: [burner-mining-drill, stone-furnace, wooden-chest, iron-chest]
+recipes: [iron-gear-wheel, stone-furnace, burner-mining-drill, iron-chest]
+budgets:
+  actions: null          # no action limit: game time is the only budget
+  action_ticks: 60        # every action takes at least 1 s of game time (max 1,200 actions)
+  observes: 600
+  ticks: 72000            # 20 minutes of game time
+  idle_tail_ticks: 3600
+  wall_clock_seconds: 5400
+  idle_timeout_seconds: 300
+start_inventory: {}
+score:
+  type: production
+  item: iron-plate
+backends: [sim, factorio]
+practice_seeds: [1004, 1008, 1014, 1030, 1046]   # vetted on 2.1.24: iron, coal, stone within 45 tiles

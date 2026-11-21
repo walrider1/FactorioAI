@@ -1,0 +1,55 @@
+id: freeplay-green
+title: "Freeplay · From nothing to green science"
+summary: >
+  Real time, the base game's real tech tree, and an empty inventory. Hand-mine and hand-craft your way
+  from nothing to a factory that makes green science on its own. Research works like the game: steam
+  power, electronics and red science unlock when you first make 50 iron plates, 10 copper plates and a
+  lab; everything else is researched in labs. Milestones score points, plus a bonus for reaching each one
+  early; the run ends when the last one is reached. Hand-crafted items never count toward a milestone.
+  You may insert anything by hand. Read-only calls (observe, stats, scan) are never rate-limited;
+  game actions are limited to 5 a second, and a batch may place up to 50 things at once, each costing a
+  fifth of an action's slot.
+verbs: [observe, move, place, place_line, insert, extract, rotate, pickup, set_recipe, craft, mine,
+        research, stats, scan, batch]
+entities: all
+recipes: all
+assembler_recipes: all
+insert_items: null
+clear_obstacles: true
+clock: realtime
+clock_speed: 1
+tech: real
+walking: path            # like a player: around water, cliffs and buildings
+limits:
+  observe_radius: 32
+  observe_range: 64          # look anywhere within 64 tiles of your character (a player's screen and minimap)
+  scan_radius: 192           # resource patches on the map around you
+  batch_max_ops: 50
+  batch_op_gap_ticks: 3      # 20 ops a second in batches, 5 single actions a second
+  chart_radius: 160          # the map is generated and charted this far around the character as it moves
+budgets:
+  actions: null
+  min_action_gap_ticks: 12   # one game action every 12 ticks (5 a second); read-only calls are free of it
+  observes: 50000
+  ticks: 216000              # one hour of game time
+  idle_tail_ticks: 0
+  wall_clock_seconds: 5400
+  idle_timeout_seconds: 600
+start_inventory: {}
+score:
+  type: milestones
+  time_bonus: 1.0            # a milestone reached at minute 0 scores double, at minute 60 single
+  end_when_complete: true
+  milestones:
+    - {id: steam-power, name: "Steam power researched (50 iron plates)", points: 10, tech: steam-power}
+    - {id: electronics, name: "Electronics researched (10 copper plates)", points: 10, tech: electronics}
+    - {id: power-on, name: "A steam engine making power", points: 30, working: steam-engine}
+    - {id: red-tech, name: "Red science unlocked (a lab crafted)", points: 30, tech: automation-science-pack}
+    - {id: first-research, name: "Automation researched in a lab", points: 50, tech: automation}
+    - {id: red-auto, name: "Red science at 5/min, automated", points: 100, item: automation-science-pack,
+       per_minute: 5, window: 5}
+    - {id: green-tech, name: "Green science researched", points: 100, tech: logistic-science-pack}
+    - {id: green-auto, name: "Green science at 10/min, automated", points: 300, item: logistic-science-pack,
+       per_minute: 10, window: 5}
+backends: [factorio]
+practice_seeds: [1008, 1012, 1048, 1078, 1124]   # iron, copper, coal within 42 tiles, water within 52

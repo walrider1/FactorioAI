@@ -1,0 +1,25 @@
+id: level1-iron
+title: "Level 1 · Iron plates"
+summary: >
+  Place burner drills and stone furnaces from your starting inventory and make as
+  many iron plates as you can. No crafting, no hand mining. Coal is the real limit.
+verbs: [observe, move, place, insert, extract, advance, rotate, pickup]
+entities: [burner-mining-drill, stone-furnace, wooden-chest]
+recipes: []
+budgets:
+  actions: 100
+  observes: 300
+  ticks: 36000            # 10 minutes of game time
+  idle_tail_ticks: 3600   # +1 minute, scorer only
+  wall_clock_seconds: 3600
+  idle_timeout_seconds: 300
+start_inventory:
+  burner-mining-drill: 10
+  stone-furnace: 10
+  wooden-chest: 2
+  coal: 300
+score:
+  type: production
+  item: iron-plate
+backends: [sim, factorio]
+practice_seeds: [1000, 1004, 1008, 1014, 1030]   # vetted on 2.1.24: iron, coal, stone within 45 tiles

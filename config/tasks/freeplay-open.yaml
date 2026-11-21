@@ -1,0 +1,70 @@
+id: freeplay-open
+title: "Freeplay · As far as you can get"
+summary: >
+  The whole game, from an empty inventory, in real time, with the base game's tech tree. No practical time
+  limit (30 days of game time): the run ends when you end it or a rocket is launched. Every milestone up the
+  ladder scores points (deeper ones far more), plus a bonus for reaching it within the first four hours. Hand-crafted items never count toward a milestone.
+  Same rules as freeplay-green: anything may be inserted by hand, read-only calls (observe, stats, scan)
+  are never rate-limited, 5 game actions a second, batches of up to 100 ops at 20 ops a second.
+verbs: [observe, move, place, place_line, insert, extract, rotate, pickup, set_recipe, craft, mine,
+        research, stats, scan, batch]
+entities: all
+recipes: all
+assembler_recipes: all
+insert_items: null
+clear_obstacles: true
+clock: realtime
+clock_speed: 1               # organizers may raise it (e.g. 2) for faster test runs; budgets stay in game ticks
+tech: real
+walking: path            # like a player: around water, cliffs and buildings
+limits:
+  observe_radius: 48
+  observe_range: 256         # a big factory: look anywhere near you without walking
+  scan_radius: 384
+  batch_max_ops: 100
+  batch_op_gap_ticks: 3
+  chart_radius: 256
+budgets:
+  actions: null
+  min_action_gap_ticks: 12
+  observes: 100000000        # effectively unlimited
+  ticks: 155520000           # 30 days of game time: no practical limit
+  idle_tail_ticks: 0
+  wall_clock_seconds: 2600000   # 30 days of real time, plus slack
+  idle_timeout_seconds: 900
+start_inventory: {}
+score:
+  type: milestones
+  time_bonus: 0.5
+  bonus_horizon_ticks: 864000   # the early bonus counts down over the first four hours, not 30 days
+  end_when_complete: true
+  milestones:
+    - {id: steam-power, name: "Steam power researched", points: 10, tech: steam-power}
+    - {id: electronics, name: "Electronics researched", points: 10, tech: electronics}
+    - {id: power-on, name: "A steam engine making power", points: 20, working: steam-engine}
+    - {id: red-tech, name: "Red science unlocked", points: 20, tech: automation-science-pack}
+    - {id: first-research, name: "Automation researched", points: 40, tech: automation}
+    - {id: red-auto, name: "Red science at 5/min, automated", points: 80, item: automation-science-pack,
+       per_minute: 5, window: 5}
+    - {id: green-tech, name: "Green science researched", points: 80, tech: logistic-science-pack}
+    - {id: green-auto, name: "Green science at 10/min, automated", points: 200, item: logistic-science-pack,
+       per_minute: 10, window: 5}
+    - {id: steel, name: "Steel processing researched", points: 100, tech: steel-processing}
+    - {id: science-30, name: "Red and green at 30/min each", points: 300, item: logistic-science-pack,
+       also: [automation-science-pack], per_minute: 30, window: 10}
+    - {id: oil, name: "Oil processing (crude oil pumped)", points: 400, tech: oil-processing}
+    - {id: plastics, name: "Plastics researched", points: 400, tech: plastics}
+    - {id: plastic-auto, name: "Plastic at 30/min", points: 500, item: plastic-bar, per_minute: 30, window: 5}
+    - {id: blue-tech, name: "Chemical science researched", points: 600, tech: chemical-science-pack}
+    - {id: blue-auto, name: "Blue science at 10/min, automated", points: 1200, item: chemical-science-pack,
+       per_minute: 10, window: 10}
+    - {id: purple-tech, name: "Production science researched", points: 1500, tech: production-science-pack}
+    - {id: yellow-tech, name: "Utility science researched", points: 1500, tech: utility-science-pack}
+    - {id: purple-auto, name: "Purple science at 10/min", points: 2500, item: production-science-pack,
+       per_minute: 10, window: 10}
+    - {id: yellow-auto, name: "Yellow science at 10/min", points: 2500, item: utility-science-pack,
+       per_minute: 10, window: 10}
+    - {id: silo, name: "Rocket silo researched", points: 5000, tech: rocket-silo}
+    - {id: rocket, name: "A rocket launched", points: 10000, rockets: 1}
+backends: [factorio]
+practice_seeds: [1008, 1012, 1048, 1078, 1124]

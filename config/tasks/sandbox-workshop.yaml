@@ -1,0 +1,69 @@
+id: sandbox-workshop
+title: "Sandbox · Workshop and silo check"
+summary: >
+  A developer sandbox, not a competition level: every technology researched and a starting kit of machines,
+  pipes and intermediates, so the brain bot's workshop cells, fluid nets, electric mines and the rocket silo can be
+  built and checked in a real game in a few minutes (tests/test_workshop_factorio.py).
+verbs: [observe, move, place, place_line, insert, extract, rotate, pickup, set_recipe, craft, mine, stats, scan, batch]
+entities: all
+recipes: all
+assembler_recipes: all
+insert_items: null
+clear_obstacles: true
+clock: realtime
+clock_speed: 2
+tech: all
+walking: path
+limits:
+  observe_radius: 48
+  observe_range: 256
+  scan_radius: 256
+  batch_max_ops: 100
+  batch_op_gap_ticks: 3
+  chart_radius: 192
+budgets:
+  actions: null
+  min_action_gap_ticks: 12
+  observes: 1000000
+  ticks: 432000
+  idle_tail_ticks: 0
+  wall_clock_seconds: 7200
+  idle_timeout_seconds: 600
+start_inventory:
+  offshore-pump: 3
+  pipe: 300
+  pipe-to-ground: 60
+  boiler: 2
+  steam-engine: 4
+  burner-inserter: 2
+  chemical-plant: 8
+  oil-refinery: 2
+  pumpjack: 2
+  assembling-machine-2: 4
+  iron-chest: 30
+  fast-inserter: 40
+  inserter: 60
+  small-electric-pole: 100
+  electric-mining-drill: 12
+  assembling-machine-1: 10
+  underground-belt: 40
+  steel-plate: 100
+  plastic-bar: 100
+  stone-furnace: 12
+  rocket-silo: 1
+  lab: 4
+  transport-belt: 300
+  automation-science-pack: 40
+  coal: 600
+  iron-plate: 600
+  copper-plate: 400
+  sulfur: 200
+  processing-unit: 20
+  low-density-structure: 20
+  rocket-fuel: 20
+score:
+  type: milestones
+  milestones:
+    - {id: chem, name: "A chemical plant working", points: 10, working: chemical-plant}
+backends: [factorio]
+practice_seeds: [1008]

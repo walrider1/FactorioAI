@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+runs/
+reports/
+secrets/
+.env
+media/*.mp4
+
+# never published: local media, game saves, bot memory
+media/
+*.zip
+*.pkl
+*.log

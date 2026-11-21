@@ -1,0 +1,854 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rocket Run Overlay</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700;800&family=Barlow:wght@500;600&family=JetBrains+Mono:wght@500;700&display=swap">
+<style>
+/* Stream overlay for OBS (browser source, 1920x1080, transparent). Built on a 1920x1080 stage that scales to the
+   source size. It keeps to the edges so the game stays visible:
+     top strip     the road to the rocket as speedrun splits (in-game times) and the in-game clock
+     right         the brain's thoughts (strategist, overseer, assessor, rules) and research
+     bottom left   the brain as a live state machine
+     bottom bar    the current instruction, the hands, the last goals
+   URL options: ?run=ID (default: the run that is playing) · ?demo=1 (fake data to place it in OBS) ·
+   ?thoughts=0 · ?brain=0 (hide a panel) · ?bg=1 (dark backdrop, to check it outside OBS) ·
+   ?pb=map (race the best earlier run on the same map; default: the best earlier run of the task on any map)
+   Look: cut steel plates, hazard stripes for anything working. One accent (orange) plus neutrals; red only for
+   "something went wrong". Every text box has a fixed height and clamps its lines, so nothing grows. */
+:root {
+  --plate: rgba(20, 19, 17, .93); --plate-hi: rgba(32, 30, 27, .96); --well: #2a2725;
+  --line: #3d3934; --line-hi: #57514a;
+  --ink: #f4efe6; --muted: #a8a197; --dim: #6f6960;
+  --acc: #ff9a1f; --acc-lo: #c76800; --acc-ink: #1f1306; --acc-bg: rgba(255, 154, 31, .13);
+  --bad: #ff5340;
+  --cut: 12px;
+  --f-d: "Barlow Condensed", "Arial Narrow", sans-serif; --f-b: "Barlow", system-ui, sans-serif;
+  --f-m: "JetBrains Mono", ui-monospace, Consolas, monospace;
+  --hazard: repeating-linear-gradient(-45deg, var(--acc) 0 7px, var(--acc-ink) 7px 14px);
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; overflow: hidden; background: transparent; color: var(--ink); font-family: var(--f-b); }
+body.bg { background: radial-gradient(circle at 50% 42%, #3a382d, #191813 75%); }
+#stage { position: absolute; left: 0; top: 0; width: 1920px; height: 1080px; transform-origin: 0 0; }
+
+/* a plate with two cut corners and a hairline edge */
+.plate { position: absolute; background: var(--plate); box-shadow: inset 0 0 0 1px var(--line), inset 0 1px 0 1px rgba(255, 255, 255, .03);
+  clip-path: polygon(var(--cut) 0, 100% 0, 100% calc(100% - var(--cut)), calc(100% - var(--cut)) 100%, 0 100%, 0 var(--cut)); }
+.hd { display: flex; justify-content: space-between; align-items: center; gap: 10px; height: 16px; font: 700 12px/1 var(--f-m); letter-spacing: .14em; text-transform: uppercase; color: var(--dim); white-space: nowrap; }
+.hd .t { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); }
+.hd .t::before { content: ""; width: 8px; height: 8px; background: var(--acc); }
+.hd b { color: var(--ink); font-weight: 700; letter-spacing: .04em; }
+.clamp1 { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.clamp2 { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+.pop { animation: pop .5s cubic-bezier(.25, 1.8, .45, 1); }
+@keyframes pop { 0% { transform: scale(1.4); filter: brightness(1.7); } 100% { transform: none; filter: none; } }
+@keyframes blink { 50% { opacity: .2; } }
+@keyframes march { to { background-position: 28px 0; } }
+.hide { display: none !important; }
+
+/* ---------------------------------------------------------------- top strip: splits + clock */
+#top { left: 24px; right: 24px; top: 16px; height: 64px; display: grid; grid-template-columns: 124px 1fr 132px 206px; align-items: stretch; }
+/* the show's counters: run number of the stream, self-upgrades so far */
+.tally { display: flex; flex-direction: column; justify-content: center; gap: 6px; padding: 0 16px; border-left: 1px solid var(--line); }
+.tally div { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; white-space: nowrap; }
+.tally span { font: 700 10px/1 var(--f-m); letter-spacing: .14em; text-transform: uppercase; color: var(--dim); }
+.tally b { font: 700 20px/1 var(--f-m); color: var(--ink); }
+.tally b.up { color: var(--acc); }
+.tally b.pop { animation: pop .6s ease-out; }
+.lead { display: flex; flex-direction: column; justify-content: center; gap: 5px; padding-left: 18px; border-right: 1px solid var(--line); }
+.lead .vs { font: 700 10px/1 var(--f-m); letter-spacing: .1em; text-transform: uppercase; color: var(--dim); white-space: nowrap; }
+/* deltas against the personal best: orange ahead, red behind, a filled chip for a best-ever ("gold") split */
+.sp .dl { font: 700 12px/1 var(--f-m); margin-left: 3px; }
+.sp .dl.ahead { color: var(--acc); } .sp .dl.behind { color: var(--bad); }
+.sp .dl.gold { color: var(--acc-ink); background: var(--acc); padding: 0 3px; }
+.sp .dl.pb { color: var(--muted); margin-left: 0; }
+.live { display: inline-flex; align-items: center; gap: 7px; font: 700 13px/1 var(--f-m); letter-spacing: .14em; color: var(--ink); }
+.live::before { content: ""; width: 9px; height: 9px; background: var(--bad); animation: blink 1.6s infinite; }
+.live.off { color: var(--dim); } .live.off::before { background: var(--dim); animation: none; }
+.lead .pct { font: 700 22px/1 var(--f-m); color: var(--acc); }
+.lead .pct small { font: 700 11px/1 var(--f-m); letter-spacing: .1em; color: var(--dim); margin-left: 4px; }
+#splits { display: grid; gap: 3px; padding: 9px 14px 0; min-width: 0; }
+.sp { min-width: 0; display: grid; row-gap: 5px; align-content: start; padding-right: 6px; }
+.sp .seg { height: 8px; background: var(--well); margin-right: -6px; }
+.sp.done .seg { background: var(--acc); }
+.sp.now .seg { background: var(--hazard); background-size: 28px 28px; animation: march .9s linear infinite; }
+.sp .nm { font: 700 15px/1 var(--f-d); letter-spacing: .05em; text-transform: uppercase; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sp .tm { font: 500 13px/1 var(--f-m); color: var(--dim); white-space: nowrap; height: 13px; }
+.sp.done .nm { color: var(--muted); } .sp.done .tm { color: var(--ink); }
+.sp.now .nm { color: var(--ink); } .sp.now .tm { color: var(--acc); }
+.clock { display: flex; flex-direction: column; justify-content: center; align-items: flex-end; gap: 5px; padding-right: 20px; border-left: 1px solid var(--line); }
+.clock .t { font: 700 32px/1 var(--f-m); letter-spacing: -.02em; }
+.clock .cap { font: 700 11px/1 var(--f-m); letter-spacing: .16em; text-transform: uppercase; color: var(--acc); }
+.clock .cap.frozen { color: var(--dim); }
+
+/* ---------------------------------------------------------------- right: thoughts + research */
+#thoughts { right: 24px; top: 94px; width: 372px; height: 548px; padding: 14px 16px; display: grid; grid-template-rows: auto auto 1fr auto; }
+.thinking { height: 0; overflow: hidden; transition: height .3s, margin .3s; }
+.thinking.on { height: 34px; margin-top: 10px; }
+.thinking > div { position: relative; display: flex; align-items: center; gap: 10px; height: 34px; padding: 0 10px 0 16px; background: var(--acc-bg); box-shadow: inset 0 0 0 1px var(--acc); font: 700 16px/1 var(--f-d); letter-spacing: .08em; text-transform: uppercase; }
+.thinking > div::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 7px; background: var(--hazard); background-size: 28px 28px; animation: march .9s linear infinite; }
+.thinking .s { margin-left: auto; font: 500 14px/1 var(--f-m); color: var(--muted); letter-spacing: 0; text-transform: none; }
+#feed { margin-top: 6px; overflow: hidden; -webkit-mask-image: linear-gradient(#000 82%, transparent); mask-image: linear-gradient(#000 82%, transparent); }
+.th { padding: 11px 0; border-top: 1px dashed var(--line); }
+.th:first-child { border-top: 0; }
+.th .meta { display: flex; align-items: center; gap: 8px; }
+.th .m { font: 500 12px/1 var(--f-m); color: var(--dim); }
+.th .txt { font: 600 17px/1.28 var(--f-b); margin-top: 7px; max-height: 44px; }
+.th .ord { font: 600 14px/1.2 var(--f-b); color: var(--acc); margin-top: 5px; }
+.th .ord::before { content: "» "; }
+.th.old .txt { color: var(--muted); }
+.th.new { animation: slidein .5s cubic-bezier(.3, 1.5, .5, 1); }
+@keyframes slidein { from { transform: translateX(24px); opacity: 0; } }
+.who { flex: none; font: 700 12px/1 var(--f-m); letter-spacing: .1em; text-transform: uppercase; padding: 4px 6px; color: var(--muted); background: var(--well); }
+.who.strategist { color: var(--ink); box-shadow: inset 0 0 0 1px var(--acc); background: none; }
+.who.overseer, .who.milestone { color: var(--acc-ink); background: var(--acc); }
+.who.rules, .who.watchdog { color: #fff; background: var(--bad); }
+.research { border-top: 1px solid var(--line); margin: 0 -16px; padding: 12px 16px 0; }
+.research .row { display: flex; align-items: baseline; gap: 10px; margin-top: 8px; }
+.research .tech { flex: 1; min-width: 0; font: 800 20px/1 var(--f-d); text-transform: uppercase; letter-spacing: .02em; }
+.research .tech.idle { color: var(--bad); }
+.research .p { font: 500 13px/1 var(--f-m); color: var(--dim); }
+.meter { position: relative; height: 6px; background: var(--well); margin-top: 8px; }
+.meter i { display: block; height: 100%; width: 0; background: var(--acc); transition: width 1s linear; }
+.meter i.ok { background: #e8e2d8; } .meter i.hot { background: var(--bad); }
+.packs { display: grid; grid-template-columns: repeat(5, 1fr); gap: 4px; margin-top: 10px; }
+.pk { display: flex; align-items: baseline; justify-content: center; gap: 5px; padding: 6px 0; background: var(--well); }
+.pk .v { font: 700 16px/1 var(--f-m); }
+.pk .k { font: 700 11px/1 var(--f-d); letter-spacing: .1em; text-transform: uppercase; color: var(--dim); }
+.pk.on { background: none; box-shadow: inset 0 0 0 1px var(--acc); } .pk.on .k { color: var(--muted); }
+.pk.off { opacity: .3; }
+
+/* ---------------------------------------------------------------- bottom left: the brain as a state machine */
+#brain { left: 24px; bottom: 16px; width: 392px; height: 264px; padding: 14px 14px 0; }
+#fsm { display: block; width: 364px; height: 205px; margin-top: 10px; overflow: visible; }
+#fsm .n > rect { fill: #1d1b19; stroke: var(--line-hi); stroke-width: 1.5; }
+#fsm .n > text { fill: var(--muted); font: 700 15px var(--f-d); letter-spacing: .1em; text-transform: uppercase; }
+#fsm .n > text.s { fill: var(--dim); font: 500 12.5px var(--f-m); letter-spacing: 0; text-transform: none; }
+#fsm .n.on > rect { fill: var(--acc-bg); stroke: var(--acc); stroke-width: 2.5; }
+#fsm .n.on > text { fill: var(--ink); } #fsm .n.on > text.s { fill: var(--muted); }
+#fsm .n.busy > rect { fill: url(#hz); stroke: var(--acc); stroke-width: 2.5; }
+#fsm .n.busy > text { fill: var(--ink); } #fsm .n.busy > text.s { fill: var(--ink); }
+#fsm .n.flash > rect { fill: var(--acc); stroke: var(--acc); } #fsm .n.flash > text { fill: var(--acc-ink); }
+#fsm .n.alarm > rect { fill: var(--bad); stroke: var(--bad); } #fsm .n.alarm > text { fill: #fff; }
+#fsm .w { fill: none; stroke: var(--line-hi); stroke-width: 2.5; }
+#fsm .w.dash { stroke-dasharray: 4 4; }
+#fsm .w.hot { stroke: var(--acc); stroke-dasharray: 8 6; animation: flow .6s linear infinite; }
+@keyframes flow { to { stroke-dashoffset: -14; } }
+#fsm .c rect { fill: none; stroke: var(--line); stroke-width: 1.5; }
+#fsm .c text { fill: var(--dim); font: 600 13.5px var(--f-m); }
+#fsm .c.on rect { fill: var(--acc); stroke: var(--acc); } #fsm .c.on text { fill: var(--acc-ink); font-weight: 700; }
+#fsm .c.was rect { stroke: var(--acc); } #fsm .c.was text { fill: var(--muted); }
+#fsm marker path { fill: var(--line-hi); }
+
+/* ---------------------------------------------------------------- bottom bar: instruction, hands, last goals */
+#bar { left: 432px; right: 24px; bottom: 16px; height: 98px; display: grid; grid-template-columns: 1fr 330px 300px; --cut: 14px; }
+#bar::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 8px; background: var(--acc); }
+#bar > div { min-width: 0; padding: 13px 18px 0; }
+#bar > div + div { border-left: 1px solid var(--line); }
+.cmd { padding-left: 26px !important; }
+.cmd .row { display: flex; align-items: center; gap: 12px; margin-top: 7px; }
+.cmd .doing { min-width: 0; flex: 1; font: 800 30px/1.1 var(--f-d); letter-spacing: .01em; }
+.cmd .why { margin-top: 5px; font: 500 15px/1.2 var(--f-b); color: var(--muted); }
+.cmd .why i { font: 700 11px/1 var(--f-m); font-style: normal; letter-spacing: .12em; color: var(--dim); margin-right: 8px; }
+.hands .step { margin-top: 8px; font: 800 22px/1 var(--f-d); letter-spacing: .05em; text-transform: uppercase; color: var(--acc); }
+.hands .act { margin-top: 5px; font: 500 15px/1.2 var(--f-b); color: var(--muted); }
+.log .sq { display: flex; gap: 4px; margin-top: 8px; height: 22px; }
+.log .sq span { flex: none; display: grid; place-items: center; width: 22px; height: 22px; font: 800 14px/1 var(--f-d); color: var(--acc); background: var(--well); }
+.log .sq span.bad { color: #fff; background: var(--bad); }
+.log .sq span.new { animation: pop .5s cubic-bezier(.25, 1.8, .45, 1); }
+.log .last { margin-top: 7px; font: 500 15px/1.2 var(--f-b); color: var(--muted); }
+
+/* ---------------------------------------------------------------- pop-ups */
+#toasts { position: absolute; left: 50%; top: 110px; transform: translateX(-50%); display: grid; gap: 14px; justify-items: center; pointer-events: none; }
+.toast { --cut: 18px; position: relative; min-width: 560px; max-width: 820px; text-align: center; padding: 26px 40px 24px; background: var(--plate-hi); box-shadow: inset 0 0 0 2px var(--line-hi);
+  clip-path: polygon(var(--cut) 0, 100% 0, 100% calc(100% - var(--cut)), calc(100% - var(--cut)) 100%, 0 100%, 0 var(--cut));
+  animation: slam .5s cubic-bezier(.2, 1.4, .4, 1), fade .5s ease-in forwards; animation-delay: 0s, var(--life, 7s); }
+.toast::before { content: ""; position: absolute; left: 0; right: 0; top: 0; height: 8px; background: var(--hazard); background-size: 28px 28px; animation: march .9s linear infinite; }
+.toast .big { font: 800 52px/1 var(--f-d); letter-spacing: .04em; text-transform: uppercase; }
+.toast .small { font: 600 22px/1.28 var(--f-b); color: var(--muted); margin-top: 10px; }
+.toast.ms { background: var(--acc); color: var(--acc-ink); box-shadow: none; }
+.toast.ms::before { background: repeating-linear-gradient(-45deg, var(--acc-ink) 0 7px, var(--acc) 7px 14px); background-size: 28px 28px; }
+.toast.ms .small { color: rgba(31, 19, 6, .75); }
+.toast.ov { box-shadow: inset 0 0 0 2px var(--acc); } .toast.ov .big { color: var(--acc); }
+@keyframes slam { from { transform: translateY(-40px) scale(1.15); opacity: 0; } }
+@keyframes fade { to { transform: translateY(-16px); opacity: 0; } }
+.confetti { position: absolute; top: 0; width: 12px; height: 12px; animation: fall linear forwards; }
+@keyframes fall { to { transform: translateY(1150px) rotate(540deg); } }
+/* ---------------------------------------------------------------- sound: the unlock badge (outside OBS only) and ?sfxtest=1 */
+#sfxBadge { position: absolute; left: 50%; top: 92px; transform: translateX(-50%); padding: 8px 14px; font: 700 13px/1 var(--f-m); letter-spacing: .14em; color: var(--acc-ink); background: var(--acc); cursor: pointer; }
+#sfxTest { --cut: 14px; left: 50%; top: 50%; transform: translate(-50%, -50%); width: 560px; padding: 16px 18px 18px; }
+#sfxTest .btns { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin-top: 14px; }
+#sfxTest button { all: unset; cursor: pointer; padding: 12px 14px; background: var(--well); box-shadow: inset 0 0 0 1px var(--line-hi); font: 800 20px/1 var(--f-d); letter-spacing: .06em; text-transform: uppercase; color: var(--ink); display: flex; justify-content: space-between; }
+#sfxTest button small { font: 500 12px/20px var(--f-m); color: var(--dim); text-transform: none; letter-spacing: 0; }
+#sfxTest button:hover { box-shadow: inset 0 0 0 2px var(--acc); }
+#sfxTest button:active { background: var(--acc); color: var(--acc-ink); }
+@media (prefers-reduced-motion: reduce) { *, *::after, *::before { animation: none !important; transition: none !important; } }
+</style>
+</head>
+<body>
+<div id="stage">
+  <div class="plate" id="top">
+    <div class="lead"><span class="live" id="live">LIVE</span><span class="pct"><span id="pct">0%</span><small>ROCKET</small></span><span class="vs" id="vsPb"></span></div>
+    <div id="splits"></div>
+    <div class="tally"><div><span>Run</span><b id="runNo">#1</b></div><div><span>Upgrades</span><b class="up" id="upNo">0</b></div></div>
+    <div class="clock"><div class="t" id="clock">0:00:00</div><div class="cap" id="clockCap">in-game time</div></div>
+  </div>
+
+  <div class="plate" id="thoughts">
+    <div class="hd"><span class="t">Brain // thoughts</span><span id="calls"></span></div>
+    <div class="thinking" id="thinking"><div><span id="thinkWho">Strategist</span><span class="s" id="thinkFor"></span></div></div>
+    <div id="feed"></div>
+    <div class="research">
+      <div class="hd"><span class="t">Research</span><span class="p" id="techPct"></span></div>
+      <div class="row"><span class="tech clamp1" id="tech">–</span></div>
+      <div class="meter"><i id="techBar"></i></div>
+      <div class="packs" id="packs"></div>
+    </div>
+  </div>
+
+  <div class="plate" id="brain">
+    <div class="hd"><span class="t">Brain // control loop</span><span>bill <b id="bill">$0.00</b></span></div>
+    <svg id="fsm" viewBox="0 0 440 248" aria-label="The bot's control loop">
+      <defs>
+        <marker id="ah" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z"/></marker>
+        <pattern id="hz" width="14" height="14" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+          <rect width="14" height="14" fill="#2a1c0c"/><rect width="5" height="14" fill="#ff9a1f" opacity=".45"/>
+          <animateTransform attributeName="patternTransform" type="translate" from="0 0" to="14 0" dur=".9s" repeatCount="indefinite" additive="sum"/>
+        </pattern>
+      </defs>
+      <path class="w" id="e-strategist" d="M46 48 V88" marker-end="url(#ah)"/>
+      <path class="w dash" id="e-overseer" d="M222 48 V66" marker-end="url(#ah)"/>
+      <path class="w dash" id="e-supervisor" d="M374 48 V58 H316 V66" marker-end="url(#ah)"/>
+      <path class="w" id="e-take-goal-run-goal" d="M92 113 H104" marker-end="url(#ah)"/>
+      <path class="w" id="e-run-goal-record" d="M336 96 H348" marker-end="url(#ah)"/>
+      <path class="w" id="e-record-replan" d="M394 116 V128" marker-end="url(#ah)"/>
+      <path class="w" id="e-replan-take-goal" d="M394 172 V188 H46 V140" marker-end="url(#ah)"/>
+      <path class="w dash" id="e-foreman" d="M222 182 V200"/>
+      <g class="n" id="n-strategist"><rect x="0" y="0" width="136" height="48"/><text x="68" y="21" text-anchor="middle">Strategist</text><text class="s" id="stratSub" x="68" y="39" text-anchor="middle">plans goals</text></g>
+      <g class="n" id="n-overseer"><rect x="152" y="0" width="140" height="48"/><text x="222" y="21" text-anchor="middle">Overseer</text><text class="s" id="ovSub" x="222" y="39" text-anchor="middle">audits base</text></g>
+      <g class="n" id="n-supervisor"><rect x="304" y="0" width="136" height="48"/><text x="372" y="21" text-anchor="middle">Supervisor</text><text class="s" id="supSub" x="372" y="39" text-anchor="middle">rules+assess</text></g>
+      <g class="n" id="n-take-goal"><rect x="0" y="90" width="92" height="48"/><text x="46" y="111" text-anchor="middle">Next</text><text x="46" y="128" text-anchor="middle">goal</text></g>
+      <g class="n" id="n-run-goal"><rect x="106" y="68" width="230" height="114"/><text x="221" y="88" text-anchor="middle">Run goal</text><g id="chips"></g></g>
+      <g class="n" id="n-record"><rect x="350" y="76" width="90" height="40"/><text x="395" y="101" text-anchor="middle">Record</text></g>
+      <g class="n" id="n-replan"><rect x="350" y="130" width="90" height="42"/><text x="395" y="156" text-anchor="middle">Replan?</text></g>
+      <g class="n" id="n-foreman"><rect x="0" y="200" width="440" height="48"/><text x="14" y="229">Foreman</text><g id="fchips"></g></g>
+    </svg>
+  </div>
+
+  <div class="plate" id="bar">
+    <div class="cmd">
+      <div class="hd"><span class="t">Current instruction</span><span id="whoTag" class="who">strategist</span></div>
+      <div class="row"><span class="doing clamp1" id="doing">warming up…</span></div>
+      <div class="why clamp1" id="why"></div>
+    </div>
+    <div class="hands">
+      <div class="hd"><span class="t">Hands</span><span><b id="tUsed">0:00</b> / <span id="tBudget">–</span></span></div>
+      <div class="step clamp1" id="handStep">idle</div>
+      <div class="act clamp1" id="handAct"></div>
+    </div>
+    <div class="log">
+      <div class="hd"><span class="t">Last goals</span><span id="okRate"></span></div>
+      <div class="sq" id="sq"></div>
+      <div class="last clamp1" id="last"></div>
+    </div>
+  </div>
+  <div id="toasts"></div>
+  <div id="sfxBadge" class="hide">SOUND OFF · CLICK TO ENABLE</div>
+  <div class="plate hide" id="sfxTest"><div class="hd"><span class="t">Sound check</span><span>?vol= sets the level</span></div><div class="btns" id="sfxBtns"></div></div>
+</div>
+
+<script>
+const Q = new URLSearchParams(location.search);
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+if (Q.get("bg") === "1") document.body.classList.add("bg");
+if (Q.get("thoughts") === "0") $("thoughts").classList.add("hide");
+if (Q.get("brain") === "0") { $("brain").classList.add("hide"); $("bar").style.left = "24px"; }
+
+function fit() { const s = Math.min(innerWidth / 1920, innerHeight / 1080); $("stage").style.transform = `scale(${s})`; }
+addEventListener("resize", fit); fit();
+
+// only touch the DOM when something changed: keeps running animations intact
+function setHTML(id, html) { const el = $(id); if (el._html !== html) { el.innerHTML = html; el._html = html; } }
+function setText(id, s) { const el = $(id); if (el.textContent !== s) el.textContent = s; }
+function setNum(id, v) {                         // a number that changed jumps and settles
+  const el = $(id), s = String(v);
+  if (el.textContent === s) return;
+  const first = !el._set; el.textContent = s; el._set = true;
+  if (!first) { el.classList.remove("pop"); void el.offsetWidth; el.classList.add("pop"); }
+}
+
+// ---------------------------------------------------------------- words a viewer understands
+const ITEM = { "automation-science-pack": "red science", "logistic-science-pack": "green science", "chemical-science-pack": "blue science",
+  "production-science-pack": "purple science", "utility-science-pack": "yellow science", "iron-gear-wheel": "gear", "electronic-circuit": "circuit",
+  "advanced-circuit": "red circuit", "transport-belt": "belt", "underground-belt": "underground belt", "iron-plate": "iron plate", "copper-plate": "copper plate",
+  "steel-plate": "steel", "iron-ore": "iron", "copper-ore": "copper", "stone": "stone", "coal": "coal", "plastic-bar": "plastic", "crude-oil": "oil" };
+const nice = s => ITEM[s] || String(s || "").replace(/-/g, " ");
+function parseGoal(text) {                       // the bot's short form: "build factory {'item': ..., 'per_minute': 10, ...}"
+  const m = /^(\w+)\s*(\w*)\s*(\{.*)?/.exec(text || ""); if (!m) return { do: text || "" };
+  const g = { do: m[1], module: m[2] };
+  for (const [, k, v] of (m[3] || "").matchAll(/'(\w+)':\s*('([^']*)'|"([^"]*)|[\d.]+|True|False)/g)) if (!(k in g)) g[k] = /^['"]/.test(v) ? v.slice(1).replace(/['"]$/, "") : v;
+  return g;
+}
+function say(g) {
+  if (!g) return "";
+  const n = g.count ? ` ×${g.count}` : "", rate = g.per_minute ? ` · ${(+g.per_minute).toFixed(0)}/min` : "", site = g.site ? ` ${g.site}` : "";
+  switch (g.do) {
+    case "build": return ({
+      factory: `Building a ${nice(g.item)} factory${rate}`, electric_mine: `Digging ${nice(g.resource)} with electric drills${n}`,
+      burner_mine: `Placing burner drills on ${nice(g.resource)}${n}`, steam_power: "Building a steam power plant", labs: "Building science labs",
+      research_station: "Building a research station", pumpjack: `Drilling for oil${n}`, outpost: `Founding a remote ${nice(g.resource)} outpost`,
+      smelter_column: `Building a ${g.resource === "iron-plate" ? "steel" : nice(g.resource)} smelter`, workshop: `Building a ${nice(g.item)} workshop${rate}`,
+      silo: "BUILDING THE ROCKET SILO" }[g.module] || `Building ${nice(g.module)}`);
+    case "replace": {
+      const w = g.with && typeof g.with === "object" ? say(g.with).replace(/^Building /, "") : "";
+      return `Rebuilding site${site}${w ? " as " + w : ""}`;
+    }
+    case "remove": return `Tearing down site${site}`;
+    case "research": return `Researching ${nice(g.tech)}`;
+    case "link": return "Belting everything together";
+    case "relink": return `Re-belting the inputs${site ? " of site" + site : ""}`;
+    case "feed": return `Hand-feeding ${nice(g.item || "coal")} to site${site}`;
+    case "wait": return "Letting the factory run";
+    case "stock": return `Hand-crafting ${nice(g.item)}${n}`;
+    case "scout": return `Scouting for ${nice(g.resource)}`;
+    case "connect": return `Wiring site${site} to power`;
+    case "upgrade": return `Upgrading site${site}`;
+    case "priority": return "Reshuffling priorities";
+    default: return (g.do || "Thinking").replace(/_/g, " ");
+  }
+}
+const sayText = t => say(parseGoal(t));
+// an order line from the overseer or supervisor: "order: research {'tech': 'concrete'}" -> "order: Researching concrete"
+function sayChange(c) {
+  const m = /^([a-z][a-z \-]*?):\s*(\w+\s*\w*\s*\{.*)$/i.exec(c || "");
+  if (m) return `${m[1]}: ${sayText(m[2])}`;
+  if (/^(build|replace|remove|research|link|relink|feed|stock|scout|connect|upgrade)\b/.test(c || "")) return sayText(c);
+  return c || "";
+}
+const STEP = { make: "crafting", plates: "grabbing plates", smelt: "smelting", build: "placing", connect: "wiring power", design: "designing layout",
+  unlock: "unlocking recipe", remove: "tearing down", wait: "waiting", research: "researching", storage: "tidying pockets", between: "next belt",
+  courier: "hauling", refresh: "looking around", coal: "refuelling", sites: "checking sites", power: "checking power", labs: "feeding labs" };
+// game minutes -> m:ss / h:mm:ss (durations, the clock) or h:mm (splits)
+const fmt = m => { if (m == null || isNaN(m)) return "–"; const h = Math.floor(m / 60), mm = Math.floor(m % 60), s = Math.floor((m * 60) % 60);
+  return h ? `${h}:${String(mm).padStart(2, "0")}:${String(s).padStart(2, "0")}` : `${mm}:${String(s).padStart(2, "0")}`; };
+const fmtClock = m => { m = m || 0; const h = Math.floor(m / 60), mm = Math.floor(m % 60), s = Math.floor((m * 60) % 60);
+  return `${h}:${String(mm).padStart(2, "0")}:${String(s).padStart(2, "0")}`; };
+const fmtHM = m => { if (m == null || isNaN(m)) return "–"; const h = Math.floor(m / 60), mm = Math.floor(m % 60); return `${h}:${String(mm).padStart(2, "0")}`; };
+const firstSentence = (t, max = 170) => { const s = String(t || "").split(/(?<=[.!?])\s/)[0]; return s.length > max ? s.slice(0, max - 3) + "…" : s; };
+const stripWho = t => String(t || "").replace(/^(overseer|assessor|rules|close-out|fixer|watchdog|strategist)\s*:\s*/i, "");
+const PACKS = [["automation-science-pack", "red"], ["logistic-science-pack", "grn"], ["chemical-science-pack", "blu"],
+  ["production-science-pack", "pur"], ["utility-science-pack", "yel"]];
+// the road's stages, short enough to sit under a split
+const SHORT = { "Power and labs": "Power", "Red science automated": "Red sci", "Green science automated": "Green sci",
+  "Workshop floor and electric mines": "Mines", "Oil: pumpjacks and a refinery": "Oil", "Blue science automated": "Blue sci",
+  "Purple science automated": "Purple sci", "Yellow science automated": "Yellow sci", "Rocket silo researched": "Silo tech",
+  "Silo built": "Silo", "Rocket parts": "Parts", "Rocket launched": "Launch" };
+const short = n => SHORT[n] || String(n || "").split(/[ :]/)[0];
+// a stage's split: the monitor's (the bot's stamp, else the matching milestone), else the bot's stamp, else the
+// milestone here (an older monitor). No "oil": that milestone fires long before the oil stage is done.
+const STAGE_MS = { "Power and labs": "power-on", "Red science automated": "red-auto", "Green science automated": "green-auto",
+  "Blue science automated": "blue-auto", "Purple science automated": "purple-auto",
+  "Yellow science automated": "yellow-auto", "Rocket silo researched": "silo", "Rocket launched": "rocket" };
+function splitMinute(s, ms, splits) {
+  if (splits && splits[s.name] != null) return splits[s.name];
+  if (s.done_minute != null) return s.done_minute;
+  const tick = (ms || {})[STAGE_MS[s.name]];
+  return typeof tick === "number" ? tick / 3600 : null;
+}
+// against the personal best: "−0:31" ahead, "+12:05" behind (m:ss under an hour, h:mm over)
+function fmtDelta(x) {
+  const a = Math.abs(x), sign = x < 0 ? "−" : "+";
+  if (a >= 60) return sign + fmtHM(a);
+  return sign + `${Math.floor(a)}:${String(Math.floor((a * 60) % 60)).padStart(2, "0")}`;
+}
+const WHO = { plan: "strategist", strategist: "strategist", overseer: "overseer", assessor: "assessor", rules: "rules", fixer: "fixer", watchdog: "watchdog" };
+const isPlaying = (d, L) => !d.finished && !d.stale && L.status === "playing";
+
+// ---------------------------------------------------------------- the state machine's chips
+const SVGNS = "http://www.w3.org/2000/svg";
+function chip(parent, id, label, x, y, w) {
+  const g = document.createElementNS(SVGNS, "g"); g.setAttribute("class", "c"); g.id = id;
+  const r = document.createElementNS(SVGNS, "rect"); Object.entries({ x, y, width: w, height: 24 }).forEach(([k, v]) => r.setAttribute(k, v));
+  const t = document.createElementNS(SVGNS, "text"); Object.entries({ x: x + w / 2, y: y + 17, "text-anchor": "middle" }).forEach(([k, v]) => t.setAttribute(k, v));
+  t.textContent = label; g.append(r, t); parent.append(g);
+}
+const STEPS = [["design", "design"], ["unlock", "unlock"], ["make", "craft"], ["plates", "plates"], ["smelt", "smelt"], ["build", "place"],
+  ["connect", "power"], ["research", "resrch"], ["wait", "wait"]];
+const STEP_CHIP = { between: "build", remove: "build", storage: "make", refresh: "wait", courier: null };
+STEPS.forEach(([s, label], i) => chip($("chips"), "s-" + s, label, 114 + (i % 3) * 72, 98 + Math.floor(i / 3) * 27, 66));
+const FSTEPS = [["coal", "coal"], ["sites", "sites"], ["power", "power"], ["labs", "labs"], ["courier", "haul"]];
+FSTEPS.forEach(([s, label], i) => chip($("fchips"), "f-" + s, label, 120 + i * 64, 212, 58));
+
+// ---------------------------------------------------------------- pop-ups
+function toast(kind, big, small, life = 7) {
+  const el = document.createElement("div"); el.className = "toast " + kind; el.style.setProperty("--life", life + "s");
+  el.innerHTML = `<div class="big">${esc(big)}</div>${small ? `<div class="small">${esc(small)}</div>` : ""}`;
+  $("toasts").prepend(el); setTimeout(() => el.remove(), (life + 1) * 1000);
+  while ($("toasts").children.length > 2) $("toasts").lastChild.remove();
+}
+function confetti() {
+  const cols = ["#ff9a1f", "#ffb850", "#c76800", "#f4efe6", "#6f6960"];
+  for (let i = 0; i < 70; i++) {
+    const c = document.createElement("i"); c.className = "confetti";
+    c.style.left = Math.random() * 1920 + "px"; c.style.background = cols[i % cols.length];
+    c.style.animationDuration = 2.5 + Math.random() * 2.5 + "s"; c.style.transform = `translateY(-40px) rotate(${Math.random() * 360}deg)`;
+    $("stage").append(c); setTimeout(() => c.remove(), 5200);
+  }
+}
+
+// ---------------------------------------------------------------- sound
+// Every effect is synthesised once at load (an OfflineAudioContext per sound) and then played from a buffer.
+// One palette so they belong together: D major, struck steel and bells, one reverb room, the same saturation
+// and compressor on every sound. In OBS tick "Control audio via OBS" on the browser source to get a fader.
+// ?sfx=0 turns it off, ?vol=0.5 sets the level (default 0.8), ?sfxtest=1 shows a button for each sound.
+const SFX = (() => {
+  const enabled = Q.get("sfx") !== "0";
+  const vol = Math.max(0, Math.min(1.5, parseFloat(Q.get("vol") ?? "0.8")));
+  const N = { C3: 130.81, D3: 146.83, E3: 164.81, A3: 220, D4: 293.66, Fs4: 369.99, A4: 440, D5: 587.33, E5: 659.26, Fs5: 739.99,
+    A5: 880, D6: 1174.66, E6: 1318.51, Fs6: 1479.98, A6: 1760, D7: 2349.32 };
+  const SR = 48000;
+  let ctx = null, master = null;
+  const bufs = {}, last = {}, big = { p: 0, t: 0 };
+
+  // the shared chain: dry -> soft saturation -> compressor, and a send into a ~1.9 s room
+  function bus(len) {
+    const c = new OfflineAudioContext(2, Math.ceil(SR * len), SR);
+    const comp = c.createDynamicsCompressor();
+    comp.threshold.value = -16; comp.knee.value = 8; comp.ratio.value = 3; comp.attack.value = .004; comp.release.value = .25;
+    const sat = c.createWaveShaper(), cv = new Float32Array(1024);
+    for (let i = 0; i < cv.length; i++) { const x = i / (cv.length - 1) * 2 - 1; cv[i] = Math.tanh(1.8 * x) / Math.tanh(1.8); }
+    sat.curve = cv; sat.oversample = "2x";
+    const dry = c.createGain(), verb = c.createGain(), conv = c.createConvolver(), wet = c.createGain();
+    const ir = c.createBuffer(2, Math.floor(SR * 1.9), SR);
+    for (let ch = 0; ch < 2; ch++) {
+      const d = ir.getChannelData(ch);
+      for (let i = 0; i < d.length; i++) {
+        const t = i / d.length, early = i < SR * .08 && Math.random() < .004 ? 2.5 : 1;   // a few early reflections
+        d[i] = (Math.random() * 2 - 1) * Math.pow(1 - t, 3.4) * early * Math.min(1, i / (SR * .01));
+      }
+    }
+    conv.buffer = ir; wet.gain.value = 5;
+    dry.connect(sat); sat.connect(comp); verb.connect(conv); conv.connect(wet); wet.connect(comp); comp.connect(c.destination);
+    const noise = c.createBuffer(1, SR, SR), nd = noise.getChannelData(0);
+    for (let i = 0; i < nd.length; i++) nd[i] = Math.random() * 2 - 1;
+    return { c, dry, verb, noise };
+  }
+  function out(S, node, send = .25, pan = 0) {
+    const p = S.c.createStereoPanner(); p.pan.value = pan; node.connect(p); p.connect(S.dry);
+    if (send) { const g = S.c.createGain(); g.gain.value = send; p.connect(g); g.connect(S.verb); }
+  }
+  function env(param, t, a, peak, dec) { param.setValueAtTime(.0001, t); param.exponentialRampToValueAtTime(Math.max(peak, .0002), t + a); param.exponentialRampToValueAtTime(.0001, t + a + dec); }
+  function osc(S, type, f, t, end) { const o = S.c.createOscillator(); o.type = type; o.frequency.value = f; o.start(t); o.stop(end); return o; }
+  const jitter = () => 1 + (Math.random() - .5) * .003;      // no two partials exactly in tune: less "generated"
+
+  // a struck bar (glockenspiel / bell): partials with their own decays
+  function bell(S, t, f, dur, gain, send = .3, pan = 0) {
+    [[1, 1], [2, .42], [3.01, .2], [4.17, .15], [5.43, .08], [6.79, .05]].forEach(([r, a], i) => {
+      const o = osc(S, "sine", f * r * jitter(), t, t + dur + .1), g = S.c.createGain();
+      env(g.gain, t, .0015, gain * a, dur / (1 + i * 1.1)); o.connect(g); out(S, g, send, pan);
+    });
+    noiseHit(S, t, Math.min(9000, f * 4), 3, gain * .25, .008, 0, pan);   // the mallet
+  }
+  // a glassy FM ding: the sparkle on top
+  function ding(S, t, f, dur, gain, send = .45, pan = 0) {
+    const car = osc(S, "sine", f, t, t + dur + .1), mod = osc(S, "sine", f * 3.5, t, t + dur + .1), mg = S.c.createGain(), g = S.c.createGain();
+    mg.gain.setValueAtTime(f * 2.2, t); mg.gain.exponentialRampToValueAtTime(f * .04, t + dur * .6);
+    mod.connect(mg); mg.connect(car.frequency); env(g.gain, t, .002, gain, dur); car.connect(g); out(S, g, send, pan);
+  }
+  // steel hit: inharmonic partials that die fast, and a bright tick
+  function clank(S, t, f, gain, send = .3) {
+    [[1, 1, .3], [2.76, .6, .17], [5.4, .4, .1], [8.93, .25, .07], [13.34, .14, .05]].forEach(([r, a, d]) => {
+      const o = osc(S, "triangle", f * r * jitter(), t, t + d + .05), g = S.c.createGain(); env(g.gain, t, .001, gain * a, d); o.connect(g); out(S, g, send);
+    });
+    noiseHit(S, t, 3200, 1.2, gain * .7, .03, send);
+  }
+  function noiseHit(S, t, f, q, gain, dur, send = .2, pan = 0) {
+    const s = S.c.createBufferSource(), bp = S.c.createBiquadFilter(), g = S.c.createGain();
+    s.buffer = S.noise; bp.type = "bandpass"; bp.frequency.value = f; bp.Q.value = q;
+    env(g.gain, t, .001, gain, dur); s.connect(bp); bp.connect(g); out(S, g, send, pan); s.start(t); s.stop(t + dur + .05);
+  }
+  // the weight under a hit: a sine that drops in pitch
+  function thump(S, t, gain) {
+    const o = osc(S, "sine", 150, t, t + .6), g = S.c.createGain();
+    o.frequency.setValueAtTime(150, t); o.frequency.exponentialRampToValueAtTime(42, t + .22);
+    env(g.gain, t, .003, gain, .45); o.connect(g); out(S, g, .05);
+  }
+  // a brass stab: detuned saws through a filter that opens, then closes
+  function horn(S, t, f, dur, gain, send = .35) {
+    const lp = S.c.createBiquadFilter(), g = S.c.createGain(); lp.type = "lowpass"; lp.Q.value = 1.6;
+    lp.frequency.setValueAtTime(250, t); lp.frequency.exponentialRampToValueAtTime(2200, t + .06); lp.frequency.exponentialRampToValueAtTime(650, t + dur);
+    g.gain.setValueAtTime(.0001, t); g.gain.exponentialRampToValueAtTime(gain, t + .035); g.gain.setValueAtTime(gain, t + dur * .6); g.gain.exponentialRampToValueAtTime(.0001, t + dur + .25);
+    [[1, -8, 1], [1, 8, 1], [.5, 0, .6], [2, 3, .22]].forEach(([m, cents, a]) => {
+      const o = osc(S, "sawtooth", f * m, t, t + dur + .3), og = S.c.createGain(); o.detune.value = cents; og.gain.value = a / 3; o.connect(og); og.connect(lp);
+    });
+    lp.connect(g); out(S, g, send);
+  }
+  // a low "denied" buzz that sags in pitch
+  function buzz(S, t, f, dur, gain) {
+    const lp = S.c.createBiquadFilter(), g = S.c.createGain(); lp.type = "lowpass"; lp.frequency.value = 1100; lp.Q.value = 3;
+    g.gain.setValueAtTime(.0001, t); g.gain.exponentialRampToValueAtTime(gain, t + .008); g.gain.setValueAtTime(gain, t + dur * .7); g.gain.exponentialRampToValueAtTime(.0001, t + dur);
+    ["square", "sawtooth"].forEach((ty, i) => {
+      const o = osc(S, ty, f * (i ? 1.006 : 1), t, t + dur + .05), og = S.c.createGain();
+      o.frequency.setValueAtTime(f * (i ? 1.006 : 1), t); o.frequency.linearRampToValueAtTime(f * .93, t + dur); og.gain.value = .5; o.connect(og); og.connect(lp);
+    });
+    lp.connect(g); out(S, g, .15);
+  }
+  // a factory klaxon tone, through a small horn speaker
+  function klaxon(S, t, f, dur, gain) {
+    const bp = S.c.createBiquadFilter(), g = S.c.createGain(); bp.type = "bandpass"; bp.frequency.value = 1300; bp.Q.value = 1.1;
+    g.gain.setValueAtTime(.0001, t); g.gain.exponentialRampToValueAtTime(gain, t + .015); g.gain.setValueAtTime(gain, t + dur - .03); g.gain.exponentialRampToValueAtTime(.0001, t + dur);
+    [["square", 1], ["sawtooth", 1.004]].forEach(([ty, m]) => { const o = osc(S, ty, f * m, t, t + dur + .05); o.connect(bp); });
+    bp.connect(g); out(S, g, .3);
+  }
+  // a warm swell under the big moment
+  function pad(S, t, freqs, dur, gain) {
+    freqs.forEach((f, i) => {
+      const o = osc(S, "triangle", f, t, t + dur + .1), g = S.c.createGain(), lp = S.c.createBiquadFilter();
+      lp.type = "lowpass"; lp.frequency.value = 1400; o.detune.value = i % 2 ? 6 : -6;
+      g.gain.setValueAtTime(.0001, t); g.gain.exponentialRampToValueAtTime(gain, t + .25); g.gain.exponentialRampToValueAtTime(.0001, t + dur);
+      o.connect(lp); lp.connect(g); out(S, g, .5, i % 2 ? .3 : -.3);
+    });
+  }
+
+  // name: [seconds, peak level after normalising, priority, cooldown ms, what it is, how it is built]
+  const SOUNDS = {
+    stage: [3.8, .92, 5, 3000, "stage cleared", S => {
+      thump(S, 0, .9); clank(S, 0, 523, .35);
+      [N.D5, N.Fs5, N.A5, N.D6, N.Fs6].forEach((f, i) => bell(S, .03 + i * .07, f, 1.4, .3, .3, -.4 + i * .2));   // the run-up
+      pad(S, .05, [N.D3, N.A3, N.D4, N.Fs4], 2.6, .07);
+      [N.D6, N.E6, N.Fs6, N.A6].forEach((f, i) => bell(S, .4, f, 2.4, .12, .55, i % 2 ? .35 : -.35));            // the chord that rings
+      ding(S, .4, N.A6, 1.8, .07, .6, .2); ding(S, .52, N.D7, 1.5, .05, .6, -.2);
+    }],
+    milestone: [2.6, .8, 4, 2500, "milestone", S => {
+      thump(S, 0, .45); clank(S, 0, 698, .22);
+      bell(S, 0, N.A5, 1.0, .3, .3, -.15); bell(S, .09, N.D6, 1.5, .34, .4, .15); ding(S, .09, N.Fs6, 1.2, .06, .5);
+    }],
+    overseer: [2.6, .75, 3, 4000, "overseer steps in", S => {
+      thump(S, 0, .55); clank(S, 0, 330, .26);
+      horn(S, .02, N.D3, .3, .32); horn(S, .2, N.A3, .7, .34); bell(S, .2, N.A5, .9, .06, .5);
+    }],
+    alarm: [1.9, .5, 3, 6000, "rule tripped / watchdog", S => {
+      [N.A5, N.Fs5, N.A5, N.Fs5].forEach((f, i) => klaxon(S, i * .21, f, .18, .2));
+    }],
+    fail: [1.4, .55, 2, 1500, "goal failed", S => {
+      thump(S, 0, .35); clank(S, 0, 196, .16, .15); buzz(S, .02, N.E3, .13, .16); buzz(S, .17, N.C3, .3, .16);
+    }],
+    ok: [1.6, .55, 1, 1200, "goal done", S => {
+      noiseHit(S, 0, 4200, 2, .16, .012, .1); bell(S, 0, N.A5, .22, .2, .15, -.1); bell(S, .065, N.D6, .75, .26, .25, .1);
+    }],
+    plan: [1.1, .38, 1, 2500, "new plan / reorder", S => {
+      noiseHit(S, 0, 2400, 4, .3, .006, .08, -.2); noiseHit(S, .045, 3600, 4, .22, .006, .08, .2);
+      thump(S, 0, .12); bell(S, .05, N.D6, .3, .06, .3);
+    }],
+  };
+
+  async function load() {
+    if (!enabled || ctx) return;
+    try { ctx = new AudioContext({ latencyHint: "interactive" }); } catch { return; }
+    master = ctx.createGain(); master.gain.value = vol; master.connect(ctx.destination);
+    await Promise.all(Object.entries(SOUNDS).map(async ([name, [len, level, , , , build]]) => {
+      try {
+        const S = bus(len); build(S);
+        const b = await S.c.startRendering();
+        let peak = 0;
+        for (let ch = 0; ch < b.numberOfChannels; ch++) for (const v of b.getChannelData(ch)) peak = Math.max(peak, Math.abs(v));
+        const fade = Math.floor(SR * .12);                            // the room's tail fades out, never cut
+        if (peak > 0) for (let ch = 0; ch < b.numberOfChannels; ch++) {
+          const d = b.getChannelData(ch);
+          for (let i = 0; i < d.length; i++) d[i] *= level / peak * Math.min(1, (d.length - i) / fade);
+        }
+        bufs[name] = b;
+      } catch (e) { console.error("sfx", name, e); }
+    }));
+    badge();
+  }
+  // a browser tab (not OBS) starts audio muted until a click: say so, and let the click switch it on
+  function badge() {
+    const off = enabled && ctx && ctx.state === "suspended" && !window.obsstudio;
+    $("sfxBadge").classList.toggle("hide", !off);
+  }
+  addEventListener("pointerdown", () => { if (ctx && ctx.state === "suspended") ctx.resume().then(badge); });
+
+  function play(name, force = false) {
+    const s = SOUNDS[name], b = bufs[name];
+    if (!s || !b || !ctx) return;
+    const now = performance.now(), [, , pri, cool] = s;
+    if (!force) {
+      if (now - (last[name] || -1e9) < cool) return;                 // not the same sound twice in a row
+      if (big.p > pri && now - big.t < 1600) return;                  // a bigger moment is still ringing
+    }
+    last[name] = now; if (pri >= big.p || now - big.t >= 1600) { big.p = pri; big.t = now; }
+    if (ctx.state === "suspended") { ctx.resume().then(badge); badge(); }
+    const src = ctx.createBufferSource(); src.buffer = b; src.connect(master); src.start();
+  }
+  return { load, play, SOUNDS, bufs };
+})();
+SFX.load();
+if (Q.get("sfxtest") === "1") {
+  $("sfxTest").classList.remove("hide");
+  $("sfxBtns").innerHTML = Object.entries(SFX.SOUNDS).map(([k, v]) => `<button data-s="${k}">${esc(k)}<small>${esc(v[4])}</small></button>`).join("");
+  $("sfxBtns").addEventListener("click", e => { const b = e.target.closest("button"); if (b) SFX.play(b.dataset.s, true); });
+}
+
+// ---------------------------------------------------------------- state between polls
+let lastStage = null, seenThoughts = null, seenResults = null, seenMs = null, lastOv = null;
+const MAINS = ["start", "take-goal", "run-goal", "record", "replan", "end"];
+
+function renderTop(d, L, stages) {
+  const playing = isPlaying(d, L);
+  $("live").textContent = playing ? "LIVE" : d.finished ? "ENDED" : "PAUSED"; $("live").classList.toggle("off", !playing);
+  setText("clock", fmtClock(L.game_minute));
+  const S = d.stream || {};
+  if (S.run_no) setText("runNo", "#" + S.run_no);
+  const up = String(S.upgrades ?? 0);
+  if ($("upNo").textContent !== up) { $("upNo").textContent = up; $("upNo").classList.remove("pop"); void $("upNo").offsetWidth; $("upNo").classList.add("pop"); }
+  // the clock is the game's: it stops while the world is paused, so say so
+  setText("clockCap", playing ? "in-game time" : "in-game · paused"); $("clockCap").classList.toggle("frozen", !playing);
+  if (!stages.length) return;
+  $("splits").style.gridTemplateColumns = `repeat(${stages.length}, minmax(0, 1fr))`;
+  const done = stages.filter(s => s.done).length, nowIdx = stages.findIndex(s => s.status === "now");
+  const at = stages.map(s => s.done ? splitMinute(s, L.milestones, d.splits) : null);
+  const prev = Math.max(0, ...at.filter(v => v != null));   // the current split runs from the last cleared one
+  // racing the personal best: how each cleared stage compares, and the target for the one in hand
+  const pb = d.pb || null, pbs = (pb && pb.splits) || {}, best = (pb && pb.best) || {};
+  const vs = i => {
+    const s = stages[i], mine = at[i], theirs = pbs[s.name];
+    if (mine == null || theirs == null) return null;
+    return { d: mine - theirs, gold: best[s.name] != null && mine < best[s.name] };
+  };
+  const gm = L.game_minute || 0;
+  setHTML("splits", stages.map((s, i) => {
+    const st = s.done ? "done" : s.status === "now" ? "now" : "";
+    let tm = "";
+    if (s.done) {
+      const v = vs(i);
+      tm = (at[i] != null ? fmtHM(at[i]) : "✓")
+        + (v ? ` <span class="dl ${v.gold ? "gold" : v.d <= 0 ? "ahead" : "behind"}">${v.gold ? "★" : ""}${fmtDelta(v.d)}</span>` : "");
+    } else if (s.status === "now") {
+      const target = pbs[s.name];
+      tm = target == null ? "▶ " + fmtHM(Math.max(0, gm - prev))
+        : gm <= target ? `<span class="dl pb">PB ${fmtHM(target)}</span>` : `<span class="dl behind">PB ${fmtDelta(gm - target)}</span>`;
+    }
+    return `<div class="sp ${st}" title="${esc(s.name)}"><div class="seg"></div><div class="nm">${esc(short(s.name))}</div><div class="tm">${tm}</div></div>`;
+  }).join(""));
+  setNum("pct", Math.round((done + (nowIdx >= 0 ? .5 : 0)) / stages.length * 100) + "%");
+  setText("vsPb", pb ? `vs PB of ${pb.runs}` : "first run");
+  $("vsPb").title = pb ? `PB: run ${pb.run}${pb.map ? " on " + pb.map : ""}` : "";
+  if (lastStage != null && done > lastStage) {
+    const s = stages[done - 1], m = at[done - 1], v = vs(done - 1);
+    const big = v && v.gold ? "New best split!" : "Stage cleared";
+    toast("ms", big, `${s.name}${m != null ? " · " + fmt(m) + " in-game" : ""}${v ? " · " + fmtDelta(v.d) + " vs PB" : ""}`, 8); confetti(); SFX.play("stage");
+  }
+  lastStage = done;
+}
+
+function renderBar(d, L) {
+  const playing = isPlaying(d, L), strat = L.strategist || {};
+  const cg = L.current_goal, g = cg ? (cg.goal && typeof cg.goal === "object" ? cg.goal : parseGoal(cg.text)) : null;
+  const waiting = playing && ((L.stage || {}).thinking || strat.thinking_since);
+  setText("doing", g ? say(g) : d.finished ? "Run over" : !playing ? "Paused" : waiting ? "Waiting for a new plan…" : "Between goals");
+  const reflex = g && g.reflex ? stripWho(g.reflex) : "";
+  setHTML("why", reflex ? `<i>WHY</i>${esc(firstSentence(reflex, 160))}` : g ? `<i>WHY</i>next on the strategist's plan` : "");
+  const who = WHO[(cg && cg.who || "plan").split(" ")[0]] || (cg && cg.who) || "strategist";
+  setText("whoTag", "by " + who); $("whoTag").className = "who " + who;
+  // the hands: what the body does right now, against the goal's time budget
+  const st = L.stage || {}, steps = playing ? st.steps || [] : [], top = steps[steps.length - 1] || (playing ? st.foreman : null);
+  setText("handStep", top ? (STEP[top] || top) : cg && playing ? "working" : "idle");
+  setText("handAct", L.activity || "");
+  const used = cg ? Math.max(0, (L.game_minute || 0) - cg.since_minute) : 0, budget = cg && cg.budget_min;
+  setText("tUsed", fmt(used)); setText("tBudget", budget ? fmt(budget) : "no limit");
+  // the last goals: a square each, newest first
+  const res = (L.results || []).slice(-10).reverse();
+  const sig = res.map(r => r.goal + r.ok + r.game_minutes).join("|");
+  if (sig === seenResults) return;
+  const isOk = r => r.ok && !/over budget|stalled|dropped/.test(r.result || "");
+  const firstNew = seenResults != null && res.length;
+  setHTML("sq", res.map((r, i) => `<span class="${isOk(r) ? "" : "bad"} ${firstNew && i === 0 ? "new" : ""}">${isOk(r) ? "✓" : "✕"}</span>`).join(""));
+  if (firstNew) SFX.play(isOk(res[0]) ? "ok" : "fail");
+  const okN = res.filter(isOk).length; setText("okRate", res.length ? `${okN}/${res.length} ok` : "");
+  const r = res[0];
+  setText("last", r ? `${isOk(r) ? "✓" : "✕"} ${sayText(r.goal)}${r.game_minutes != null ? ` · ${(+r.game_minutes).toFixed(1)}m` : ""}${isOk(r) ? "" : " · " + firstSentence(r.result, 60)}` : "");
+  seenResults = sig;
+}
+
+function renderBrain(d, L) {
+  const playing = isPlaying(d, L);
+  // a stopped run keeps its last flags: nobody is thinking any more
+  const st = playing ? L.stage || {} : { ...(L.stage || {}), thinking: false, foreman: null, steps: [] };
+  const strat = playing ? L.strategist || {} : { ...(L.strategist || {}), thinking_since: null, ready_since: null };
+  const ov = playing ? L.overseer || {} : { ...(L.overseer || {}), thinking: false, next_minute: null };
+  const now = d.now || Date.now() / 1000, evs = L.events || [];
+  const recent = (kind, who) => playing && evs.some(e => e.kind === kind && (!who || e.who === who) && now - (e.t || 0) < 12);
+  document.querySelectorAll("#fsm .n").forEach(n => n.classList.remove("on", "busy", "flash", "alarm"));
+  document.querySelectorAll("#fsm .c").forEach(c => c.classList.remove("on", "was"));
+  document.querySelectorAll("#fsm .w").forEach(w => w.classList.remove("hot"));
+  const main = MAINS.includes(st.main) ? st.main : null;
+  if (main && $("n-" + main)) $("n-" + main).classList.add("on");
+  const steps = st.steps || [];
+  steps.forEach((s, i, a) => { const k = s in STEP_CHIP ? STEP_CHIP[s] : s, c = k && $("s-" + k); if (c) c.classList.add(i === a.length - 1 ? "on" : "was"); });
+  const wire = { "run-goal": "e-take-goal-run-goal", record: "e-run-goal-record", replan: "e-record-replan", "take-goal": "e-replan-take-goal" }[main];
+  if (wire && playing) $(wire).classList.add("hot");
+  // the strategist (an LLM): thinking, a fresh plan, or idle
+  const thinkingS = st.thinking || strat.thinking_since;
+  if (thinkingS) { $("n-strategist").classList.add("busy"); $("e-strategist").classList.add("hot"); }
+  else if (recent("plan")) { $("n-strategist").classList.add("flash"); $("e-strategist").classList.add("hot"); }
+  const sSecs = strat.thinking_since ? Math.max(0, Math.round(now - strat.thinking_since)) : null;
+  setText("stratSub", thinkingS ? `thinking${sSecs != null ? " " + sSecs + "s" : "…"}` : strat.ready_since ? "plan ready" : "plans goals");
+  // the overseer (an LLM that reads the whole base every few minutes)
+  if (ov.thinking) { $("n-overseer").classList.add("busy"); $("e-overseer").classList.add("hot"); }
+  else if (recent("oversee")) { $("n-overseer").classList.add("flash"); $("e-overseer").classList.add("hot"); }
+  setText("ovSub", ov.thinking ? "reading base…" : ov.next_minute != null ? `next in ${fmt(Math.max(0, ov.next_minute - (L.game_minute || 0)))}` : ov.model ? "audits base" : "off");
+  // the supervisor: hard rules (red) and the assessor
+  if (recent("assess", "rules")) { $("n-supervisor").classList.add("alarm"); $("e-supervisor").classList.add("hot"); setText("supSub", "rule tripped"); }
+  else if (recent("assess", "assessor")) { $("n-supervisor").classList.add("flash"); $("e-supervisor").classList.add("hot"); setText("supSub", "re-ordering"); }
+  else setText("supSub", "rules+assess");
+  // the foreman: the background crew between steps
+  if (st.foreman) { $("n-foreman").classList.add("on"); $("e-foreman").classList.add("hot"); const c = $("f-" + st.foreman); if (c) c.classList.add("on"); }
+  // the bill: every LLM in the brain
+  const llms = [L.strategist || {}, L.assessor || {}, L.fixer || {}, L.overseer || {}];
+  $("bill").textContent = "$" + llms.reduce((n, x) => n + (x.cost_usd || 0), 0).toFixed(2);
+  const calls = llms.reduce((n, x) => n + (x.calls || 0), 0);
+  setText("calls", calls ? `${calls} llm calls` : "");
+  // the "thinking now" strip above the thoughts
+  const tw = thinkingS ? ["Strategist planning", sSecs != null ? sSecs + " s" : ""] : ov.thinking ? ["Overseer reading the base", ""] : null;
+  $("thinking").classList.toggle("on", !!tw);
+  if (tw) { setText("thinkWho", tw[0]); setText("thinkFor", tw[1]); }
+}
+
+// a decision in the brain, as the viewer reads it
+function thought(e) {
+  const m = e.minute != null ? fmt(e.minute) : "";
+  const ord = (e.changes || []).map(sayChange).filter(Boolean)[0] || "";
+  switch (e.kind) {
+    case "plan": return { who: "strategist", m, txt: e.note || "New plan.", ord: (e.goals || []).length ? `queued ${e.goals.length} goals` : "" };
+    case "oversee": return { who: "overseer", m, txt: firstSentence(e.note, 200), ord };
+    case "assess": return { who: e.who === "rules" ? "rules" : "assessor", m, txt: e.note || "", ord };
+    case "fix": return { who: "fixer", m, txt: e.note || e.why || "", ord: e.why ? "because " + e.why : "" };
+    case "watchdog": return { who: "watchdog", m, txt: `No progress for ${Math.round(e.minutes_without_progress || 0)} game minutes: shaking things up`, ord: e.action ? "action: " + e.action : "" };
+    case "closeout": return { who: "strategist", m, txt: "Close-out: " + (e.why || ""), ord: (e.goals || []).length ? `queued ${e.goals.length} goals` : "" };
+    case "gate": return { who: "rules", m, txt: firstSentence(e.why, 180), ord: e.goal ? "held back: " + sayText(e.goal) : "" };
+    case "milestone": return { who: "milestone", m, txt: "Milestone reached: " + (e.ids || []).join(", "), ord: "" };
+    default: return null;
+  }
+}
+
+function renderThoughts(L) {
+  const evs = (L.events || []).slice().reverse();
+  const items = evs.map(e => [e, thought(e)]).filter(([, t]) => t && t.txt).slice(0, 6);
+  const sig = items.map(([e]) => `${e.kind}@${e.t}`).join("|");
+  if (sig === seenThoughts) return;
+  const firstNew = seenThoughts != null, before = new Set((seenThoughts || "").split("|"));
+  $("feed").innerHTML = items.map(([e, t], i) => `<div class="th ${firstNew && !before.has(`${e.kind}@${e.t}`) ? "new" : ""} ${i > 1 ? "old" : ""}">
+      <div class="meta"><span class="who ${t.who}">${esc(t.who)}</span><span class="m">${esc(t.m)}</span></div>
+      <div class="txt clamp2">${esc(t.txt)}</div>${t.ord ? `<div class="ord clamp1">${esc(t.ord)}</div>` : ""}</div>`).join("")
+    || '<div class="th"><div class="txt" style="color:var(--dim)">The brain\'s decisions show up here.</div></div>';
+  // pop-ups: the overseer giving orders, a milestone
+  const ovs = evs.find(e => e.kind === "oversee"), ms = evs.find(e => e.kind === "milestone");
+  const sounds = [];
+  if (ovs && lastOv != null && ovs.t !== lastOv && (ovs.changes || []).some(c => /drop the goal|pause the goal|forbid|order:/.test(c))) {
+    toast("ov", "Overseer steps in", firstSentence(ovs.note, 150), 8); sounds.push("overseer");
+  }
+  if (ms && seenMs != null && ms.t !== seenMs) { toast("ms", "Milestone", (ms.ids || []).join(", "), 9); confetti(); sounds.push("milestone"); }
+  // the smaller decisions get a sound too: a rule or the watchdog stepping in, a new plan or a reorder
+  if (firstNew) for (const [e] of items) {
+    if (before.has(`${e.kind}@${e.t}`)) continue;
+    if ((e.kind === "assess" && e.who === "rules") || e.kind === "watchdog" || e.kind === "gate") sounds.push("alarm");
+    else if (e.kind === "plan" || e.kind === "closeout" || e.kind === "assess") sounds.push("plan");
+  }
+  const rank = s => SFX.SOUNDS[s][2];
+  if (sounds.length) SFX.play(sounds.sort((a, b) => rank(b) - rank(a))[0]);
+  lastOv = ovs ? ovs.t : 0; seenMs = ms ? ms.t : 0;
+  seenThoughts = sig;
+}
+
+function renderResearch(L, rm) {
+  const rs = L.research || {}, rates = L.rates || {};
+  setText("tech", rs.current ? nice(rs.current) : "Labs idle"); $("tech").classList.toggle("idle", !rs.current);
+  $("techBar").style.width = (rs.progress || 0) * 100 + "%";
+  setText("techPct", rs.current ? Math.round((rs.progress || 0) * 100) + "%" : "");
+  const sci = rm.science || {};
+  setHTML("packs", PACKS.map(([k, nm]) => { const s = sci[k] || {}, v = Math.round(s.made_per_min ?? rates[k] ?? 0);
+    return `<div class="pk ${s.unlocked === false ? "off" : v > 0 ? "on" : ""}"><span class="v">${v}</span><span class="k">${nm}</span></div>`; }).join(""));
+}
+
+function render(d) {
+  const L = d.live || {}, rm = L.roadmap || {}, stages = rm.stages || [];
+  // each part on its own: one odd field never blanks the rest of the overlay
+  for (const part of [() => renderTop(d, L, stages), () => renderBar(d, L), () => renderBrain(d, L),
+    () => renderThoughts(L), () => renderResearch(L, rm)]) {
+    try { part(); } catch (e) { console.error(e); }
+  }
+}
+
+// ---------------------------------------------------------------- data: the live run, or a demo
+async function poll() {
+  try {
+    const r = await fetch(`/api/overlay/${Q.get("run") || "latest"}${Q.get("pb") === "map" ? "?pb=map" : ""}`, { cache: "no-store" });
+    if (r.ok) render(await r.json());
+  } catch { /* the monitor restarts: keep the last frame */ }
+}
+function demo() {                                    // fake data that moves, to place the overlay in OBS
+  let t = 290, k = 0;
+  const STG = ["Power and labs", "Red science automated", "Green science automated", "Workshop floor and electric mines", "Oil: pumpjacks and a refinery",
+    "Blue science automated", "Purple science automated", "Yellow science automated", "Rocket silo researched", "Silo built", "Rocket parts", "Rocket launched"];
+  const SPL = [17.3, 72.0, 131.5, 210.4, 266.0];
+  const goals = [
+    { do: "replace", site: 39, force: true, with: { do: "build", module: "factory", item: "transport-belt", per_minute: 6 },
+      reflex: "overseer: Site 39's relocation never happened: both attempts were rejected by the sealed-site guard. All eight machines remain input-starved." },
+    { do: "build", module: "workshop", item: "plastic-bar", per_minute: 30 },
+    { do: "research", tech: "chemical-science-pack" },
+    { do: "build", module: "electric_mine", resource: "iron-ore", count: 3, reflex: "assessor: iron is 70/min short of what the workshop uses" },
+    { do: "link" }];
+  const txt = g => `${g.do} ${g.module || ""} {${Object.entries(g).filter(([k]) => !["do", "module", "with", "reflex"].includes(k)).map(([k, v]) => `'${k}': ${typeof v === "string" ? `'${v}'` : v}`).join(", ")}}`;
+  const now = () => Date.now() / 1000;
+  const events = [
+    { t: now() - 200, kind: "plan", note: "Replace the starved belt factory with a larger one near spare iron capacity, then advance plastics and chemical science.", goals: [1, 2, 3, 4], minute: 294.0 },
+    { t: now() - 150, kind: "assess", who: "assessor", note: "Replace site 39 beside spare iron line 18; preserve site 13.", changes: ["moved up: replace {'site': 39, 'with': {'do': 'build'}}"], minute: 294.4 },
+    { t: now() - 100, kind: "oversee", note: "Site 39's relocation never happened: both attempts were rejected by the sealed-site guard. Authorize the relocation explicitly.", changes: ["order: replace {'site': 39, 'force': True}"], minute: 297.0 }];
+  const results = [{ goal: "build factory {'item': 'underground-belt', 'per_minute': 6.0}", ok: true, result: "built", game_minutes: 6.1 },
+    { goal: "replace {'site': 13, 'force': True}", ok: false, result: "no room for a row of electric drills on the iron-ore patches near the base", game_minutes: 2.4 },
+    { goal: "research {'tech': 'plastics'}", ok: true, result: "done", game_minutes: 3.0 }, { goal: "link {}", ok: true, result: "done", game_minutes: 1.1 }];
+  const NOTES = [
+    ["oversee", null, "Iron is short: 236/min made against 300 used. Two more electric rows before anything else.", ["order: build electric_mine {'resource': 'iron-ore', 'count': 4}"]],
+    ["assess", "assessor", "Plastic workshop first; chemical science needs it and the refinery is idle.", ["moved up: build workshop {'item': 'plastic-bar', 'per_minute': 30}"]],
+    ["assess", "rules", "site 12 (electric_mine coal): 1 drill on mined-out ground; replacing it first", ["replace {'site': 12, 'force': True}", "pause the current goal"]],
+    ["plan", null, "Feed the blue science line: plastic, then advanced circuits, then the chemical plants.", []]];
+  setInterval(() => {
+    t += .1; k++;
+    const done = 3 + Math.floor(k / 600), gi = Math.floor(k / 80) % goals.length;
+    if (k % 80 === 0) results.push({ goal: txt(goals[(gi + 4) % 5]), ok: Math.random() > .3, result: Math.random() > .5 ? "built" : "over budget: ran 16 game minutes", game_minutes: 7.2 });
+    if (k % 90 === 45) { const [kind, who, note, changes] = NOTES[Math.floor(k / 90) % NOTES.length]; events.push({ t: now(), kind, who, note, changes, minute: t, goals: kind === "plan" ? [1, 2, 3] : undefined }); }
+    if (k % 600 === 300) events.push({ t: now(), kind: "milestone", ids: ["plastic-auto"], minute: t });
+    const thinkPhase = k % 160;
+    render({ title: "Freeplay · As far as you can get", finished: false, stale: false, now: now(),
+      stream: { run_no: 3, upgrades: 7 + Math.floor(k / 20) },
+      pb: { run: "20261118-220108-dc1bf6", map: "practice-1012", runs: 21,
+        splits: { "Power and labs": 17.5, "Red science automated": 70.5, "Green science automated": 125.2, "Workshop floor and electric mines": 244, "Oil: pumpjacks and a refinery": 318 },
+        best: { "Power and labs": 13.8, "Red science automated": 37.0, "Green science automated": 95.2, "Workshop floor and electric mines": 244, "Oil: pumpjacks and a refinery": 318 } },
+      live: {
+      status: "playing", game_minute: t,
+      current_goal: { goal: goals[gi], text: txt(goals[gi]), since_minute: t - (k % 80) * .1, budget_min: 15, who: goals[gi].reflex ? goals[gi].reflex.split(":")[0] : "plan" },
+      queue: [1, 2, 3].map(j => txt(goals[(gi + j) % goals.length])),
+      stage: { main: ["take-goal", "run-goal", "run-goal", "run-goal", "run-goal", "run-goal", "record", "replan"][Math.floor(k / 10) % 8],
+        steps: [["design"], ["design", "make"], ["build"], ["build", "between"], ["connect"], ["unlock"], [], []][Math.floor(k / 10) % 8],
+        foreman: k % 70 < 14 ? ["coal", "sites", "labs", "courier"][Math.floor(k / 70) % 4] : null, thinking: thinkPhase < 30 },
+      activity: ["walking to (22, -24)", "placing 6 assemblers", "laying 41 belts", "mining stone"][Math.floor(k / 25) % 4],
+      research: { current: "advanced-oil-processing", progress: (k % 100) / 100 },
+      rates: { "automation-science-pack": 12, "logistic-science-pack": 14 },
+      roadmap: { stages: STG.map((n, i) => ({ name: n, done: i < done, done_minute: i < done ? (SPL[i] ?? t - 1) : undefined, status: i < done ? "done" : i === done ? "now" : "todo" })),
+        science: { "automation-science-pack": { made_per_min: 12, unlocked: true }, "logistic-science-pack": { made_per_min: 14, unlocked: true }, "chemical-science-pack": { made_per_min: 0, unlocked: true }, "production-science-pack": { unlocked: false }, "utility-science-pack": { unlocked: false } } },
+      overseer: { model: "gpt-6.1-sol", thinking: thinkPhase >= 80 && thinkPhase < 100, next_minute: t + 3 - (k % 30) * .1, cost_usd: .87, calls: 27 },
+      strategist: { thinking_since: thinkPhase < 30 ? now() - thinkPhase * .1 : null, cost_usd: .32, calls: 31,
+        last: { note: "Replace the starved belt factory with a larger one near spare iron capacity, then advance plastics and chemical science.", minute: 294 } },
+      assessor: { cost_usd: .86, calls: 213 }, results, events: events.slice(-30) } });
+  }, 100);
+}
+if (Q.get("demo") === "1") demo(); else { poll(); setInterval(poll, 1000); }
+</script>
+</body>
+</html>

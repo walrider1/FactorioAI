@@ -1,0 +1,709 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Arena Monitor</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Barlow+Condensed:wght@600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* A control-room board in tabs. Always visible: the run picker and a strip of five numbers. Overview answers
+   "how far along is it and what is it doing"; Base shows the factory; AI shows the three models' decisions;
+   Loop shows the control loop live; Commands is the raw API log. */
+:root {
+  --bg: #f1f0ec; --panel: #ffffff; --ink: #1c2126; --muted: #5d666e; --line: #d9d6cf; --soft: #ece9e2;
+  --code: #0b7a6e; --code-bg: #dcf1ec; --llm: #5b49c9; --llm-bg: #e9e5fb; --amber: #c77700; --amber-bg: #fdf0d8;
+  --ov: #7b4fd6; --ov-bg: #efe8fd;
+  --ok: #2f7d32; --ok-bg: #e2f1e2; --bad: #b3261e; --bad-bg: #fbe4e2; --warn: #9a6200; --warn-bg: #fbefd9;
+  --f-display: "Barlow Condensed", "Arial Narrow", sans-serif;
+  --f-body: "IBM Plex Sans", system-ui, sans-serif;
+  --f-mono: "IBM Plex Mono", ui-monospace, Consolas, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) { :root {
+  --bg: #0c0f13; --panel: #141920; --ink: #e6ebef; --muted: #8e9aa5; --line: #262e38; --soft: #1b222b;
+  --code: #36d3bb; --code-bg: #0f2e2a; --llm: #a99cff; --llm-bg: #231f42; --amber: #ffb627; --amber-bg: #332508;
+  --ov: #b998ff; --ov-bg: #2a1f48;
+  --ok: #7cc97f; --ok-bg: #16301a; --bad: #f28b82; --bad-bg: #3a1714; --warn: #e3b35a; --warn-bg: #33270f;
+  color-scheme: dark; } }
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.5 var(--f-body); }
+.wrap { max-width: 1400px; margin: 0 auto; padding: 16px 16px 48px; display: grid; gap: 14px; }
+.bar { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; }
+.brand { font: 700 24px var(--f-display); letter-spacing: .02em; display: flex; align-items: center; gap: 10px; }
+.brand .mark { width: 30px; height: 30px; border-radius: 8px; background: linear-gradient(135deg, var(--amber), #ff7a00); display: grid; place-items: center; font-size: 17px; }
+.bar { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 10px 14px; }
+.bar .grow { flex: 1; }
+.lnk { font: 500 13px var(--f-body); color: var(--amber); text-decoration: none; border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; }
+.lnk:hover { border-color: var(--amber); }
+select { font: 13px var(--f-mono); background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; max-width: 100%; }
+.meta { color: var(--muted); font-size: 13px; display: flex; flex-wrap: wrap; gap: 4px 14px; }
+.meta b { color: var(--ink); font-weight: 500; }
+.pill { font: 500 11px/1 var(--f-mono); letter-spacing: .06em; text-transform: uppercase; padding: 5px 8px; border-radius: 4px; background: var(--soft); color: var(--muted); }
+.pill.playing, .pill.active { background: var(--code-bg); color: var(--code); }
+.pill.finished { background: var(--ok-bg); color: var(--ok); }
+.pill.void, .pill.stale { background: var(--bad-bg); color: var(--bad); }
+.strip { display: grid; grid-template-columns: minmax(0, 1.8fr) repeat(4, minmax(0, 1fr)); gap: 12px; }
+.tile { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px; min-width: 0; }
+.tile.hero { background: linear-gradient(120deg, var(--panel), var(--amber-bg)); }
+.tile .k { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tile .v { font: 700 30px/1.1 var(--f-display); font-variant-numeric: tabular-nums; }
+.tile .s { font: 12px var(--f-mono); color: var(--muted); margin-top: 4px; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.meter { height: 6px; background: var(--soft); border-radius: 3px; overflow: hidden; margin-top: 8px; }
+.meter i { display: block; height: 100%; background: var(--code); width: 0; transition: width .6s; }
+.meter i.llm { background: var(--llm); } .meter i.hot { background: var(--bad); } .meter i.warn { background: var(--warn); }
+.tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+.tabs button { font: 500 14px var(--f-display); letter-spacing: .02em; background: none; border: 0; border-bottom: 2.5px solid transparent; color: var(--muted); padding: 8px 14px; cursor: pointer; }
+.tabs button[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--amber); }
+.tabs button { font-size: 16px; }
+.tabs button:focus-visible { outline: 2px solid var(--code); outline-offset: 2px; border-radius: 4px; }
+.tabs .badge { font: 500 10.5px var(--f-mono); background: var(--bad-bg); color: var(--bad); border-radius: 8px; padding: 1px 6px; margin-left: 6px; }
+.pane { display: none; } .pane.on { display: grid; gap: 14px; }
+.grid2 { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 14px; align-items: start; }
+.grid3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; align-items: start; }
+.col { display: grid; gap: 14px; min-width: 0; }
+section { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 14px 16px; min-width: 0; box-shadow: 0 1px 0 rgba(0, 0, 0, .03); }
+h2 { font: 700 17px var(--f-display); letter-spacing: .04em; text-transform: uppercase; margin: 0 0 10px; display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+h2 small { font: 12px var(--f-body); color: var(--muted); text-align: right; text-transform: none; letter-spacing: 0; }
+.muted { color: var(--muted); } .empty { color: var(--muted); font-size: 13px; }
+.note { font-size: 13px; padding: 8px 10px; background: var(--warn-bg); color: var(--warn); border-radius: 6px; }
+/* road to the rocket */
+.road { display: grid; gap: 0; counter-reset: st; }
+.stage { display: grid; grid-template-columns: 26px minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 6px 0; position: relative; }
+.stage .dot { width: 18px; height: 18px; border-radius: 50%; border: 2px solid var(--line); background: var(--panel); margin-left: 4px; position: relative; z-index: 1; }
+.stage:not(:last-child)::after { content: ""; position: absolute; left: 12px; top: 26px; bottom: -8px; width: 2px; background: var(--line); }
+.stage.done .dot { background: var(--amber); border-color: var(--amber); }
+.stage.done:not(:last-child)::after { background: var(--amber); }
+.stage.now .dot { border-color: var(--amber); background: var(--amber-bg); box-shadow: 0 0 0 4px var(--amber-bg); }
+.stage .nm { font-size: 14px; } .stage.todo .nm { color: var(--muted); } .stage.now .nm { font-weight: 500; }
+.stage .dt { font: 12px var(--f-mono); color: var(--muted); text-align: right; }
+.next { margin-top: 10px; display: grid; gap: 4px; }
+.next .lbl { font-size: 12px; color: var(--muted); }
+.goal { font: 13px var(--f-mono); background: var(--code-bg); color: var(--code); padding: 6px 9px; border-radius: 6px; overflow-wrap: anywhere; }
+.activity { font: 500 17px/1.35 var(--f-display); }
+.queue { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.queue span { font: 12px var(--f-mono); border: 1px solid var(--line); border-radius: 5px; padding: 3px 7px; color: var(--muted); }
+/* bars: science, power, plates */
+.bars { display: grid; gap: 9px; }
+.brow { display: grid; grid-template-columns: 120px minmax(0, 1fr) 92px; gap: 10px; align-items: center; font-size: 13px; }
+.brow .track { height: 10px; background: var(--soft); border-radius: 5px; overflow: hidden; position: relative; }
+.brow .track i { position: absolute; inset: 0 auto 0 0; border-radius: 5px; }
+.brow .val { font: 12px var(--f-mono); color: var(--muted); text-align: right; font-variant-numeric: tabular-nums; }
+.brow.locked { opacity: .5; }
+.sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
+.facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; margin-top: 10px; }
+.fact .k { font-size: 12px; color: var(--muted); } .fact .v { font: 600 19px var(--f-display); font-variant-numeric: tabular-nums; }
+.ms { display: grid; gap: 2px; max-height: 360px; overflow-y: auto; }
+.ms div { display: grid; grid-template-columns: 16px minmax(0, 1fr) auto; gap: 8px; align-items: center; font-size: 13px; padding: 3px 0; }
+.ms .dot { width: 11px; height: 11px; border-radius: 50%; border: 1.5px solid var(--line); }
+.ms .done .dot { background: var(--ok); border-color: var(--ok); }
+.ms div:not(.done) { color: var(--muted); }
+.ms .t { font: 12px var(--f-mono); color: var(--muted); }
+.prog { height: 8px; background: var(--soft); border-radius: 4px; overflow: hidden; margin: 6px 0 4px; }
+.prog i { display: block; height: 100%; background: var(--llm); }
+/* AI */
+.think { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--llm); margin-bottom: 8px; }
+.think i { width: 8px; height: 8px; border-radius: 50%; background: var(--llm); }
+@media (prefers-reduced-motion: no-preference) { .think i { animation: pulse 1.2s ease-in-out infinite; } }
+@keyframes pulse { 50% { opacity: .25; } }
+.plan-goals { margin: 8px 0 0; padding-left: 18px; font: 12.5px/1.55 var(--f-mono); }
+.doctrine { margin-top: 10px; padding: 8px 10px; border-left: 3px solid var(--llm); background: var(--llm-bg); font-size: 13px; white-space: pre-wrap; }
+.agent { display: grid; gap: 6px; grid-template-columns: minmax(0, 1fr); overflow: hidden; }
+.agent > * { min-width: 0; }
+.agent h2 small { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.plan-goals li { overflow-wrap: anywhere; }
+.doctrine { overflow-wrap: anywhere; }
+.agent .who { font: 12px var(--f-mono); color: var(--muted); }
+.cards { display: grid; gap: 8px; max-height: 420px; overflow-y: auto; }
+.card { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; font-size: 13px; }
+.card .h { display: flex; justify-content: space-between; gap: 8px; font: 12px var(--f-mono); color: var(--muted); margin-bottom: 3px; }
+.card ul { margin: 4px 0 0; padding-left: 18px; }
+.designs { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 8px; }
+.drawing { font: 12px/1.05 var(--f-mono); white-space: pre; overflow-x: auto; margin: 6px 0 0; color: var(--ink, inherit); }
+.by-ai { color: var(--llm); font-weight: 600; }
+.alert { font-size: 13px; padding: 6px 9px; border-radius: 6px; margin-bottom: 6px; }
+.alert.urgent { background: var(--bad-bg); color: var(--bad); } .alert.warn { background: var(--warn-bg); color: var(--warn); }
+.list { display: grid; gap: 2px; max-height: 520px; overflow-y: auto; }
+.ev { display: grid; grid-template-columns: 46px 70px minmax(0, 1fr); gap: 8px; padding: 5px 2px; border-bottom: 1px solid var(--soft); font-size: 13px; }
+.ev .m { font: 12px var(--f-mono); color: var(--muted); font-variant-numeric: tabular-nums; }
+.ev .kind { font: 500 10.5px/1.9 var(--f-mono); text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+.ev .kind.plan, .ev .kind.ask { color: var(--llm); } .ev .kind.fix, .ev .kind.jam { color: var(--warn); }
+.ev .kind.ok { color: var(--ok); } .ev .kind.fail { color: var(--bad); } .ev .kind.milestone { color: var(--warn); }
+.ev .txt { overflow-wrap: anywhere; }
+.filters { display: flex; gap: 6px; flex-wrap: wrap; }
+.filters label { font-size: 12px; color: var(--muted); display: flex; gap: 4px; align-items: center; }
+/* base */
+canvas { width: 100%; height: auto; aspect-ratio: 4 / 3; display: block; border-radius: 8px; background: var(--soft); }
+.legend { display: flex; flex-wrap: wrap; gap: 10px; font-size: 12px; color: var(--muted); margin-top: 8px; }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+td, th { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--soft); vertical-align: top; }
+th { font-weight: 500; color: var(--muted); font-size: 12px; }
+td.n { font-family: var(--f-mono); font-variant-numeric: tabular-nums; color: var(--muted); white-space: nowrap; }
+td.a { font-family: var(--f-mono); overflow-wrap: anywhere; }
+.tbl { max-height: 640px; overflow: auto; }
+.okc { color: var(--ok); } .badc { color: var(--bad); }
+.kv { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 12px; font-size: 13px; }
+.kv span:nth-child(even) { font-family: var(--f-mono); font-variant-numeric: tabular-nums; text-align: right; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chips span { font: 12px var(--f-mono); background: var(--soft); border-radius: 5px; padding: 3px 7px; }
+.chips span.bad { background: var(--bad-bg); color: var(--bad); }
+/* overseer */
+.ovcard { border-color: color-mix(in srgb, var(--ov) 45%, var(--line)); background: linear-gradient(160deg, var(--panel) 55%, var(--ov-bg)); }
+.ovgrid { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: 16px; }
+.ovquote { font: 500 17px/1.45 var(--f-body); border-left: 3px solid var(--ov); padding: 4px 0 4px 12px; margin: 6px 0 10px; }
+.ovstate { display: inline-flex; gap: 8px; align-items: center; font: 500 13px var(--f-body); color: var(--ov); }
+.ovstate i { width: 8px; height: 8px; border-radius: 50%; background: var(--ov); }
+.orders { margin: 0; padding-left: 18px; font: 12.5px/1.6 var(--f-mono); }
+.orders li.hard { color: var(--bad); }
+.chips span.ov { background: var(--ov-bg); color: var(--ov); }
+.ev .kind.oversee { color: var(--ov); }
+.g.ov > rect { fill: var(--ov-bg); }
+.g.ov.busy > rect { stroke: var(--ov); stroke-width: 2.6; }
+.who-tag { font: 500 11px/1 var(--f-mono); text-transform: uppercase; letter-spacing: .06em; padding: 4px 7px; border-radius: 4px; background: var(--soft); color: var(--muted); margin-left: 6px; }
+.who-tag.overseer { background: var(--ov-bg); color: var(--ov); } .who-tag.rules { background: var(--bad-bg); color: var(--bad); }
+.who-tag.assessor { background: var(--code-bg); color: var(--code); }
+/* loop */
+.graph { overflow-x: auto; }
+.graph svg { width: 100%; min-width: 720px; height: auto; display: block; }
+.g > rect { fill: var(--soft); stroke: var(--line); stroke-width: 1.2; transition: fill .25s, stroke .25s; }
+.g > text { font: 600 14px var(--f-display); fill: var(--muted); }
+.g > text.sub { font: 400 11px var(--f-body); }
+.g.active > rect { fill: var(--code-bg); stroke: var(--code); stroke-width: 2.6; }
+.g.active > text { fill: var(--ink); }
+.g.llm.busy > rect { fill: var(--llm-bg); stroke: var(--llm); stroke-width: 2.6; }
+.g.llm.busy > text { fill: var(--ink); }
+.g.fm.busy > rect { fill: var(--warn-bg); stroke: var(--warn); stroke-width: 2.6; }
+.g.fm.busy > text { fill: var(--ink); }
+.chip rect { fill: var(--panel); stroke: var(--line); stroke-width: 1; }
+.chip text { font: 500 11px var(--f-mono); fill: var(--muted); }
+.chip.stack rect { fill: var(--code-bg); stroke: var(--code); stroke-dasharray: 3 2; }
+.chip.top rect { fill: var(--code); stroke: var(--code); } .chip.top text { fill: var(--panel); }
+.chip.ftop rect { fill: var(--warn); stroke: var(--warn); } .chip.ftop text { fill: var(--panel); }
+.wire { fill: none; stroke: var(--line); stroke-width: 1.6; }
+.wire.dash { stroke-dasharray: 4 4; }
+.wire.hot { stroke: var(--code); stroke-width: 3; stroke-dasharray: 8 6; }
+@media (prefers-reduced-motion: no-preference) { .wire.hot { animation: flow .6s linear infinite; } .g.busy > rect { animation: pulse 1.4s ease-in-out infinite; } }
+@keyframes flow { to { stroke-dashoffset: -14; } }
+.trace { max-height: 520px; overflow-y: auto; display: grid; gap: 1px; }
+.tr { display: grid; grid-template-columns: 44px 64px minmax(0, 1fr) 58px; gap: 6px; font-size: 12.5px; padding: 4px 2px; border-bottom: 1px solid var(--soft); }
+.tr .m, .tr .d { font: 12px var(--f-mono); color: var(--muted); font-variant-numeric: tabular-nums; }
+.tr .d { text-align: right; }
+.tr .lane { font: 500 10.5px/1.9 var(--f-mono); text-transform: uppercase; letter-spacing: .05em; }
+.tr .lane.main { color: var(--code); } .tr .lane.step { color: var(--muted); } .tr .lane.foreman { color: var(--warn); }
+.tr.running { background: var(--code-bg); }
+.btn { font: 500 13px var(--f-body); background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; padding: 6px 12px; cursor: pointer; }
+.btn:hover:not(:disabled) { border-color: var(--code); color: var(--code); }
+.btn.primary { background: var(--code); border-color: var(--code); color: var(--panel); }
+.btn.primary:hover:not(:disabled) { color: var(--panel); filter: brightness(1.08); }
+.btn:disabled { opacity: .45; cursor: not-allowed; }
+.btn:focus-visible { outline: 2px solid var(--code); outline-offset: 2px; }
+.saveact { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 10px; }
+.savemsg { font: 12px var(--f-mono); color: var(--muted); }
+.savemsg.bad { color: var(--bad); }
+@media (max-width: 1100px) { .strip { grid-template-columns: repeat(2, minmax(0, 1fr)); } .strip .tile:first-child { grid-column: 1 / -1; } .grid3 { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } }
+@media (max-width: 800px) { .ovgrid { grid-template-columns: minmax(0, 1fr); } .grid2, .grid3 { grid-template-columns: minmax(0, 1fr); } .brow { grid-template-columns: 96px minmax(0, 1fr) 80px; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="bar">
+    <span class="brand"><span class="mark">🚀</span>Arena monitor</span>
+    <label for="run" class="muted" style="font-size:13px">Run</label>
+    <select id="run" aria-label="Run"></select>
+    <span id="status" class="pill">loading</span>
+    <span id="meta" class="meta"></span>
+    <span class="grow"></span>
+    <a class="lnk" id="overlayLink" href="/overlay" target="_blank" rel="noopener" title="the stream overlay for OBS (browser source, 1920x1080)">Stream overlay ↗</a>
+  </div>
+
+  <div class="strip">
+    <div class="tile"><div class="k" id="taskTitle">Task</div><div class="v" id="clock">–</div><div class="meter"><i id="clockFill"></i></div></div>
+    <div class="tile"><div class="k">Score</div><div class="v" id="score">–</div><div class="s" id="msCount">milestones –</div></div>
+    <div class="tile hero"><div class="k">Road to the rocket</div><div class="v" id="roadV">–</div><div class="s" id="roadS"></div><div class="meter"><i id="roadFill"></i></div></div>
+    <div class="tile"><div class="k">Power</div><div class="v" id="powerV">–</div><div class="s" id="powerS"></div><div class="meter"><i id="powerFill"></i></div></div>
+    <div class="tile"><div class="k" id="spendK">AI spend</div><div class="v" id="spend">–</div><div class="s" id="spendSub"></div><div class="meter"><i id="spendFill" class="llm"></i></div></div>
+  </div>
+
+  <div id="notice"></div>
+
+  <div class="tabs" role="tablist" aria-label="Views">
+    <button role="tab" data-tab="overview" aria-selected="true">Overview</button>
+    <button role="tab" data-tab="base" aria-selected="false">Base</button>
+    <button role="tab" data-tab="ai" aria-selected="false">AI <span class="badge" id="aiBadge" hidden></span></button>
+    <button role="tab" data-tab="loop" aria-selected="false">Control loop</button>
+    <button role="tab" data-tab="commands" aria-selected="false">Commands</button>
+    <button role="tab" data-tab="saves" aria-selected="false">Saves</button>
+  </div>
+
+  <!-- OVERVIEW -->
+  <div class="pane on" id="tab-overview">
+    <div class="grid2">
+      <div class="col">
+        <section><h2>Road to the rocket <small id="roadNote"></small></h2>
+          <div class="road" id="road"><div class="empty">No roadmap: this bot writes no telemetry, or it has not started.</div></div>
+          <div class="next" id="next"></div>
+        </section>
+        <section><h2>Now <small id="goalSince"></small></h2>
+          <div class="activity" id="activity">–</div>
+          <div id="goal" style="margin-top:8px"></div>
+          <div class="queue" id="queue"></div>
+        </section>
+      </div>
+      <div class="col">
+        <section><h2>Science <small>made a minute against what the road needs</small></h2><div class="bars" id="science"><div class="empty">–</div></div></section>
+        <section><h2>Research <small id="resNote"></small></h2><div id="research"></div><div class="facts" id="resFacts"></div></section>
+        <section><h2>Milestones</h2><div class="ms" id="milestones"></div></section>
+      </div>
+    </div>
+  </div>
+
+  <!-- BASE -->
+  <div class="pane" id="tab-base">
+    <div class="grid2">
+      <section><h2>Map <small id="mapNote"></small></h2><canvas id="map" width="720" height="540"></canvas>
+        <div class="legend"><span><i style="background:#8ea4b8"></i>iron</span><span><i style="background:#c47a45"></i>copper</span><span><i style="background:#4b4b4b"></i>coal</span><span><i style="background:#b8a888"></i>stone</span><span><i style="background:#22201c"></i>oil</span><span><i style="background:#0d6b63"></i>our sites</span><span><i style="background:#5446b8"></i>workshop cells</span><span><i style="background:#e0a100;border-radius:50%"></i>character</span></div>
+      </section>
+      <div class="col">
+        <section><h2>Workshop <small id="wsNote"></small></h2><div id="workshop"></div></section>
+        <section><h2>Plates <small>supply against what the cells take, a minute</small></h2><div class="bars" id="plates"></div></section>
+        <section><h2>Foreman and courier</h2><div id="foreman"></div></section>
+        <section><h2>Runs on its own <small id="upNote"></small></h2><div id="upkeep"></div></section>
+        <section><h2>Ore outlook <small>where we mine, how long it lasts, what is next</small></h2><div class="tbl"><table><thead><tr><th>ore</th><th>left</th><th>a minute</th><th>runway</th><th>next patch</th></tr></thead><tbody id="ores"></tbody></table></div></section>
+      </div>
+    </div>
+    <div class="grid3">
+      <section><h2>Sites <small id="sitesNote"></small></h2><div class="tbl" style="max-height:360px"><table><thead><tr><th>#</th><th>kind</th><th>what</th><th>health</th></tr></thead><tbody id="sites"></tbody></table></div></section>
+      <section><h2>Production <small>a minute, last 5 min</small></h2><div class="kv" id="rates"></div></section>
+      <section><h2>Inventory</h2><div class="kv" id="inventory"></div></section>
+    </div>
+  </div>
+
+  <!-- AI -->
+  <div class="pane" id="tab-ai">
+    <section class="agent ovcard"><h2>Overseer <small id="ovMeta"></small></h2>
+      <div class="who">every few game minutes a deep-thinking model reads everything the bot knows and gives orders that run before anything else</div>
+      <div class="ovgrid">
+        <div><div id="ovState"></div><div id="ovLatest"><div class="empty">No overseer in this run (it is on with --strategist openai).</div></div></div>
+        <div><div class="muted" style="font-size:12px">Spend against its cap</div><div class="meter"><i id="ovSpend" class="llm"></i></div>
+          <div class="muted" style="font-size:12px;margin-top:10px">Standing guidance for the planners</div><div class="doctrine" id="ovGuide" style="margin-top:4px">–</div>
+          <div class="muted" style="font-size:12px;margin-top:10px">Forbidden for now</div><div class="chips" id="ovForbid" style="margin-top:4px"></div></div>
+      </div>
+      <div class="cards" id="ovNotes" style="margin-top:12px;max-height:320px"></div>
+    </section>
+    <div class="grid3">
+      <section class="agent"><h2>Strategist <small id="stratMeta"></small></h2><div class="who">plans what to build and research next</div>
+        <div id="thinking"></div><div id="plan"><div class="empty">No plan yet.</div></div></section>
+      <section class="agent"><h2>Supervisor <small id="supMeta"></small></h2><div class="who">watches the base, queues urgent fixes, pauses goals</div>
+        <div id="alerts"></div><div class="cards" id="supNotes"></div></section>
+      <section class="agent"><h2>Fixer <small id="fixMeta"></small></h2><div class="who">troubleshoots failures that repeat: digs the character out, retries goals changed, sets goals aside</div>
+        <div class="cards" id="fixNotes"></div></section>
+    </div>
+    <section class="agent"><h2>Designer <small id="desMeta"></small></h2><div class="who">draws the chiplets fresh this run; each design is checked to work (steam reaches every engine, every engine has a pole, the boiler is fed) before it is built</div>
+      <div class="designs" id="designs"><div class="empty">Hand-made designs this run (start with --designs ai).</div></div></section>
+    <section><h2>Timeline <small>newest first</small></h2>
+      <div class="filters" id="evFilters"></div>
+      <div class="list" id="timeline"></div></section>
+  </div>
+
+  <!-- LOOP -->
+  <div class="pane" id="tab-loop">
+    <section><h2>Control loop <small id="loopNow">live: the node it is in lights up, the wires it just took flash</small></h2>
+      <div class="graph">
+        <svg viewBox="0 0 1030 300" role="img" aria-label="Live control loop">
+          <defs><marker id="ah" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
+          <path class="wire" id="e-start-take-goal" d="M120 136 L148 136" marker-end="url(#ah)"/>
+          <path class="wire" id="e-take-goal-run-goal" d="M300 136 L328 136" marker-end="url(#ah)"/>
+          <path class="wire" id="e-run-goal-record" d="M720 136 L748 136" marker-end="url(#ah)"/>
+          <path class="wire" id="e-record-replan" d="M860 136 L888 136" marker-end="url(#ah)"/>
+          <path class="wire" id="e-replan-take-goal" d="M950 110 L950 72 L262 72 L262 108" marker-end="url(#ah)"/>
+          <path class="wire" id="e-replan-end" d="M950 162 L950 228" marker-end="url(#ah)"/>
+          <path class="wire" id="e-strategist" d="M225 58 L225 108" marker-end="url(#ah)"/>
+          <path class="wire dash" id="e-foreman" d="M525 226 L525 194" marker-end="url(#ah)" marker-start="url(#ah)"/>
+          <g class="g" id="n-start"><rect x="10" y="110" width="110" height="52" rx="8"/><text x="65" y="141" text-anchor="middle">Start</text></g>
+          <g class="g" id="n-take-goal"><rect x="150" y="110" width="150" height="52" rx="8"/><text x="225" y="133" text-anchor="middle">Take next goal</text><text class="sub" x="225" y="151" text-anchor="middle">waits for a plan if empty</text></g>
+          <g class="g" id="n-run-goal"><rect x="330" y="82" width="390" height="112" rx="8"/><text x="525" y="104" text-anchor="middle">Run goal</text><g id="chips"></g></g>
+          <g class="g" id="n-record"><rect x="750" y="110" width="110" height="52" rx="8"/><text x="805" y="141" text-anchor="middle">Record</text></g>
+          <g class="g" id="n-replan"><rect x="890" y="110" width="120" height="52" rx="8"/><text x="950" y="133" text-anchor="middle">Replan?</text><text class="sub" x="950" y="151" text-anchor="middle">ask the strategist</text></g>
+          <g class="g" id="n-end"><rect x="890" y="230" width="120" height="44" rx="8"/><text x="950" y="257" text-anchor="middle">End</text></g>
+          <path class="wire dash" id="e-supervisor" d="M450 58 L450 80" marker-end="url(#ah)"/>
+          <path class="wire dash" id="e-overseer-run" d="M640 58 L640 80" marker-end="url(#ah)"/>
+          <g class="g" id="n-supervisor"><rect x="372" y="10" width="156" height="48" rx="8"/><text x="450" y="31" text-anchor="middle">Supervisor</text><text class="sub" x="450" y="48" text-anchor="middle">rules + assessor: fixes, pauses</text></g>
+          <g class="g ov" id="n-overseer"><rect x="560" y="10" width="160" height="48" rx="8"/><text x="640" y="31" text-anchor="middle">Overseer</text><text class="sub" x="640" y="48" text-anchor="middle" id="ovSub">idle</text></g>
+          <g class="g llm" id="n-strategist"><rect x="150" y="10" width="150" height="48" rx="8"/><text x="225" y="31" text-anchor="middle">Strategist</text><text class="sub" x="225" y="48" text-anchor="middle" id="stratSub">idle</text></g>
+          <g class="g fm" id="n-foreman"><rect x="380" y="226" width="290" height="64" rx="8"/><text x="525" y="246" text-anchor="middle">Foreman</text><g id="fchips"></g></g>
+        </svg>
+      </div>
+    </section>
+    <section><h2>Trace <small>newest first · how long each step took</small></h2><div class="trace" id="trace"></div></section>
+  </div>
+
+  <!-- SAVES -->
+  <div class="pane" id="tab-saves">
+    <section><h2>Save and carry on <small>the game and the bot's memory, saved between goals</small></h2>
+      <div class="saveact">
+        <button class="btn" id="saveNow">Save now</button>
+        <button class="btn" id="saveStop">Save and stop</button>
+        <span class="savemsg" id="saveMsg" role="status"></span>
+      </div>
+      <div class="muted" style="font-size:13px">The bot also saves on its own every 20 game minutes (<code>--autosave</code>). A stopped run carries on from any complete save here, in the same run folder, with the flags it was started with. From a terminal: <code>arena local-run --resume RUN_ID[:SAVE]</code>.</div>
+    </section>
+    <section><h2>Saves <small id="savesNote"></small></h2>
+      <div class="tbl"><table><thead><tr><th>game min</th><th>save</th><th>kind</th><th>milestones</th><th>sites</th><th></th></tr></thead><tbody id="saves"></tbody></table></div>
+    </section>
+  </div>
+
+  <!-- COMMANDS -->
+  <div class="pane" id="tab-commands">
+    <section><h2>Last commands <small>API calls the server logged, newest first</small></h2><div class="tbl"><table><thead><tr><th>#</th><th>verb</th><th>args</th><th>result</th></tr></thead><tbody id="actions"></tbody></table></div></section>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const fmtMin = m => m == null ? "–" : (m >= 600 ? `${(m / 60).toFixed(1)} h` : `${Math.floor(m)}:${String(Math.round((m % 1) * 60)).padStart(2, "0")}`);
+const ago = t => { if (!t) return "–"; const s = Math.max(0, Date.now() / 1000 - t); return s < 60 ? `${s.toFixed(0)} s ago` : `${(s / 60).toFixed(1)} min ago`; };
+const store = { get(k) { try { return localStorage.getItem(k); } catch { return null; } }, set(k, v) { try { localStorage.setItem(k, v); } catch {} } };
+const PACK = { "automation-science-pack": ["red", "#c0392b"], "logistic-science-pack": ["green", "#2f7d32"], "chemical-science-pack": ["blue", "#2d6cdf"],
+  "production-science-pack": ["purple", "#8e44ad"], "utility-science-pack": ["yellow", "#c9a400"], "military-science-pack": ["grey", "#7f8c8d"], "space-science-pack": ["white", "#bbb"] };
+let current = location.hash.slice(1), runs = [], last = null;
+
+// tabs (remembered per viewer)
+function showTab(name) {
+  document.querySelectorAll(".tabs button").forEach(b => b.setAttribute("aria-selected", String(b.dataset.tab === name)));
+  document.querySelectorAll(".pane").forEach(p => p.classList.toggle("on", p.id === "tab-" + name));
+  store.set("monitor.tab", name);
+  if (last) render(last);
+}
+document.querySelectorAll(".tabs button").forEach(b => b.addEventListener("click", () => showTab(b.dataset.tab)));
+showTab(store.get("monitor.tab") || "overview");
+
+const EVKINDS = ["overseer", "plan", "goal", "fix", "milestone", "watchdog"];
+let evOn = new Set(EVKINDS);
+$("evFilters").innerHTML = EVKINDS.map(k => `<label><input type="checkbox" data-k="${k}" checked> ${k}</label>`).join("");
+$("evFilters").addEventListener("change", e => { const k = e.target.dataset.k; e.target.checked ? evOn.add(k) : evOn.delete(k); if (last) render(last); });
+
+async function getJSON(u) { const r = await fetch(u, { cache: "no-store" }); if (!r.ok) throw new Error(r.status); return r.json(); }
+async function loadRuns() {
+  try { runs = await getJSON("/api/runs"); } catch { return; }
+  if (!current || !runs.some(r => r.id === current)) current = (runs.find(r => r.status === "active") || runs[0] || {}).id || "";
+  $("run").innerHTML = runs.map(r => `<option value="${r.id}" ${r.id === current ? "selected" : ""}>${esc(r.id)} · ${esc(r.task)} · ${esc(r.status)}${r.score != null ? " · " + r.score : ""}</option>`).join("") || "<option>no runs yet</option>";
+}
+function kv(el, obj, limit) {
+  const rows = Object.entries(obj || {}).sort((a, b) => b[1] - a[1]).slice(0, limit);
+  el.innerHTML = rows.length ? rows.map(([k, v]) => `<span>${esc(k)}</span><span>${esc(typeof v === "number" ? Math.round(v * 10) / 10 : v)}</span>`).join("") : '<span class="empty">nothing yet</span><span></span>';
+}
+function bar(label, val, max, text, color, cls = "") {
+  const pct = max > 0 ? Math.min(100, val / max * 100) : 0;
+  return `<div class="brow ${cls}"><span>${label}</span><span class="track"><i style="width:${pct}%;background:${color}"></i></span><span class="val">${text}</span></div>`;
+}
+const kw = v => v >= 1000 ? (v / 1000).toFixed(1) + " MW" : Math.round(v) + " kW";
+
+function render(d) {
+  last = d;
+  const live = d.live || {}, rm = live.roadmap && !live.roadmap.error ? live.roadmap : null;
+  const status = live.stale ? "stale" : (d.result ? d.result.status : (live.status || "active"));
+  $("status").textContent = status; $("status").className = "pill " + status;
+  $("meta").innerHTML = [`<span>map <b>${esc(d.map)}</b></span>`, d.spectator_port ? `<span>spectate <b>127.0.0.1:${d.spectator_port}</b></span>` : "",
+    `<span>last call <b>${ago(d.last_call)}</b></span>`, `<span>calls <b>${d.calls ?? "–"}</b></span>`].join("");
+  $("taskTitle").textContent = d.task.title || d.task.id || "Task";
+  const total = (d.task.ticks || 0) / 3600, b = d.budgets || {};
+  const used = live.game_minute ?? (b.ticks_used != null ? b.ticks_used / 3600 : null);
+  $("clock").textContent = total > 1440 ? `${fmtMin(used)}` : `${fmtMin(used)} / ${fmtMin(total)}`;
+  $("clockFill").style.width = total && used != null ? Math.min(100, used / total * 100) + "%" : "0";
+  $("score").textContent = d.result ? (d.result.score ?? "void") : (d.score ?? "–");
+  const reached = (d.result && d.result.breakdown && d.result.breakdown.milestones) ? Object.fromEntries(d.result.breakdown.milestones.filter(m => m.reached).map(m => [m.id, m.tick])) : (live.milestones || (d.stats && d.stats.milestones) || {});
+  $("msCount").textContent = d.task.milestones.length ? `milestones ${Object.keys(reached).length} / ${d.task.milestones.length}` : "no milestones";
+
+  // strip: road and power
+  if (rm) {
+    const n = rm.stages.filter(s => s.done).length, now = rm.stages.find(s => s.status === "now");
+    $("roadV").textContent = `${n} / ${rm.stages.length}`; $("roadS").textContent = now ? "now: " + now.name : "done";
+    $("roadFill").style.width = (n / rm.stages.length * 100) + "%";
+    const p = rm.power || {}, cap = p.capacity_kw || 0, dem = p.demand_kw || 0;
+    $("powerV").textContent = cap ? kw(cap) : "–";
+    $("powerS").textContent = `${kw(dem)} ${p.demand_source === "measured" ? "measured" : "estimated"} draw · ${p.stations || 0} stations`;
+    $("powerFill").style.width = cap ? Math.min(100, dem / cap * 100) + "%" : "0";
+    $("powerFill").className = dem > cap ? "hot" : dem > cap * 0.85 ? "warn" : "";
+  } else { ["roadV", "powerV"].forEach(i => $(i).textContent = "–"); }
+
+  const st = live.strategist || {}, bot = d.bot || {};
+  const fx = live.fixer || {}, as = live.assessor || {};
+  const dsg = live.designs || [], dcost = dsg.length ? (dsg[dsg.length - 1].cost_usd || 0) : 0;
+  const ovc = live.overseer || {};
+  const cost = (st.cost_usd ?? bot.cost_usd), totalCost = (cost || 0) + (fx.cost_usd || 0) + (as.cost_usd || 0) + dcost + (ovc.cost_usd || 0), cap = st.max_cost;
+  const tk = st.tokens || {}, tokTotal = (tk.prompt || 0) + (tk.completion || 0);
+  const kfmt = n => n >= 1e6 ? (n / 1e6).toFixed(2) + "M" : n >= 1e3 ? (n / 1e3).toFixed(1) + "k" : String(n);
+  $("spend").textContent = cost == null ? "–" : "$" + totalCost.toFixed(totalCost < 1 ? 4 : 2);
+  $("spendK").textContent = st.model ? `AI spend · ${st.model}` : "AI spend";
+  $("spendSub").textContent = cost == null ? "this bot reports no spend" :
+    `${st.calls ?? bot.strategist_calls ?? 0} plans · ${ovc.calls || 0} looks · ${as.calls || 0} checks · ${fx.calls || 0} fixes · ${kfmt(tokTotal)} tok`;
+  const pct = cap ? Math.min(100, (cost || 0) / cap * 100) : 0;
+  $("spendFill").style.width = pct + "%"; $("spendFill").classList.toggle("hot", pct >= 80);
+
+  $("notice").innerHTML = !d.live && !d.result ? '<div class="note">This bot writes no telemetry, so only what the server logs is shown: commands, budgets, score, stats.</div>'
+    : live.stale ? '<div class="note">The bot stopped updating more than 30 s ago. It may have crashed or been stopped.</div>' : "";
+
+  const tab = store.get("monitor.tab") || "overview";
+  if (tab === "overview") renderOverview(d, live, rm, reached);
+  else if (tab === "base") { renderBase(d, live, rm); renderUpkeep(live); }
+  else if (tab === "ai") renderAI(d, live);
+  else if (tab === "loop") renderLoop(d.result ? {} : live);
+  else if (tab === "saves") renderSaves(d, live);
+  else renderCommands(d);
+  const urgent = ((live.supervisor || {}).alerts || []).filter(a => a.level === "urgent").length;
+  $("aiBadge").hidden = !urgent; $("aiBadge").textContent = urgent;
+}
+
+function renderOverview(d, live, rm, reached) {
+  if (rm) {
+    $("road").innerHTML = rm.stages.map(s => `<div class="stage ${s.status}"><span class="dot"></span><span class="nm">${esc(s.name)}</span><span class="dt">${esc(s.detail || "")}</span></div>`).join("");
+    $("next").innerHTML = rm.next_step ? `<span class="lbl">The rocket book's next step</span><div class="goal">${esc(JSON.stringify(rm.next_step))}</div>` : "";
+    $("roadNote").textContent = rm.research && rm.research.slowest_pack ? `slowest: ${PACK[rm.research.slowest_pack.pack]?.[0] || rm.research.slowest_pack.pack} science, ~${rm.research.slowest_pack.hours} h at today's rate` : "";
+    $("science").innerHTML = Object.entries(rm.science || {}).map(([p, s]) => {
+      const [nm, col] = PACK[p] || [p, "#888"];
+      return bar(`<span class="sw" style="background:${col}"></span>${nm}`, s.made_per_min, s.target, `${s.made_per_min} / ${s.target}`, col, s.unlocked ? "" : "locked");
+    }).join("");
+    const r = rm.research || {};
+    $("resFacts").innerHTML = [["technologies left", r.techs_left], ["labs", r.labs], ["lab hours left", r.lab_hours_left ?? "–"],
+      ...Object.entries(r.packs_left || {}).map(([p, n]) => [`${PACK[p]?.[0] || p} packs left`, n])].map(([k, v]) => `<div class="fact"><div class="k">${esc(k)}</div><div class="v">${esc(v)}</div></div>`).join("");
+    $("resNote").textContent = r.next && r.next.length ? "next: " + r.next.slice(0, 3).join(", ") : "";
+  }
+  $("activity").textContent = d.result ? `Run ${d.result.status}: ${d.result.end_reason || ""}` : (live.activity || "–");
+  const g = live.current_goal, wd = live.watchdog;
+  const used = g ? Math.max(0, (live.game_minute || 0) - g.since_minute) : 0, bud = g && g.budget_min, bp = bud ? Math.min(100, used / bud * 100) : 0;
+  $("goal").innerHTML = g ? `<div class="goal">${esc(g.text)}<span class="who-tag ${esc(g.who || "plan")}">${esc(g.who === "plan" || !g.who ? "strategist" : g.who)}</span></div>
+    <div class="muted" style="font-size:12px;margin-top:8px">time budget: ${fmtMin(used)} of ${bud ? fmtMin(bud) : "no limit"}</div>
+    ${bud ? `<div class="meter"><i style="width:${bp}%" class="${bp > 85 ? "hot" : bp > 60 ? "warn" : ""}"></i></div>` : ""}` : "";
+  $("goalSince").textContent = (g ? `goal since minute ${g.since_minute}` : "") + (wd && wd.minutes_without_progress >= 3 ? ` · no progress for ${wd.minutes_without_progress} min` : "");
+  $("queue").innerHTML = (live.queue || []).map(q => `<span>${esc(q)}</span>`).join("");
+  const rs = live.research || (d.stats && d.stats.research) || {};
+  $("research").innerHTML = rs.current ? `<div><b>${esc(rs.current)}</b> <span class="muted">${Math.round((rs.progress || 0) * 100)}%</span></div><div class="prog"><i style="width:${(rs.progress || 0) * 100}%"></i></div>${rs.queue && rs.queue.length > 1 ? `<div class="muted" style="font-size:12px">then: ${esc(rs.queue.slice(1).join(", "))}</div>` : ""}` : '<div class="empty">Nothing being researched.</div>';
+  $("milestones").innerHTML = d.task.milestones.length ? d.task.milestones.map(m => {
+    const t = reached[m.id]; return `<div class="${t != null ? "done" : ""}"><span class="dot"></span><span>${esc(m.name)}</span><span class="t">${t != null ? "min " + (t / 3600).toFixed(1) : m.points + " pts"}</span></div>`;
+  }).join("") : '<div class="empty">This task has no milestones.</div>';
+}
+
+function renderBase(d, live, rm) {
+  drawMap(d, live);
+  const sites = live.base || [];
+  $("sitesNote").textContent = `${sites.length} sites`;
+  $("sites").innerHTML = sites.map(s => {
+    const what = s.item || s.resource || (s.makes ? s.makes.slice(0, 3).join(", ") : "") || (s.engines ? s.engines + " engines" : s.count ? "x" + s.count : "");
+    const h = Object.entries(s.health || {}).map(([k, v]) => `${k} ${v}`).join(", ");
+    return `<tr><td class="n">${s.id}</td><td>${esc(s.kind)}</td><td class="a">${esc(what)}${s.per_minute ? " " + s.per_minute + "/min" : ""}</td><td class="a ${s.powered === false ? "badc" : ""}">${esc(s.powered === false ? "no power" : h)}</td></tr>`;
+  }).join("");
+  const ws = (rm || {}).workshop || {};
+  $("wsNote").textContent = ws.cells ? `${ws.cells} cells` : "";
+  const short = Object.entries(ws.short || {}), stock = Object.entries(ws.stock || {});
+  $("workshop").innerHTML = ws.cells ? `${short.length ? `<div class="muted" style="font-size:12px">short of (the courier found none)</div><div class="chips" style="margin:4px 0 8px">${short.map(([k, v]) => `<span class="bad">${esc(k)} ${v}</span>`).join("")}</div>` : ""}
+    <div class="muted" style="font-size:12px">in the cells' output chests</div><div class="chips" style="margin-top:4px">${stock.length ? stock.map(([k, v]) => `<span>${esc(k)} ${v}</span>`).join("") : '<span>nothing yet</span>'}</div>`
+    : '<div class="empty">No workshop yet: the rocket book builds one once red and green science run.</div>';
+  const pl = (rm || {}).plates || {}, sup = pl.supply_per_min || {}, dem = pl.workshop_demand_per_min || {};
+  const keys = [...new Set([...Object.keys(sup), ...Object.keys(dem)])].filter(k => /plate|coal|stone|ore|brick/.test(k));
+  $("plates").innerHTML = keys.length ? keys.map(k => { const s = sup[k] || 0, n = dem[k] || 0;
+    return bar(esc(k.replace("-plate", "")), s, Math.max(s, n * 1.2, 1), `${s} / ${n}`, s >= n ? "var(--code)" : "var(--bad)"); }).join("") : '<div class="empty">No mines yet.</div>';
+  const f = live.foreman;
+  $("foreman").innerHTML = f ? `<div class="muted" style="font-size:12px">${f.fuel_fixes} refuels · ${f.hand_packs} hand-made packs · ${f.fed_feeders || 0} packs into lab feeders · ${f.plates_collected} plates collected</div>
+    ${f.courier ? `<div style="font-size:13px;margin-top:6px">${esc(f.courier)}</div>` : ""}
+    ${(f.problems || []).length ? `<ul style="margin:6px 0 0;padding-left:18px;font-size:13px">${f.problems.map(x => `<li>${esc(x)}</li>`).join("")}</ul>` : '<div class="empty" style="margin-top:6px">No problems noted.</div>'}` : '<div class="empty">No foreman data.</div>';
+  const hints = live.hints || [];
+  if (hints.length) $("foreman").innerHTML += `<div style="margin-top:8px;font-size:12px" class="muted">Hints for the strategist</div><ul style="margin:4px 0 0;padding-left:18px;font-size:13px">${hints.map(h => `<li>${esc(h)}</li>`).join("")}</ul>`;
+  const rates = live.rates || Object.fromEntries(Object.entries((d.stats && d.stats.items) || {}).filter(([, v]) => v.made_per_min).map(([k, v]) => [k, v.made_per_min]));
+  kv($("rates"), rates, 20);
+  kv($("inventory"), live.inventory, 20);
+}
+
+function renderUpkeep(live) {
+  const up = live.upkeep || {}, needs = up.needs || [];
+  $("upNote").textContent = up.sealed ? `${up.sealed.length} sealed · ${needs.length} need hands or repair` : "";
+  $("upkeep").innerHTML = up.error ? `<div class="empty">${esc(up.error)}</div>` : !up.sealed ? '<div class="empty">No data from this bot.</div>' :
+    (needs.length ? needs.slice(0, 10).map(n => `<div class="ev"><span class="m">#${n.site}</span><span class="kind ${n.need === "broken" ? "fix" : "goal"}">${esc(n.need)}</span><span class="txt">${esc(n.kind_of_site)}: ${esc(n.why)}${n.fix ? " → " + esc(n.fix.do + " " + (n.fix.module || "")) : ""}</span></div>`).join("")
+      : '<div class="empty">Nothing needs hands that this tier still accepts.</div>')
+    + (up.upgradable && up.upgradable.length ? `<div class="ev"><span class="m"></span><span class="kind ok">upgrade</span><span class="txt">faster machines would help sites ${up.upgradable.map(i => "#" + i).join(", ")}</span></div>` : "")
+    + (up.next_growth || []).map(g => `<div class="ev"><span class="m"></span><span class="kind plan">grow</span><span class="txt">next: ${esc(g.do + " " + (g.module || "") + " " + (g.item || g.resource || ""))}${g.per_minute ? " at " + g.per_minute + "/min" : ""}</span></div>`).join("")
+    + (up.idle || []).map(n => `<div class="ev"><span class="m">#${n.site}</span><span class="kind">idle</span><span class="txt">${esc(n.kind)} ${esc(n.item || "")}: output unused for ${n.idle_minutes} min, may be retired</span></div>`).join("");
+  const ol = live.ore_outlook || {};
+  const rows = Object.entries(ol).filter(([k]) => k !== "error");
+  $("ores").innerHTML = rows.length ? rows.map(([r, o]) => `<tr><td>${esc(r)}</td><td class="n">${o.amount_left ? Math.round(o.amount_left / 1000) + "k" : "–"}</td><td class="n">${o.mined_per_min}</td><td class="n ${o.fix ? "badc" : ""}">${o.room_for_more ? (o.minutes_left != null ? fmtMin(o.minutes_left) : "–") : "full"}</td><td>${o.next_patch ? `${o.next_patch.distance} tiles · ${o.next_patch.tiles} tiles` : (o.fix ? "scout" : "–")}</td></tr>`).join("")
+    : '<tr><td colspan="5" class="empty">No outlook yet.</td></tr>';
+}
+
+function renderOverseer(live) {
+  const ov = live.overseer || {}, notes = ov.notes || [];
+  $("ovMeta").textContent = ov.model || ov.name ? `${esc(ov.name || "llm:" + ov.model)} · ${ov.calls || 0} looks · $${(ov.cost_usd || 0).toFixed(3)}${ov.max_cost ? " of $" + ov.max_cost : ""}${ov.period_min ? " · every " + ov.period_min + " min" : ""}` : "";
+  $("ovSpend").style.width = ov.max_cost ? Math.min(100, (ov.cost_usd || 0) / ov.max_cost * 100) + "%" : "0";
+  $("ovState").innerHTML = ov.thinking ? '<span class="ovstate"><i class="pulse"></i>reading the whole base…</span>'
+    : ov.next_minute != null ? `<span class="ovstate">next look at minute ${ov.next_minute}${live.game_minute != null ? ` (in ${fmtMin(Math.max(0, ov.next_minute - live.game_minute))})` : ""}</span>` : "";
+  const last = notes[notes.length - 1];
+  const hard = c => /drop the goal|pause the goal|forbid|remove|dropped/.test(c);
+  if (last) $("ovLatest").innerHTML = `<div class="ovquote">${esc(last.assessment)}</div>
+      <div class="muted" style="font-size:12px">minute ${last.minute}${last.seconds ? " · thought for " + last.seconds + " s" : ""} · orders</div>
+      <ol class="orders">${(last.changes || []).map(c => `<li class="${hard(c) ? "hard" : ""}">${esc(c)}</li>`).join("") || "<li>no change: all is well</li>"}</ol>`;
+  $("ovGuide").textContent = (ov.guidance && ov.guidance.text) || "–";
+  $("ovForbid").innerHTML = (ov.forbidden || []).map(f => `<span class="ov" title="${esc(f.why || "")}">${esc(Object.entries(f.match || {}).map(([k, v]) => `${k}=${v}`).join(" "))}</span>`).join("") || '<span>nothing</span>';
+  $("ovNotes").innerHTML = notes.slice(0, -1).reverse().map(n => `<div class="card"><div class="h"><span>minute ${n.minute}</span><span>${(n.changes || []).length} orders</span></div>${esc(n.assessment || "")}</div>`).join("");
+}
+
+function renderAI(d, live) {
+  renderOverseer(live);
+  const st = live.strategist || {};
+  $("stratMeta").textContent = st.calls != null ? `${esc(live.strategist_name || "")} · ${st.calls} calls · $${(st.cost_usd || 0).toFixed(3)}` : esc(live.strategist_name || "");
+  $("thinking").innerHTML = st.thinking_since ? `<div class="think"><i></i>Thinking for ${Math.round(Date.now() / 1000 - st.thinking_since)} s · ${esc(st.reason || "")}</div>`
+    : st.ready_since ? `<div class="think" style="color:var(--muted)">New plan ready (answered in ${st.answer_s} s): applies when the crew finishes its current goal</div>` : "";
+  const p = st.last;
+  $("plan").innerHTML = p ? `<div class="muted" style="font-size:12px">Minute ${p.minute} · answered in ${p.seconds} s${p.cost_usd ? " · $" + p.cost_usd.toFixed(4) : ""} · asked because: ${esc(p.reason || "")}</div>
+      <div style="margin-top:4px">${esc(p.note || "")}</div><ol class="plan-goals">${(p.goals || []).map(x => `<li>${esc(JSON.stringify(x))}</li>`).join("")}</ol>
+      ${(live.doctrine || p.doctrine) ? `<div class="doctrine">${esc(live.doctrine || p.doctrine)}</div>` : ""}` : '<div class="empty">No plan yet.</div>';
+  const sup = live.supervisor || {}, as = live.assessor || {};
+  $("supMeta").textContent = as.name ? `${as.name} · ${as.calls} calls · $${(as.cost_usd || 0).toFixed(3)}` : "rules only";
+  $("alerts").innerHTML = (sup.alerts || []).map(a => `<div class="alert ${a.level}">${esc(a.what)}</div>`).join("");
+  $("supNotes").innerHTML = (sup.notes || []).slice().reverse().map(n => `<div class="card"><div class="h"><span>min ${n.minute} · ${esc(n.who)}</span></div>${esc(n.note || "")}<ul>${(n.changes || []).map(c => `<li>${esc(c)}</li>`).join("")}</ul></div>`).join("") || '<div class="empty">Nothing changed by the supervisor yet.</div>';
+  const fx = live.fixer || {};
+  $("fixMeta").textContent = fx.name ? `${fx.name} · ${fx.calls} calls · $${(fx.cost_usd || 0).toFixed(3)}` : "";
+  $("fixNotes").innerHTML = (fx.notes || []).slice().reverse().map(n => `<div class="card"><div class="h"><span>min ${n.minute} · ${esc(n.why)}</span></div><div class="muted" style="font-size:12px">${esc(n.error)}</div>${n.note ? `<div style="margin-top:3px">${esc(n.note)}</div>` : ""}<ul>${(n.done || []).map(c => `<li>${esc(c)}</li>`).join("")}</ul></div>`).join("") || '<div class="empty">No repeated failures so far.</div>';
+  const ds = live.designs || [];
+  const nAI = ds.filter(x => x.by === "ai").length;
+  $("desMeta").textContent = ds.length ? `${nAI} of ${ds.length} drawn by the AI · $${(ds[ds.length - 1].cost_usd || 0).toFixed(3)}` : "";
+  if (ds.length) $("designs").innerHTML = ds.slice().reverse().map(x => {
+    const fails = (x.history || []).filter(h => (h.problems || []).length).map(h => `<li>try ${h.try}: ${esc((h.problems || [])[0])}</li>`).join("");
+    const who = x.by === "ai" ? '<span class="by-ai">AI</span>' : esc(x.by === "library" ? "hand-made (fallback)" : "none");
+    return `<div class="card"><div class="h"><span>${esc(x.module)} · ${esc(x.variant)}</span><span>${who}</span></div>
+      <div class="muted" style="font-size:12px">${x.tries} ${x.tries === 1 ? "try" : "tries"} · ${x.seconds} s${x.note ? " · " + esc(x.note) : ""}</div>
+      ${x.drawing ? `<pre class="drawing">${esc(x.drawing)}</pre>` : ""}${fails ? `<ul class="muted" style="font-size:12px">${fails}</ul>` : ""}</div>`;
+  }).join("");
+  const group = k => k === "oversee" || k === "oversee_ask" ? "overseer" : k === "ask" || k === "plan" ? "plan" : k.startsWith("goal") ? "goal" : k === "fix" || k === "jam" ? "fix" : k === "milestone" ? "milestone" : k === "watchdog" ? "watchdog" : "plan";
+  const evs = (live.events || []).slice().reverse().filter(e => evOn.has(group(e.kind)));
+  $("timeline").innerHTML = evs.length ? evs.map(e => {
+    let kind = e.kind, txt = "";
+    if (e.kind === "ask") txt = `asked the strategist: ${e.reason}`;
+    else if (e.kind === "plan") txt = `${e.note || "plan"} → ${(e.goals || []).map(g => JSON.stringify(g)).join("; ")}`;
+    else if (e.kind === "goal_start") { kind = "start"; txt = e.goal; }
+    else if (e.kind === "goal_end") { kind = e.ok ? "ok" : "fail"; txt = `${e.goal} — ${e.result} (${e.game_minutes} min)`; }
+    else if (e.kind === "milestone") txt = `reached ${e.ids.join(", ")}`;
+    else if (e.kind === "watchdog") { kind = "fail"; txt = `watchdog: ${e.action} after ${e.minutes_without_progress} min without progress`; }
+    else if (e.kind === "fix") txt = `${e.why}: ${e.note || ""} → ${(e.done || []).join("; ")}`;
+    else if (e.kind === "jam") txt = `crew fault x${e.times}: ${e.error}`;
+    else if (e.kind === "assess") txt = `${e.who}: ${e.note || ""} → ${(e.changes || []).join("; ")}`;
+    else if (e.kind === "oversee") txt = `${e.note || ""} → ${(e.changes || []).join("; ") || "no change"}`;
+    else if (e.kind === "oversee_ask") txt = "the overseer is reading the whole base";
+    else if (e.kind === "budget_stop") { kind = "fail"; txt = `cost cap reached (${(e.spent || []).join(", ")}): saved as ${e.save} and stopped`; }
+    return `<div class="ev"><span class="m">${fmtMin(e.minute)}</span><span class="kind ${kind}">${esc(kind)}</span><span class="txt">${esc(txt)}</span></div>`;
+  }).join("") : '<div class="empty">No events yet.</div>';
+}
+
+function renderSaves(d, live) {
+  const playing = !d.result && !live.stale && ["playing", "starting"].includes(live.status);
+  $("saveNow").disabled = $("saveStop").disabled = !playing || !live.can_save || !!d.control;
+  if (!$("saveMsg").dataset.sticky) $("saveMsg").textContent = d.control ? `asked to ${d.control}: the bot does it between goals`
+    : playing && !live.can_save ? "this run's bot cannot save (started before saves existed, or not on the factorio backend)" : "";
+  const list = d.saves || [];
+  $("savesNote").textContent = list.length ? `${list.length} · newest first` : "";
+  $("saves").innerHTML = list.length ? list.map(s => `<tr><td class="n">${fmtMin(s.minute)}</td><td class="a">${esc(s.name)}</td><td>${esc(s.kind || "–")}</td><td class="n">${s.milestones ?? "–"}</td><td class="n">${s.sites ?? "–"}</td>
+    <td>${s.complete ? `<button class="btn primary" data-resume="${esc(s.name)}" ${playing || !d.resumable ? "disabled" : ""} title="${playing ? "stop the run first" : !d.resumable ? "started without local-run" : "carry the run on from here"}">Resume</button>` : '<span class="muted">incomplete</span>'}</td></tr>`).join("")
+    : '<tr><td colspan="6" class="empty">No saves yet. The brain bot on the factorio backend saves here.</td></tr>';
+}
+async function post(path, body) {
+  const r = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json", "X-Arena-Monitor": "1" }, body: JSON.stringify(body) });
+  return r.json().catch(() => ({ ok: false, error: String(r.status) }));
+}
+function saveMsg(text, bad) { const m = $("saveMsg"); m.textContent = text; m.classList.toggle("bad", !!bad); m.dataset.sticky = "1"; setTimeout(() => { delete m.dataset.sticky; }, 8000); }
+$("saveNow").addEventListener("click", async () => { const r = await post(`/api/runs/${current}/control`, { cmd: "save" }); saveMsg(r.ok ? r.note : r.error, !r.ok); tick(); });
+$("saveStop").addEventListener("click", async () => {
+  if (!confirm("Save the game and the bot, then stop this run? It can carry on from that save.")) return;
+  const r = await post(`/api/runs/${current}/control`, { cmd: "stop" }); saveMsg(r.ok ? r.note : r.error, !r.ok); tick();
+});
+$("saves").addEventListener("click", async e => {
+  const b = e.target.closest("button[data-resume]"); if (!b) return;
+  b.disabled = true;
+  const r = await post(`/api/runs/${current}/resume`, { save: b.dataset.resume });
+  saveMsg(r.ok ? `starting… ${r.note} (log: ${r.log})` : r.error, !r.ok);
+});
+
+function renderCommands(d) {
+  $("actions").innerHTML = (d.actions || []).slice(0, 80).map(a => `<tr><td class="n">${a.seq}</td><td>${esc(a.type)}</td><td class="a">${esc(a.args)}</td><td class="${a.ok ? "okc" : "badc"}">${a.ok ? "ok" : esc(a.code || "fail")}</td></tr>`).join("");
+}
+
+const STEPS = ["design", "unlock", "make", "plates", "smelt", "build", "connect", "remove", "research", "wait"];
+const FSTEPS = ["coal", "sites", "power", "labs", "courier"];
+const SVGNS = "http://www.w3.org/2000/svg";
+function chip(parent, id, label, x, y, w) {
+  const g = document.createElementNS(SVGNS, "g"); g.setAttribute("class", "chip"); g.id = id;
+  const r = document.createElementNS(SVGNS, "rect"); Object.entries({ x, y, width: w, height: 22, rx: 5 }).forEach(([k, v]) => r.setAttribute(k, v));
+  const t = document.createElementNS(SVGNS, "text"); Object.entries({ x: x + w / 2, y: y + 15, "text-anchor": "middle" }).forEach(([k, v]) => t.setAttribute(k, v));
+  t.textContent = label; g.append(r, t); parent.append(g);
+}
+STEPS.forEach((s, i) => chip($("chips"), "s-" + s, s, 339 + (i % 5) * 76, i < 5 ? 118 : 150, 68));
+FSTEPS.forEach((s, i) => chip($("fchips"), "f-" + s, s, 390 + i * 55, 258, 50));
+
+function renderLoop(live) {
+  const st = live.stage || {}, trace = live.trace || [], now = live.updated || Date.now() / 1000;
+  document.querySelectorAll(".g").forEach(g => g.classList.remove("active", "busy"));
+  document.querySelectorAll(".chip").forEach(c => c.classList.remove("stack", "top", "ftop"));
+  document.querySelectorAll(".wire").forEach(w => w.classList.remove("hot"));
+  if (st.main) { const n = $("n-" + st.main); if (n) n.classList.add("active"); }
+  (st.steps || []).forEach((s, i, a) => { const c = $("s-" + s); if (c) c.classList.add(i === a.length - 1 ? "top" : "stack"); });
+  if (st.thinking) { $("n-strategist").classList.add("busy"); $("e-strategist").classList.add("hot"); }
+  const strat = live.strategist || {};
+  $("stratSub").textContent = st.thinking ? `thinking ${Math.round(now - (strat.thinking_since || now))} s` : strat.ready_since ? "plan ready, queued" : (strat.last ? `last plan min ${strat.last.minute}` : "idle");
+  const ovl = live.overseer || {};
+  if (ovl.thinking) { $("n-overseer").classList.add("busy"); $("e-overseer-run").classList.add("hot"); }
+  $("ovSub").textContent = ovl.thinking ? "reading the base…" : ovl.next_minute != null ? `next look min ${ovl.next_minute}` : (ovl.model ? "idle" : "off");
+  if (st.foreman) { $("n-foreman").classList.add("busy"); $("e-foreman").classList.add("hot"); const c = $("f-" + st.foreman); if (c) c.classList.add("ftop"); }
+  const mains = trace.filter(e => e.lane === "main");
+  for (let i = 1; i < mains.length; i++) {
+    if (now - mains[i].t > 3) continue;
+    const w = $(`e-${mains[i - 1].node}-${mains[i].node}`); if (w) w.classList.add("hot");
+  }
+  const lastMain = mains[mains.length - 1];
+  $("loopNow").textContent = st.main ? `in ${st.main}${(st.steps || []).length ? " › " + st.steps.join(" › ") : ""} for ${lastMain ? Math.round(now - lastMain.t) : 0} s${st.foreman ? " · foreman: " + st.foreman : ""}${st.thinking ? " · strategist thinking" : ""}` : "no live data from this bot";
+  const rows = trace.map((e, i) => { const next = trace.slice(i + 1).find(x => x.lane === e.lane); return { ...e, dur: next ? next.t - e.t : null }; }).filter(e => e.node).reverse().slice(0, 60);
+  $("trace").innerHTML = rows.length ? rows.map(e => `<div class="tr ${e.dur == null ? "running" : ""}"><span class="m">${fmtMin(e.minute)}</span><span class="lane ${e.lane}">${e.lane}</span><span>${esc(e.node)}</span><span class="d">${e.dur == null ? Math.round(now - e.t) + " s…" : e.dur < 1 ? "<1 s" : Math.round(e.dur) + " s"}</span></div>`).join("") : '<div class="empty">No trace from this bot.</div>';
+}
+
+const ORE = { "iron-ore": "#8ea4b8", "copper-ore": "#c47a45", "coal": "#4b4b4b", "stone": "#b8a888", "crude-oil": "#22201c", "uranium-ore": "#7fbf3f" };
+function drawMap(d, live) {
+  const c = $("map"), ctx = c.getContext("2d"), W = c.width, H = c.height;
+  ctx.clearRect(0, 0, W, H);
+  const pos = live.position || d.position, sites = live.base || [], cells = live.cells || [];
+  const patches = live.patches || (d.scan && d.scan.patches) || [];
+  const pts = sites.map(s => s.at).concat(pos ? [pos] : []).concat(cells.map(c => [c.x, c.y]));
+  if (!pts.length) pts.push([0, 0]);
+  const near = patches.filter(p => pts.some(q => Math.hypot((p.box[0] + p.box[2]) / 2 - q[0], (p.box[1] + p.box[3]) / 2 - q[1]) < 90));
+  let x0 = Math.min(...pts.map(p => p[0])), x1 = Math.max(...pts.map(p => p[0])), y0 = Math.min(...pts.map(p => p[1])), y1 = Math.max(...pts.map(p => p[1]));
+  near.forEach(p => { x0 = Math.min(x0, p.box[0]); y0 = Math.min(y0, p.box[1]); x1 = Math.max(x1, p.box[2]); y1 = Math.max(y1, p.box[3]); });
+  const pad = 12; x0 -= pad; y0 -= pad; x1 += pad; y1 += pad;
+  const sc = Math.min(W / (x1 - x0), H / (y1 - y0)), ox = (W - (x1 - x0) * sc) / 2, oy = (H - (y1 - y0) * sc) / 2;
+  const X = x => ox + (x - x0) * sc, Y = y => oy + (y - y0) * sc;
+  near.forEach(p => { ctx.fillStyle = ORE[p.name] || "#999"; ctx.globalAlpha = .5; ctx.fillRect(X(p.box[0]), Y(p.box[1]), (p.box[2] - p.box[0]) * sc, (p.box[3] - p.box[1]) * sc); });
+  ctx.globalAlpha = 1;
+  cells.forEach(cl => { const r = Math.max(2, 1.5 * sc); ctx.fillStyle = "#5446b8"; ctx.fillRect(X(cl.x) - r, Y(cl.y) - r, 2 * r, 2 * r); });
+  const ink = getComputedStyle(document.documentElement).getPropertyValue("--ink").trim();
+  ctx.font = "12px IBM Plex Mono, monospace";
+  sites.filter(s => s.kind !== "workshop").forEach(s => {
+    const x = X(s.at[0]), y = Y(s.at[1]), r = Math.max(4, 2.5 * sc);
+    ctx.fillStyle = "#0d6b63"; ctx.fillRect(x - r, y - r, 2 * r, 2 * r);
+    const label = s.kind.replace("smelter-", "smelt ").replace("_", " ") + (s.resource ? " " + s.resource.replace("-ore", "") : s.item ? " " + s.item.split("-")[0] : "");
+    const tw = ctx.measureText(label).width;                 // keep labels inside the canvas
+    ctx.fillStyle = ink; ctx.fillText(label, x + r + 3 + tw > W ? x - r - 3 - tw : x + r + 3, y + 4);
+  });
+  if (cells.length) { const cx = cells.reduce((a, c) => a + c.x, 0) / cells.length, cy = Math.min(...cells.map(c => c.y)); ctx.fillStyle = ink; ctx.fillText(`workshop · ${cells.length} cells`, X(cx) - 40, Y(cy) - 8); }
+  if (pos) { ctx.fillStyle = "#e0a100"; ctx.beginPath(); ctx.arc(X(pos[0]), Y(pos[1]), 6, 0, 7); ctx.fill(); }
+  $("mapNote").textContent = `${Math.round(x1 - x0)} × ${Math.round(y1 - y0)} tiles`;
+}
+
+async function tick() {
+  if (document.hidden || !current) return;
+  try { render(await getJSON("/api/runs/" + current)); } catch { $("status").textContent = "no data"; }
+}
+$("run").addEventListener("change", e => { current = e.target.value; location.hash = current; tick(); });
+window.addEventListener("hashchange", () => { current = location.hash.slice(1); loadRuns().then(tick); });
+document.addEventListener("visibilitychange", () => { if (!document.hidden) tick(); });
+loadRuns().then(tick);
+setInterval(tick, 1500);
+setInterval(loadRuns, 6000);
+</script>
+</body>
+</html>
