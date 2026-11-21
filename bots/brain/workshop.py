@@ -236,6 +236,29 @@ class Workshop(Module):
             k = max(1, math.ceil(plan.fluids["crude-oil"] / 300))
             raise BuildError(f"{item} needs {plan.fluids['crude-oil']:.0f} crude oil a minute: build pumpjacks "
                              f"first ({{\"do\": \"build\", \"module\": \"pumpjack\", \"count\": {k}}})")
+        if "crude-oil" in plan.fluids and not self._pumps_ok(w):
+            far = self._crude_gap(base, d, home=base.centre or w.pos)
+            if far > self.OIL_FLOOR_REACH:
+                # crude only reaches a floor by pipe, and a pipe past one segment needs pumps (engine units) the
+                # crew cannot make yet: an oil floor goes beside the pumpjacks, and the courier carries what it
+                # makes home. Run 20261121-140755 (and 20261120-211555): the plastics workshop stood in the base,
+                # 441 pipe tiles from the oil field, and got no crude at all
+                oil = next((f for f in self.floors if f is not d and self._crude_gap(base, f) <= self.OIL_FLOOR_REACH
+                            and self._fits(w, base, f, n)), None)
+                if oil is None:
+                    home_floor = self.district
+                    oil = self._new_floor(w, base, n, home=self._oil_home(base))
+                    self.district = home_floor           # cells without crude still go on the home floor
+                    if self._crude_gap(base, oil) > self.OIL_FLOOR_REACH:
+                        self.floors.remove(oil)
+                        raise BuildError(f"{item} needs crude oil, the oil field is {far:.0f} tiles from the "
+                                         "workshop floor (pumps needed: engine units) and no free area for a floor "
+                                         "was found beside the pumpjacks")
+                w.log(f"[workshop] {item} goes on oil floor {oil.idx} beside the pumpjacks (the home floor is "
+                      f"{far:.0f} tiles from the crude, too far without pumps)")
+                d = oil
+                plan = plan_for(d)
+                n = sum(c.count for c in plan.cells)
         if d is None:
             d = self._new_floor(w, base, n)
         design = self._place_plan(w, base, d, plan)
@@ -253,11 +276,47 @@ class Workshop(Module):
         free = len(self._usable(w, d))
         return free >= n or self._grow(w, base, n - free, d)
 
-    def _new_floor(self, w: FreeWorld, base, cells: int) -> District:
-        home = base.centre or w.pos
-        if self.floors:                              # beside the last floor, not on top of it
-            x0, y0, x1, y1 = self.floors[-1].box()
-            home = (x1 + 40, (y0 + y1) / 2)
+    # a crude line spans one fluid segment without a pump: PUMP_EVERY route tiles, less what detours add
+    OIL_FLOOR_REACH = 160          # Manhattan tiles from a floor's centre to its nearest pumpjack
+
+    @staticmethod
+    def _pumps_ok(w) -> bool:
+        can = getattr(w, "obtainable", None)
+        return bool(can is not None and can("pump", 2))
+
+    @staticmethod
+    def _jacks(base) -> list[tuple[float, float]]:
+        return [(x, y) for s in base.of("pumpjack") for name, x, y, _ in s.entities if name == "pumpjack"]
+
+    def _crude_gap(self, base, d: District | None, home=None) -> float:
+        """Manhattan tiles from a floor (or, with none yet, from `home`) to the nearest pumpjack."""
+        jacks = self._jacks(base)
+        if not jacks:
+            return 0.0
+        if d is not None:
+            x0, y0, x1, y1 = d.box()
+            home = ((x0 + x1) / 2, (y0 + y1) / 2)
+        if home is None:
+            return 0.0
+        return min(abs(home[0] - x) + abs(home[1] - y) for x, y in jacks)
+
+    def _oil_home(self, base) -> tuple[float, float]:
+        """Where an oil floor goes: beside the oil field nearest the base, on the base's side of it."""
+        jacks = self._jacks(base)
+        hub = base.centre or (0.0, 0.0)
+        first = min(jacks, key=lambda j: math.dist(j, hub))
+        field = [j for j in jacks if math.dist(j, first) <= 24]
+        cx, cy = sum(x for x, _ in field) / len(field), sum(y for _, y in field) / len(field)
+        dx, dy = hub[0] - cx, hub[1] - cy
+        k = math.hypot(dx, dy) or 1.0
+        return cx + dx / k * 45, cy + dy / k * 45
+
+    def _new_floor(self, w: FreeWorld, base, cells: int, home=None) -> District:
+        if home is None:
+            home = base.centre or w.pos
+            if self.floors:                          # beside the last floor, not on top of it
+                x0, y0, x1, y1 = self.floors[-1].box()
+                home = (x1 + 40, (y0 + y1) / 2)
         for cols, rows in ((8, max(3, math.ceil(cells / 8) + 2)), (6, max(3, math.ceil(cells / 6) + 2)),
                            (5, math.ceil(cells / 5) + 1), (4, math.ceil(cells / 4))):
             spot = self._find_area(w, home, cols * CW + 6, CH + rows * PITCH + 2)

@@ -161,3 +161,64 @@ def test_sites_that_run_without_hands_are_looked_at_rarely():
     assert looked() == {20, 40}                                      # the belted row's health, now and then
     now["t"] = SEALED_REVISIT + 60
     assert 60 in looked()                                            # the sealed pumpjack, rarer still
+
+
+# ------------------------------------------------------------------ run 20261121-140755: the plastics workshop stood
+# in the base, 441 pipe tiles from the oil field; without pumps (engine units) no crude ever reached it
+FIELD = [(-232.5, 399.5), (-226.5, 403.5)]
+
+
+def _design_world(monkeypatch, pumps: bool, jacks=FIELD):
+    import brain.workshop as ws_mod
+    from brain.workshop import District
+
+    class Planner:
+        def __init__(self, *a):
+            pass
+
+        def plan(self, item, rate, spare=None):
+            return SimpleNamespace(blocked=None, cells=[SimpleNamespace(count=2)], fluids={"crude-oil": 165})
+
+        def power_kw(self, plan):
+            return 0
+    monkeypatch.setattr(ws_mod, "Planner", Planner)
+    monkeypatch.setattr(ws_mod, "inserter_kind", lambda kn: "inserter")
+    w = SimpleNamespace(kn=None, pos=(-60, 30), logs=[], obtainable=lambda item, n: pumps)
+    w.log = w.logs.append
+    ws = Workshop()
+    home = District(-80, 20, 8, 4)
+    home.idx = 0
+    ws.floors, ws.district = [home], home
+    made = []
+
+    def new_floor(w_, base, cells, home=None):
+        d = District(int(home[0]) - 20, int(home[1]) - 15, 8, 3)
+        d.idx = len(ws.floors)
+        ws.floors.append(d)
+        ws.district = d
+        made.append(home)
+        return d
+    ws._new_floor = new_floor
+    ws._fits = lambda *a: True
+    ws._place_plan = lambda w_, base, d, plan: {"district": d}
+    base = _Base(jacks, centre=(-60, 30))
+    base.sites = []
+    return ws, w, base, home, made
+
+
+def test_an_oil_workshop_goes_beside_the_pumpjacks_while_pumps_cannot_be_had(monkeypatch):
+    ws, w, base, home, made = _design_world(monkeypatch, pumps=False)
+    design = ws._design(w, base, {"item": "plastic-bar", "per_minute": 15})
+    oil = design["district"]
+    assert oil is not home and ws._crude_gap(base, oil) <= ws.OIL_FLOOR_REACH
+    assert ws.district is home                                          # other cells still go on the home floor
+    # the next oil workshop joins that floor instead of starting another
+    ws.designs.clear()
+    assert ws._design(w, base, {"item": "sulfur", "per_minute": 10})["district"] is oil and len(made) == 1
+
+
+def test_with_pumps_or_a_near_field_the_oil_workshop_stays_on_the_home_floor(monkeypatch):
+    ws, w, base, home, made = _design_world(monkeypatch, pumps=True)
+    assert ws._design(w, base, {"item": "plastic-bar", "per_minute": 15})["district"] is home and not made
+    ws, w, base, home, made = _design_world(monkeypatch, pumps=False, jacks=[(-20.5, 60.5)])
+    assert ws._design(w, base, {"item": "plastic-bar", "per_minute": 15})["district"] is home and not made
