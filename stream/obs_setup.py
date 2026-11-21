@@ -54,28 +54,19 @@ RELAY_URL = "rtmp://127.0.0.1:1935/live"   # stream/relay.py listens here and co
 
 
 def configure(c) -> None:
-    """Point OBS's stream output at the local relay and set 1080p60, NVENC, 6000 kbps (Simple output mode)."""
+    """Point OBS's stream output at the local relay and set 1080p60. Output stays in Advanced mode: with a custom
+    server OBS doesn't apply YouTube's 2-second keyframes, and Simple mode has no keyframe setting for NVENC
+    (its default, 250 frames = 4.2 s at 60 fps, leaves YouTube stuck on "Preparing stream"). The encoder itself
+    (NVENC H.264, CBR 8000 kbps, keyframe interval 2 s) is in the profile's streamEncoder.json, which OBS only reads
+    at start: set it in Settings > Output > Streaming, or write that file while OBS is closed."""
     c.set_stream_service_settings("rtmp_custom", {"server": RELAY_URL, "key": "obs", "use_auth": False})
     c.set_video_settings(numerator=60, denominator=1, base_width=1920, base_height=1080,
                          out_width=1920, out_height=1080)
-    for cat, name, val in [("Output", "Mode", "Simple"),
-                           ("SimpleOutput", "StreamEncoder", "nvenc"), ("SimpleOutput", "VBitrate", "6000"),
-                           ("SimpleOutput", "ABitrate", "160"), ("SimpleOutput", "NVPreset2", "p5"),
-                           ("SimpleOutput", "RecQuality", "Small"), ("SimpleOutput", "RecEncoder", "nvenc_hevc"),
-                           ("SimpleOutput", "RecFormat2", "mkv"),
+    for cat, name, val in [("Output", "Mode", "Advanced"), ("AdvOut", "Encoder", "jim_nvenc"),
                            ("Audio", "SampleRate", "48000")]:
         c.set_profile_parameter(cat, name, val)
-    print(f"stream output -> {RELAY_URL} (run stream/relay.py), 1920x1080@60, NVENC 6000 kbps, recording HEVC mkv")
-
-SCREENS = [  # scene name, browser source name, path on the monitor
-    ("Starting Soon", "Screen: Starting Soon", "/screen?mode=starting&t=10"),
-    ("Self-Upgrading", "Screen: Self-Upgrading", "/screen?mode=upgrading"),
-    ("Fixing Bugs", "Screen: Fixing Bugs", "/screen?mode=bugs"),
-    ("Between Runs", "Screen: Between Runs", "/screen?mode=between"),
-    ("BRB", "Screen: BRB", "/screen?mode=brb&t=5"),
-    ("Ending", "Screen: Ending", "/screen?mode=ending"),
-]
-LIVE = "Live"
+    print(f"stream output -> {RELAY_URL} (the watchdog runs the relay), 1920x1080@60, Advanced output. "
+          "Check Settings > Output > Streaming: NVENC H.264, CBR 8000 kbps, keyframe interval 2 s.")
 
 
 def browser(url: str) -> dict:
