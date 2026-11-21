@@ -54,6 +54,14 @@ The phone reaches the PC at `http://<this PC's LAN IP>:8740` at home, or over Ta
 `http://<this PC's Tailscale IP>:8740`). The first time the watchdog starts, Windows asks whether to allow Python through the
 firewall: allow it on private networks.
 
+**Starting over:** `uv run --no-sync python stream/watchdog.py --reset-next` makes the next stream start reset the
+counters (Run #1, 0 upgrades) and begin a new game on a new map; `--cancel-reset` undoes it. Without it, a start
+carries on the game from its last save.
+
+**After every restart** (a resume, a fresh run, the game starting with the stream) the watchdog checks within 6 minutes
+that the bot plays, the game server is up and, on air, that the client watches, OBS is on Live and the overlay follows
+the run. All fine: a line in the log. Anything missing: an alert on the phone.
+
 Useful commands:
 
 ```

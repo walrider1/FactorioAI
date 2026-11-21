@@ -20,6 +20,8 @@ Phone API (for the Android app; bearer token from secrets/phone_token), on 0.0.0
   {"decision": "fix"|"run", "text": "..."}
   GET /api/stream · POST /api/stream/start {"countdown_min": 2} · POST /api/stream/stop ·
   POST /api/stream/schedule {"enabled": bool, "start": "HH:MM", "end": "HH:MM"} (daily, local time; may cross midnight)
+  POST /api/stream/start {"reset": true} starts over (run #1, 0 upgrades, new game); POST /api/stream/reset
+  {"armed": true|false} makes the next start do that (GET /api/stream shows "reset_next")
 
 Stream: start = Starting Soon scene, relay up, OBS streaming, Live after the countdown. Stop = Ending scene, then OBS
 stops and the relay closes. With the schedule on, that happens when the daily window opens and closes. Reviews only
@@ -668,7 +670,12 @@ class Watchdog:
                         restart = True
                     elif re.search(r"\bcontinue\b", text, re.I):
                         restart = False
-                    update_alert(al["id"], status="closed", result=self.start_fresh(d) if restart else self.resume(d))
+                    self._answering = al["id"]
+                    try:
+                        update_alert(al["id"], status="closed",
+                                     result=self.start_fresh(d) if restart else self.resume(d))
+                    finally:
+                        self._answering = None
                 else:
                     update_alert(al["id"], status="closed", result="Left running. Next review in an hour.")
                     log(f"{al['id']}: left running")
@@ -749,6 +756,7 @@ class Watchdog:
         if not quiet:
             obs_scene(SCENE_BETWEEN)
             threading.Timer(120, obs_scene, args=(SCENE_LIVE,)).start()   # a fresh world takes a bit longer to boot
+        self.check_comeback("starting a fresh run", d.name, fresh=True, alert_id=self._answering)
         log(f"started a fresh run like {d.name} on seed {seed} ({'checked' if vetted else 'unchecked'} map, "
             f"log {log_path.name})")
         pushed = git_push() if secrets_cfg().get("git_push") and not quiet else ""
@@ -767,6 +775,7 @@ class Watchdog:
             obs_scene(SCENE_BETWEEN)
             threading.Timer(90, obs_scene, args=(SCENE_LIVE,)).start()   # the game takes about a minute to load
         log(f"resumed {d.name} from {last['name']}")
+        self.check_comeback(f"resuming {d.name}", d.name, fresh=False, alert_id=self._answering)
         pushed = git_push() if secrets_cfg().get("git_push") and not quiet else ""
         live = "" if quiet else " Stream goes back to Live in 90 s."
         return f"Resumed from {last['name']} (game minute {last['minute']}).{live}{pushed}"
@@ -775,6 +784,7 @@ class Watchdog:
 
     relay: subprocess.Popen | None = None
     monitor: subprocess.Popen | None = None
+    _answering: str | None = None             # the alert a restart answers, for its check result
     was_in_window: bool | None = None        # None until the first pass
 
     def clean_strays(self) -> None:
@@ -839,13 +849,65 @@ class Watchdog:
         if d is not None and _running(d):
             threading.Thread(target=self._wait_run_end, args=(d,), daemon=True).start()
 
+    # ---- after a restart: check that everything really came back
+
+    def check_comeback(self, label: str, old: str, fresh: bool, alert_id: str | None = None,
+                       deadline_s: float = 6 * 60) -> None:
+        """Runs in the background after a resume or a fresh run. Within the deadline, every part must be back:
+        the bot playing, the game server up, the game client watching and, when the stream is live, OBS on the Live
+        scene with the overlay following this run. All fine: a quiet line in the log (and on the alert it answers).
+        Anything missing: an alert to the phone that says what didn't come back."""
+        threading.Thread(target=self._check_comeback, args=(label, old, fresh, alert_id, deadline_s),
+                         daemon=True).start()
+
+    def comeback_state(self, old: str, fresh: bool) -> dict:
+        d = self.runs.latest()
+        ok = {"run": bool(d) and (d.name != old if fresh else d.name == old)}
+        ok["bot playing"] = bool(ok["run"] and _running(d))
+        cid = _run(["docker", "ps", "--filter", f"publish={ClientKeeper.port(self.runs)}/udp",
+                    "--format", "{{.ID}}"]).strip().split("\n")[0]
+        ready, watching = ClientKeeper.server_state(cid) if cid and " " not in cid else (False, False)
+        ok["game server up"] = ready
+        live = bool(obs_streaming())
+        if live:                                     # the client and the picture only matter while on air
+            ok["game client watching"] = watching
+            ok["stream on the Live scene"] = obs_scene() == SCENE_LIVE
+            ov = _run(["curl", "-s", "-m", "3", "http://127.0.0.1:8730/api/overlay/latest"])
+            ok["overlay following this run"] = bool(d) and f'"id": "{d.name}"' in ov.replace('":"', '": "')
+        ok["_run_id"] = d.name if d else None
+        return ok
+
+    def _check_comeback(self, label: str, old: str, fresh: bool, alert_id: str | None, deadline_s: float) -> None:
+        t0, state = time.time(), {}
+        while time.time() - t0 < deadline_s:
+            time.sleep(15)
+            state = self.comeback_state(old, fresh)
+            if all(v for k, v in state.items() if not k.startswith("_")):
+                parts = ", ".join(k for k in state if not k.startswith("_"))
+                log(f"check: {label} came back fine after {int(time.time() - t0)} s ({parts})")
+                write_status(note=f"{label}: everything came back fine")
+                if alert_id:
+                    a = _json(alert_path(alert_id)) or {}
+                    update_alert(alert_id, result=(a.get("result") or "") + f" Checked: {parts}, all fine.")
+                return
+        missing = [k for k, v in state.items() if not k.startswith("_") and not v]
+        fine = [k for k, v in state.items() if not k.startswith("_") and v]
+        log(f"check: {label} did NOT fully come back: missing {missing}")
+        run_id = state.get("_run_id") or old
+        new_alert(run_id, "check", f"After {label}: {', '.join(missing)[:50]} missing",
+                  f"{int(deadline_s // 60)} min after {label}, not back: {', '.join(missing)}.",
+                  f"## What didn't come back\n" + "\n".join(f"- {m}" for m in missing)
+                  + ("\n\n## What did\n" + "\n".join(f"- {f}" for f in fine) if fine else "")
+                  + "\n\nLogs: `runs/watch/watchdog.log`, the run's newest `*.log`, `runs/watch/fresh-*.log`."
+                  "\n\n---\nFix it = Claude looks into it (with your text). Let it run = leave it as it is.")
+
     def _wait_run_end(self, d: Path) -> None:
         t0 = time.time()
         while _running(d) and time.time() - t0 < 15 * 60:
             time.sleep(10)
         log(f"bot run {d.name} " + ("saved and stopped" if not _running(d) else "still runs after 15 min: check it"))
 
-    def start_game(self) -> str:
+    def start_game(self, fresh: bool = False) -> str:
         """The bot plays only while the stream is live. Carry on the stream's run from its newest save when it was
         stopped at the end of the last stream; start a fresh run with the same settings when it really ended."""
         d = self.runs.latest()
@@ -858,6 +920,8 @@ class Watchdog:
                 threading.Thread(target=self._start_after_stop, args=(d,), daemon=True).start()
                 return "the bot is still saving from the last stream; it carries on as soon as that is done"
             return "the bot is already playing"
+        if fresh:                                   # a new game was asked for: new map, from scratch
+            return self.start_fresh(d, quiet=True)
         result = _json(d / "result.json") or {}
         done = [sv for sv in saves(d) if sv["complete"]]
         newest = max(done, key=lambda sv: sv["minute"] or 0) if done else None
@@ -865,6 +929,12 @@ class Watchdog:
         if newest and newest.get("kind") == "stop" and result.get("end_reason") in (None, "ended_by_team"):
             return self.resume(d, quiet=True)
         return self.start_fresh(d, quiet=True)
+
+    def _fresh_after_stop(self, d: Path) -> None:
+        t0 = time.time()
+        while _running(d) and time.time() - t0 < 10 * 60:
+            time.sleep(5)
+        log("game: " + self.start_fresh(d, quiet=True))
 
     def _start_after_stop(self, d: Path) -> None:
         t0 = time.time()
@@ -894,7 +964,7 @@ class Watchdog:
 
     end_timer: threading.Timer | None = None
 
-    def start_stream(self, countdown_min: float = 2) -> dict:
+    def start_stream(self, countdown_min: float = 2, reset: bool = False) -> dict:
         ending = self.end_timer is not None and self.end_timer.is_alive()
         if ending:                                  # Start during the outro: stay on air and begin again
             self.end_timer.cancel()
@@ -919,9 +989,20 @@ class Watchdog:
                 return self.stream_state(note="OBS did not start streaming (is it open? check its Stream settings)")
             stream_cfg(since=now_iso())
         game = ""
+        reset = reset or bool(stream_cfg().get("reset_next"))
+        if reset:                                   # the show starts over: run #1, 0 upgrades, a new map
+            stats(since=datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S"), upgrades=0, upgrading=False)
+            stream_cfg(reset_next=False)
+            log("reset: counters back to run #1 and 0 upgrades; a new game starts")
         if stream_cfg().get("game_with_stream", True) and not self.a.no_game:
             try:
-                game = self.start_game()
+                d = self.runs.latest()
+                if reset and d is not None and _running(d):
+                    request_control(d, "stop")      # the old game saves and ends; the new one waits for its slot
+                    threading.Thread(target=self._fresh_after_stop, args=(d,), daemon=True).start()
+                    game = "the old game saves and stops, then a new game starts"
+                else:
+                    game = self.start_game(fresh=reset)
             except Exception as exc:  # noqa: BLE001 - the stream goes on even if the game won't start
                 game = f"could not start the game: {exc!r}"[:200]
             log("game: " + game)
@@ -963,7 +1044,8 @@ class Watchdog:
         c = stream_cfg()
         live = obs_streaming()
         return {"streaming": bool(live), "obs": live is not None, "since": c.get("since") if live else None,
-                "scene": obs_scene() or "unknown", "schedule": c["schedule"], "note": note}
+                "scene": obs_scene() or "unknown", "schedule": c["schedule"], "reset_next": bool(c.get("reset_next")),
+                "note": note}
 
     def follow_schedule(self) -> None:
         if self.was_in_window is None:              # first pass after start-up: remember, don't act
@@ -984,8 +1066,11 @@ class Watchdog:
         self.next_check = time.time() + (0 if self.a.now else self.a.interval * 60)
         log(f"watchdog: reviews every {self.a.interval} min while the stream is live")
         stats()                                     # first start: the stream's counters begin now (run #1)
-        if not obs_streaming():
+        if not obs_streaming():                     # off air: nothing from an earlier session should still run
             self.clean_strays()
+            for pid in stray_pids(r"main\(\[.monitor.\]\)"):
+                kill_tree(pid)
+                log(f"ended a leftover monitor ({pid})")
         live, live_at, keeper, kept_at = False, 0.0, ClientKeeper(), 0.0
         while True:
             try:
@@ -1077,7 +1162,11 @@ def make_handler(runs: Runs, tok: str, wd: "Watchdog | None" = None):
 
         def _stream(self, what: str, body: dict):
             if what == "start":
-                return self._send(200, wd.start_stream(float(body.get("countdown_min", 2))))
+                return self._send(200, wd.start_stream(float(body.get("countdown_min", 2)), bool(body.get("reset"))))
+            if what == "reset":                     # the next start begins a new game with fresh counters
+                stream_cfg(reset_next=bool(body.get("armed", True)))
+                return self._send(200, wd.stream_state(note="the next start resets the counters and starts a new game"
+                                                       if body.get("armed", True) else "reset cancelled"))
             if what == "stop":
                 return self._send(200, wd.stop_stream())
             if what == "schedule":
@@ -1151,9 +1240,17 @@ def main() -> None:
                    help="don't start/stop the bot's run with the stream (also: \"game_with_stream\": false in "
                         "runs/watch/stream.json)")
     p.add_argument("--reset-counters", action="store_true", help="the stream starts over: run #1, 0 upgrades")
+    p.add_argument("--reset-next", action="store_true",
+                   help="the next stream start resets the counters and starts a new game (new random map)")
+    p.add_argument("--cancel-reset", action="store_true", help="undo --reset-next")
     p.add_argument("--vet-seeds", type=int, metavar="N",
                    help="off-stream: boot random maps until N good ones are in the seed pool (about a minute each)")
     a = p.parse_args()
+    if a.reset_next or a.cancel_reset:
+        stream_cfg(reset_next=bool(a.reset_next))
+        print("the next stream start resets the counters (run #1, 0 upgrades) and starts a new game"
+              if a.reset_next else "reset cancelled: the next start carries on the current game")
+        return
     if a.vet_seeds:
         if Runs(RUNS).latest() is not None and _running(Runs(RUNS).latest()):
             sys.exit("a run is playing: vet seeds off-stream (it uses the same game slot)")
