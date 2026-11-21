@@ -34,6 +34,8 @@ from __future__ import annotations
 import argparse
 import hmac
 import json
+import os
+import random
 import re
 import secrets as pysecrets
 import shutil
@@ -168,8 +170,58 @@ def in_window(sched: dict, now: datetime | None = None) -> bool:
     return s <= t < e if s <= e else (t >= s or t < e)
 
 
+# ------------------------------------------------------------------ map seeds for fresh runs
+
+def pick_seed() -> tuple[int, bool]:
+    """A new map for every fresh run: an unused seed from the checked pool (stream.json "seed_pool", filled by
+    --vet-seeds), else a random one. Returns (seed, checked)."""
+    c = stream_cfg()
+    used = set(c.get("seeds_used") or [])
+    pool = [x for x in (c.get("seed_pool") or []) if x not in used]
+    seed, vetted = (random.choice(pool), True) if pool else (random.randrange(1, 2**31 - 1), False)
+    stream_cfg(seeds_used=sorted(used | {seed}))
+    return seed, vetted
+
+
+def vet_seed(seed: int, task: str = "freeplay-open") -> tuple[bool, str]:
+    """Boot the map once (about a minute) and keep it only if iron, copper, coal and stone are near spawn
+    (within 64 tiles) and water within 60."""
+    out = _run([sys.executable, "-c", "import sys; from arena.cli import main; main(sys.argv[1:])",
+                "vet-seed", "--task", task, "--seed", str(seed)], timeout=300)
+    try:
+        rep = json.loads(out[out.index("{"): out.rindex("}") + 1])
+    except ValueError:
+        return False, "vet-seed failed: " + " ".join(out[-200:].split())
+    near = rep.get("resources_within_64") or {}
+    missing = [r for r in ("iron-ore", "copper-ore", "coal", "stone") if r not in near]
+    water = rep.get("nearest_water") or {}
+    wd = water.get("distance") if isinstance(water, dict) else None
+    if missing:
+        return False, "no " + ", ".join(missing) + " near spawn"
+    if wd is None or wd > 60:
+        return False, f"water too far ({wd})"
+    return True, ", ".join(f"{k} {v.get('distance')}" for k, v in near.items()) + f", water {wd}"
+
+
+def vet_seeds(want: int, max_tries: int = 60) -> None:
+    """Off-stream job: try random seeds until `want` good maps are in the pool. Never while a run plays."""
+    good = 0
+    for i in range(max_tries):
+        seed = random.randrange(1, 2**31 - 1)
+        ok, why = vet_seed(seed)
+        log(f"seed {seed}: {'GOOD' if ok else 'skip'} ({why})")
+        if ok:
+            c = stream_cfg()
+            stream_cfg(seed_pool=sorted(set(c.get("seed_pool") or []) | {seed}))
+            good += 1
+            if good >= want:
+                break
+    log(f"vetted {i + 1} seeds, {good} added; pool now {len(stream_cfg().get('seed_pool') or [])}")
+
+
 # ------------------------------------------------------------------ the stream PC's Factorio client
 
+STEAM_FACTORIO = 427520          # Factorio's Steam app id
 FACTORIO_GUESSES = [r"E:\SteamLibrary\steamapps\common\Factorio\bin\x64\factorio.exe",
                     r"C:\Program Files (x86)\Steam\steamapps\common\Factorio\bin\x64\factorio.exe",
                     r"C:\Program Files\Factorio\bin\x64\factorio.exe"]
@@ -259,13 +311,20 @@ class ClientKeeper:
         if factorio_running():
             _run(["taskkill", "/IM", "factorio.exe", "/F"])
             time.sleep(4)
-        flags = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | getattr(subprocess, "DETACHED_PROCESS", 0)} \
-            if sys.platform == "win32" else {"start_new_session": True}
-        subprocess.Popen([exe, "--mp-connect", f"127.0.0.1:{port}"], cwd=str(Path(exe).parent),
-                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **flags)
+        if "steamapps" in exe.lower() and sys.platform == "win32":
+            # Steam asks before it runs a game with arguments it didn't set itself, so the Steam copy starts through
+            # Steam with no arguments: put "--mp-connect 127.0.0.1:34300" in Factorio's Launch Options in Steam.
+            os.startfile(f"steam://rungameid/{STEAM_FACTORIO}")
+            how = "through Steam (Launch Options: --mp-connect 127.0.0.1:34300)"
+        else:
+            flags = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | getattr(subprocess, "DETACHED_PROCESS", 0)} \
+                if sys.platform == "win32" else {"start_new_session": True}
+            subprocess.Popen([exe, "--mp-connect", f"127.0.0.1:{port}"], cwd=str(Path(exe).parent),
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **flags)
+            how = f"connecting to 127.0.0.1:{port}"
         self.tries += 1
         self.launched_at = time.time()
-        log(f"client: started Factorio, connecting to 127.0.0.1:{port} (try {self.tries})")
+        log(f"client: started Factorio {how} (try {self.tries})")
 
 
 # ------------------------------------------------------------------ alerts
@@ -636,6 +695,11 @@ class Watchdog:
     def start_fresh(self, d: Path, quiet: bool = False) -> str:
         """A new run with the same settings (task, bot, map seed) as run d: a new run number on the overlay."""
         argv = [a for a in ((_json(d / "launch.json") or {}).get("argv") or []) if isinstance(a, str)]
+        if "--seed" in argv:                       # every fresh run gets a new map
+            i = argv.index("--seed")
+            del argv[i:i + 2]
+        seed, vetted = pick_seed()
+        argv += ["--seed", str(seed)]
         if "local-run" not in argv:
             return "No launch.json for this run: start the new run by hand."
         if _running(d):
@@ -651,9 +715,11 @@ class Watchdog:
         if not quiet:
             obs_scene(SCENE_BETWEEN)
             threading.Timer(120, obs_scene, args=(SCENE_LIVE,)).start()   # a fresh world takes a bit longer to boot
-        log(f"started a fresh run like {d.name} (log {log_path.name})")
+        log(f"started a fresh run like {d.name} on seed {seed} ({'checked' if vetted else 'unchecked'} map, "
+            f"log {log_path.name})")
         pushed = git_push() if secrets_cfg().get("git_push") and not quiet else ""
-        return f"Started a fresh run with the same settings. Stream goes back to Live in 2 min.{pushed}"
+        live = "" if quiet else " Stream goes back to Live in 2 min."
+        return f"Started a fresh run on a new map (seed {seed}).{live}{pushed}"
 
     def resume(self, d: Path, quiet: bool = False) -> str:
         done = [s for s in saves(d) if s["complete"]]
@@ -668,12 +734,13 @@ class Watchdog:
             threading.Timer(90, obs_scene, args=(SCENE_LIVE,)).start()   # the game takes about a minute to load
         log(f"resumed {d.name} from {last['name']}")
         pushed = git_push() if secrets_cfg().get("git_push") and not quiet else ""
-        return f"Resumed from {last['name']} (game minute {last['minute']}). Stream goes back to Live in 90 s.{pushed}"
+        live = "" if quiet else " Stream goes back to Live in 90 s."
+        return f"Resumed from {last['name']} (game minute {last['minute']}).{live}{pushed}"
 
     # ---- stream on/off (phone buttons and the daily window)
 
     relay: subprocess.Popen | None = None
-    was_in_window = False
+    was_in_window: bool | None = None        # None until the first pass
 
     def ensure_relay(self) -> None:
         if self.relay is None or self.relay.poll() is not None:
@@ -802,6 +869,9 @@ class Watchdog:
                 "scene": obs_scene() or "unknown", "schedule": c["schedule"], "note": note}
 
     def follow_schedule(self) -> None:
+        if self.was_in_window is None:              # first pass after start-up: remember, don't act
+            self.was_in_window = in_window(stream_cfg()["schedule"])
+            return
         """Start when the daily window opens and stop when it closes (only on those edges, so a button pressed in
         between wins until the next edge)."""
         now_in = in_window(stream_cfg()["schedule"])
@@ -980,7 +1050,14 @@ def main() -> None:
                    help="don't start/stop the bot's run with the stream (also: \"game_with_stream\": false in "
                         "runs/watch/stream.json)")
     p.add_argument("--reset-counters", action="store_true", help="the stream starts over: run #1, 0 upgrades")
+    p.add_argument("--vet-seeds", type=int, metavar="N",
+                   help="off-stream: boot random maps until N good ones are in the seed pool (about a minute each)")
     a = p.parse_args()
+    if a.vet_seeds:
+        if Runs(RUNS).latest() is not None and _running(Runs(RUNS).latest()):
+            sys.exit("a run is playing: vet seeds off-stream (it uses the same game slot)")
+        vet_seeds(a.vet_seeds)
+        return
     if a.reset_counters:
         print(stats(since=datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S"), upgrades=0, upgrading=False))
         return
