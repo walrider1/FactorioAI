@@ -278,7 +278,16 @@ async function counters() {
   try {
     const c = await (await fetch("/api/stream", { cache: "no-store" })).json();
     if (mode === "upgrading" && !Q.has("title")) $("tag").textContent = `Self-upgrade #${Math.max(1, c.upgrades)} in progress`;
-    if (!Q.has("msg") && c.run_no) $("msg").textContent = `Run #${c.run_no} · ${c.upgrades} self-upgrade${c.upgrades === 1 ? "" : "s"} so far`;
+    const S = c.schedule;                          // the daily hours from the phone app, so viewers know when to come back
+    const hours = S ? `Live daily ${S.start}–${S.end} ${S.tz}` : "";
+    if (!Q.has("msg") && c.run_no) {
+      const counts = `Run #${c.run_no} · ${c.upgrades} self-upgrade${c.upgrades === 1 ? "" : "s"}`;
+      $("msg").textContent = hours ? `${counts} · ${hours}` : `${counts} so far`;
+    }
+    if (mode === "ending" && S && !Q.has("sub")) {
+      const now = new Date(), hm = `${pad(now.getHours())}:${pad(now.getMinutes())}`;
+      $("sub").textContent = `Next stream ${hm < S.start ? "today" : "tomorrow"} at ${S.start} ${S.tz}. ${hours}.`;
+    }
   } catch (e) { /* opened as a file, or the monitor is down: keep the defaults */ }
 }
 counters(); setInterval(counters, 15000);

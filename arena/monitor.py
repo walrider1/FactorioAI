@@ -30,6 +30,7 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -199,6 +200,18 @@ def request_resume(d: Path, save: str) -> dict:
     return {"ok": True, "log": log_path.name, "note": "the game loads in about a minute; this run's page picks it up"}
 
 
+def stream_schedule(path: Path) -> dict | None:
+    """The stream's daily hours (set from the phone app, kept by stream/watchdog.py) for viewers, with this PC's
+    time zone: {"start": "10:00", "end": "19:00", "tz": "CET"}. None when there is no schedule."""
+    sched = ((_json(path) or {}).get("schedule") or {})
+    if not sched.get("enabled") or not sched.get("start") or not sched.get("end"):
+        return None
+    off = datetime.now().astimezone().utcoffset()
+    hours = int(off.total_seconds() // 3600) if off is not None else 0
+    tz = {1: "CET", 2: "CEST", 0: "UTC"}.get(hours, f"UTC{hours:+d}")
+    return {"start": sched["start"], "end": sched["end"], "tz": tz}
+
+
 class Runs:
     def __init__(self, root: Path):
         self.root = Path(root)
@@ -300,7 +313,8 @@ class Runs:
         "upgrades": n, "upgrading": bool}. Without it, every run of the task counts."""
         st = _json(self.root / "watch" / "stats.json") or {}
         d = d or self.latest()
-        out = {"upgrades": int(st.get("upgrades") or 0), "upgrading": bool(st.get("upgrading")), "run_no": None}
+        out = {"upgrades": int(st.get("upgrades") or 0), "upgrading": bool(st.get("upgrading")), "run_no": None,
+               "schedule": stream_schedule(self.root / "watch" / "stream.json")}
         if d is None:
             return out
         task = (_json(d / "meta.json") or {}).get("task")

@@ -675,6 +675,9 @@ class Watchdog:
         if obs_streaming():
             return self.stream_state(note="already live")
         self.ensure_relay()
+        # the Starting Soon card counts down the real wait (reloading the source also restarts its clock)
+        obs_call("set_input_settings", "Screen: Starting Soon",
+                 {"url": f"http://127.0.0.1:8730/screen?mode=starting&t={max(0, countdown_min):g}"}, True)
         obs_scene(SCENE_START)
         if obs_call("start_stream") is None:
             return self.stream_state(note="OBS did not start streaming (is OBS open?)")
