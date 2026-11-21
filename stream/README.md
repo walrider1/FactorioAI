@@ -19,7 +19,7 @@ holds the phone app's token.
 
 1. Start OBS (its WebSocket server is on) and Factorio (spectating, `/cam on`).
 2. Start the bot's run (`arena local-run ...` or Resume on the monitor).
-3. `powershell -ExecutionPolicy Bypass -File streamstart.ps1` starts the watchdog in the background (no window; log in `runswatchwatchdog.log`). It runs the monitor, relay, bot run and game client itself while the stream is live, and closes them when it ends. `streamstop.ps1` stops all the tooling.
+3. `powershell -ExecutionPolicy Bypass -File stream\start.ps1` starts the watchdog in the background (no window; log in `runs\watch\watchdog.log`). It runs the monitor, relay, bot run and game client itself while the stream is live, and closes them when it ends. `stream\stop.ps1` stops all the tooling.
 4. In OBS: scene **Starting Soon**, then **Start Streaming**, then **Live** when ready.
 
 Check the relay before going live: `uv run --no-sync python stream/relay.py --check` shows where it sends (keys masked).
