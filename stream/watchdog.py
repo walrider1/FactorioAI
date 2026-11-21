@@ -66,8 +66,8 @@ LOCK = threading.Lock()
 SCENE_LIVE, SCENE_UPGRADE, SCENE_BETWEEN = "Live", "Self-Upgrading", "Between Runs"
 OVERLAY_SOURCE = "Factorio Overlay"   # the browser source with /overlay in the Live scene
 
-REVIEW_TOOLS = ["Read", "Grep", "Glob", "Bash(tail:*)", "Bash(wc:*)"]
-# the fix session may change anything in the project (server, bot, stream, OBS), but only what was approved: the
+REVIEW_TOOLS = ["Read", "Grep", "Glob", "Bash(tail:*)", "Bash(wc:*)", "Bash(head:*)"]
+# the fix session changes the bot (and stream tooling), never the game's rules, and only what was approved: the
 # prompt makes it stop and ask (a new alert) for anything beyond that. Never a real game run.
 FIX_TOOLS = ["Read", "Edit", "Write", "Grep", "Glob", "Bash(tail:*)", "Bash(wc:*)",
              "Bash(uv run python -m pytest:*)", "Bash(uv run --no-sync python -m pytest:*)", "Bash(uv run pytest:*)",
@@ -490,8 +490,88 @@ def packet(d: Path, window_s: float, prev: dict | None) -> dict:
     if logs and (not p["playing"] or p["seconds_since_bot_update"] > 300):
         p["process_log_tail"] = logs[-1].read_text(encoding="utf-8", errors="replace").splitlines()[-40:]
     p["window"]["rebuilt_spots"] = churn(d, now - window_s)
+    p["findings"] = findings(d, p, ev, live, prev)
     p["flags"] = flags(p)
     return clip(p, 400)
+
+
+# The checks a person makes when asked "go through the run and find what went wrong" (run 20261121-140755: the
+# review said ok five times while the bot looped on one belt for two hours, failed to gather plates, built a dead
+# plastics station, re-polluted one belt six times, left the labs idle, and 22 of 62 sites stood mostly still).
+# Each finding is a fact from the run, not a judgement; the reviewer must explain every one before saying ok.
+DEAD_SHARE = 0.35          # a site with fewer of its machines working than this is "mostly still"
+NOT_SITES = {"labs", "poles", "pole", "storage", "pumpjack", "steam_power"}
+DROUGHT_MIN = 90.0         # game minutes without a milestone
+
+
+def findings(d: Path, p: dict, ev: list, live: dict, prev: dict | None) -> list[dict]:
+    out = []
+
+    def add(key, what, **evidence):
+        out.append({"key": key, "what": what, **({"evidence": evidence} if evidence else {})})
+    goals = [e for e in ev if e.get("kind") == "goal_end"]
+    soft = [e for e in goals if str(e.get("result", "")).startswith(("paused", "dropped", "held back"))]
+    if len(soft) >= 3:
+        add("soft-failures", f"{len(soft)} goals were paused, dropped or held back this window (counted as ok)",
+            examples=[clip(e.get("goal", ""), 80) for e in soft[:4]])
+    starved = [e for e in goals if "in time" in str(e.get("result", ""))]
+    if starved:
+        add("gathering", f"{len(starved)} goal(s) failed waiting for materials",
+            examples=[clip(e.get("result", ""), 100) for e in starved[:3]])
+    long_ = [e for e in goals if (e.get("game_minutes") or 0) >= 15]
+    if long_:
+        add("slow-goals", f"{len(long_)} goal(s) took 15+ game minutes",
+            examples=[f"{clip(e.get('goal', ''), 60)}: {e.get('game_minutes')} min" for e in long_[:4]])
+    repairs = Counter(clip(e.get("goal", ""), 90) for e in goals
+                      if str(e.get("goal", "")).startswith(("relink", "purge", "replace", "upgrade")))
+    again = {g: n for g, n in repairs.items() if n >= 2}
+    if again:
+        add("repeated-repairs", "the same repair ran more than once: what it fixed came back", repairs=again)
+    aged = [e for e in ev if e.get("kind") == "aged"]
+    if aged:
+        add("plan-starved", f"{len(aged)} planned step(s) waited 20+ min behind fixes and the close-out",
+            examples=[f"{clip(e.get('goal', ''), 60)}: {e.get('waited_min')} min" for e in aged[:4]])
+    research = live.get("research") or {}
+    idle = [q for q in ((live.get("foreman") or {}).get("problems") or []) if "labs were idle" in q or "labs idle" in q]
+    if (not research.get("current") and not research.get("queue")) or idle:
+        add("research-idle", "the labs ran out of research" + (f" ({len(idle)} times noted)" if idle else ""),
+            research=research)
+    sites = live.get("base") or []
+    dead = []
+    for s in sites:
+        h = s.get("health") or {}
+        total = sum(h.values())
+        if s.get("kind") in NOT_SITES or not total:
+            continue
+        if h.get("working", 0) / total < DEAD_SHARE:
+            dead.append(f"{s.get('id')} {s.get('kind')} {s.get('item') or s.get('resource') or ''}: "
+                        + ", ".join(f"{k} {v}" for k, v in sorted(h.items(), key=lambda kv: -kv[1])[:3]))
+    if dead and len(dead) >= max(3, len(sites) // 6):
+        add("idle-sites", f"{len(dead)} of {len(sites)} sites stand mostly still", sites=dead[:12])
+    fluid = [s for s in sites if (s.get("health") or {}).get("no_input_fluid")]
+    pumps = [e for e in ev if e.get("kind") == "pumps"]
+    if fluid or pumps:
+        add("fluid", "sites without their fluid", sites=[f"{s.get('id')} {s.get('kind')}" for s in fluid[:6]],
+            notes=[e.get("note") for e in pumps][:3])
+    purges = Counter(str(e.get("goal", ""))[:60] for e in goals if str(e.get("goal", "")).startswith("purge"))
+    if any(n >= 2 for n in purges.values()):
+        add("pollution", "a belt was cleaned more than once: something keeps feeding it the wrong items",
+            purges=dict(purges))
+    churn_ = (p.get("window") or {}).get("rebuilt_spots") or {}
+    if churn_.get("spots", 0) >= 5:
+        add("build-loop", f"{churn_['spots']} spots placed and taken up 4+ times (a loop, or the same belts "
+            "cleaned or relaid over and over)", worst=churn_.get("worst"))
+    ms = [e for e in _tail_lines(d / "bot_events.jsonl", 2_000_000) if e.get("kind") == "milestone"]
+    last = max([e.get("minute") or 0 for e in ms], default=0)
+    gm = p.get("game_minute") or 0
+    if gm - last >= DROUGHT_MIN:
+        add("no-milestone", f"no milestone for {gm - last:.0f} game minutes (last at minute {last:.0f})")
+    if prev:                                   # findings that were there last time too: not resolving on their own
+        before = {f["key"] for f in prev.get("findings") or []}
+        for f in out:
+            if f["key"] in before:
+                f["again"] = True
+    return out
 
 
 def churn(d: Path, since: float) -> dict:
@@ -530,6 +610,8 @@ def flags(p: dict) -> list[str]:
     s = p.get("since_last_review") or {}
     if s and not s.get("new_milestones") and s.get("research_then") == p.get("research"):
         f.append("no new milestone and research unchanged since the last review")
+    for x in p.get("findings") or []:
+        f.append(f"finding {x['key']}{' (again)' if x.get('again') else ''}: {x['what']}")
     if (p.get("bot_watchdog") or {}).get("minutes_without_progress", 0) > 20:
         f.append(f"bot's own watchdog: {p['bot_watchdog']['minutes_without_progress']} game min without progress")
     return f
@@ -567,32 +649,39 @@ def run_claude(prompt: str, tools: list[str], model: str | None, timeout_s: int,
     return {"error": "reply was not JSON", "raw": text[-1500:]}
 
 
-REVIEW_PROMPT = """You are the hourly watchdog for a live stream where an AI bot plays Factorio entirely on its own \
-(task freeplay: from nothing to launching a rocket). Decide whether the bot is stuck in a way it cannot get out of by itself.
+REVIEW_PROMPT = """You are the hourly reviewer for a live stream where an AI bot plays stock Factorio entirely on its \
+own (task freeplay: from nothing to launching a rocket). Review the run the way the organizer's engineer does when \
+asked "go through the run and find everything that went wrong, don't overlook anything": judge how the whole bot \
+performs, not whether it is moving at all.
 
 Read the review packet first: {packet}
-More detail if you need it: the run folder {run} (bot_live.json = full live state, bot_events.jsonl = event log; \
-actions.jsonl is ~100 MB: only tail or grep it, never Read it whole) and the code (bots/, arena/, lua/).
+Its "findings" are facts the watchdog measured (repeated repairs, build loops, goals failing for materials, planned \
+steps starved behind fixes, idle labs, sites standing still, missing fluids, re-polluted belts, milestone droughts). \
+Dig into the run folder {run} as far as you need (bot_live.json = live state with every site's machine states; \
+bot_events.jsonl = goals, plans, overseer notes; actions.jsonl is ~100 MB: only tail or grep it) and the code (bots/).
+
+For EVERY finding: confirm it in the data, find its cause, and decide whether it is noise or a real problem. Also \
+look for what the findings do not cover: time going into rework instead of growth, the same problem in another \
+form, decisions that will block a later stage (oil, blue science, the silo), resources running out, waste.
 
 Verdicts:
-- "ok": progressing, or slow but recovering on its own. A single failed goal, small errors, churn that is resolving: ok. \
-When in doubt between ok and stuck, it is not stuck.
-- "unsure": something looks wrong but it may still recover; you will be asked again in {unsure} minutes.
-- "stuck": only when the bot cannot recover by itself: the same failure loop for a long time with its own recovery \
-(bot watchdog ladder, overseer, assessor) already tried and failing; no milestone or research progress; the process died; \
-or a structural blocker the bot's code has no way to handle. "certain": true only if you would bet on it.
+- "ok": progressing well AND every finding is explained as noise (say why for each in "analysis").
+- "problems": anything real, even while it progresses: a systemic issue, a loop, wasted hours, a stage that will \
+block. This alerts the organizer's phone with your analysis and plan, exactly as the engineer would report it.
+- "stuck": it cannot recover by itself (no progress, its own recovery failing, the process died). "certain": true \
+only if you would bet on it.
+- "unsure": you could not tell from the data; you are asked again in {unsure} minutes.
 
-The cause may be anywhere: the bot (bots/), the game server (arena/, lua/), the stream setup (stream/, OBS), or config/.
-When stuck or unsure, do a real problem analysis in "analysis" (markdown):
-1. Symptom. 2. Evidence (cite packet fields, events, log lines). 3. Root cause in the code (file and function). \
-4. Systemic problems: why this class of failure happens, where else it would bite, and why a narrow patch for this \
-instance would not be a real fix. 5. Plan: the exact changes you propose (files, functions, what changes), because the \
-organizer approves this plan and nothing outside it gets changed without asking again. 6. Risk of the fix.
-Small errors are fine; do not overlook systemic ones. When ok, "analysis" is two or three sentences.
-Do not change any files.
+For "problems" and "stuck", "analysis" (markdown) holds, per problem: 1. Symptom. 2. Evidence (packet fields, \
+events, log lines, numbers). 3. Root cause in the code (file, function). 4. Why it is systemic: where else this class \
+of failure bites, and why a narrow patch would not be a real fix. 5. Plan: the exact bot-side changes (files, \
+functions, what changes); the organizer approves this plan and nothing outside it changes without asking again. \
+6. Risk. Order problems by how much they cost the run. Fixes belong in the bot (bots/): the point is to beat the \
+stock game, so never propose changing the game, the server's rules or the scenario (arena/, lua/, config/) to make \
+it easier. Do not change any files.
 
 Answer with ONLY one JSON object, nothing around it:
-{{"verdict": "ok"|"unsure"|"stuck", "certain": true|false, "title": "<= 60 chars", \
+{{"verdict": "ok"|"problems"|"stuck"|"unsure", "certain": true|false, "title": "<= 60 chars", \
 "summary": "<= 200 chars, read on a phone lock screen", "analysis": "markdown"}}"""
 
 FIX_PROMPT = """The live stream shows the "Self-Upgrading" screen. The bot's run {run_id} is saved and stopped. \
@@ -607,17 +696,17 @@ The organizer read the watchdog's analysis and approved a fix.
 {text}
 
 ## What to do
-You may change anything in this project that the fix needs: the bot (bots/), the game server (arena/, lua/), the \
-stream (stream/, and OBS through `uv run --no-sync --with obsws-python python stream/obs_setup.py`), config/, docs. \
-But ONLY what the approved plan above and the organizer's instructions cover. If the real fix needs a change outside \
+You may change what the fix needs in the bot (bots/), its tests (tests/), the stream tooling (stream/, and OBS \
+through `uv run --no-sync --with obsws-python python stream/obs_setup.py`) and docs. Never change the game, the \
+server's rules or the scenario (arena/, lua/, config/) to help the bot: the point is to beat the stock game. \
+And ONLY what the approved plan above and the organizer's instructions cover. If the real fix needs a change outside \
 that (another subsystem, a bigger redesign, deleting things, anything the organizer did not approve), do not make it: \
 stop and answer with "needs_approval" set, describing exactly what you want to change and why. The organizer is asked \
 and you get another session with their answer.
 1. Confirm the root cause in the code before changing anything (the run folder is {run}; actions.jsonl is huge: tail/grep only).
 2. Fix the systemic cause, not only this instance: the fix must also hold for the other cases the analysis lists. \
 Keep everything else as it is.
-3. The run resumes from a save: changes under lua/ only apply to new runs, so prefer fixes in the bot (bots/) and \
-say clearly if a lua change is needed.
+3. The run resumes from a save with the new bot code, so a bot fix applies right away.
 4. Run only short tests: `uv run python -m pytest -q -x <relevant test files>`. Never start a real Factorio game \
 (no `arena local-run`, no ARENA_FACTORIO tests). Do not touch secrets/ or runs/.
 5. If this folder is a git repository, commit your change with a message that starts "Self-upgrade #{n}: " and a \
@@ -626,8 +715,8 @@ approves the next step. Never commit secrets/, runs/ or .env.
 6. Decide whether the run should restart from scratch or continue from its save. This is a live stream: the goal is \
 steady, watchable progress, not the fastest finish. Viewers should not watch hours of the bot untangling its own mess. \
 Restart when the base is badly tangled (lots of broken, walled-in or churned sites, routing failures piling up), when \
-untangling would take longer than rebuilding to the same point, when the fix only helps early-game decisions the run \
-is already past, or when the fix changes lua/ (it only applies to new runs). Continue when the base is basically \
+untangling would take longer than rebuilding to the same point, or when the fix only helps early-game decisions the \
+run is already past. Continue when the base is basically \
 sound and the fix lets it move forward right away. Look at the run's state (bot_live.json: base, upkeep, hints, \
 milestones and their times) to judge this, and weigh how long it took to reach this point.
 
@@ -677,9 +766,18 @@ class Watchdog:
         verdict = out.get("verdict", "unsure")
         log(f"verdict: {verdict} (certain={out.get('certain')}) {out.get('title', '')} -- {out.get('summary', '')}")
         write_status(last_check=now_iso(), last_verdict=verdict, note=out.get("summary", "")[:200])
-        if verdict == "stuck" and out.get("certain") and alert:
-            new_alert(d.name, "stuck", out.get("title") or "Bot is stuck", out.get("summary") or "",
-                      out.get("analysis") or "")
+        if alert and (verdict == "problems" or (verdict == "stuck" and out.get("certain"))):
+            kind = "stuck" if verdict == "stuck" else "problems"
+            title = out.get("title") or ("Bot is stuck" if kind == "stuck" else "Problems in the run")
+            open_ = [a for a in load_alerts() if a.get("run_id") == d.name and a.get("kind") == "problems"
+                     and a.get("status") == "open"]
+            if kind == "problems" and open_:          # still unanswered: bring it up to date, no second alert
+                update_alert(open_[-1]["id"], title=title[:80], summary=(out.get("summary") or "")[:300],
+                             analysis=out.get("analysis") or "", updated=now_iso())
+            else:
+                new_alert(d.name, kind, title, out.get("summary") or "", out.get("analysis") or "")
+        if verdict == "problems":
+            return "ok"                               # the organizer decides; the next review comes on schedule
         return verdict if verdict != "stuck" or out.get("certain") else "unsure"
 
     def handle_replies(self) -> None:
@@ -1107,7 +1205,12 @@ class Watchdog:
                         self.ensure_monitor()               # live but the overlay's server is gone: bring it back
                 if (live or self.a.keep_client) and not self.a.no_client and time.time() - kept_at > 15:
                     kept_at = time.time()
-                    keeper.tick(self.runs)                  # reconnect the game client after a server restart
+                    # "live" can be 30 s old: ask OBS now, or the client comes back right after the stream ends
+                    # (20261121: the stream ended at 20:00:45 and Factorio was started again at 20:00:46)
+                    if self.a.keep_client or obs_streaming():
+                        keeper.tick(self.runs)              # reconnect the game client after a server restart
+                    else:
+                        live = False
                 if not live:                                # automation only reviews while the stream is live:
                     self.next_check = max(self.next_check, time.time() + self.a.interval * 60)  # first one an hour in
                 elif time.time() >= self.next_check:
