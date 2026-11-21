@@ -193,7 +193,8 @@ def request_resume(d: Path, save: str) -> dict:
     log_path = d / f"resume-{time.strftime('%Y%m%d-%H%M%S')}.log"
     cmd = [sys.executable, "-c", "import sys; from arena.cli import main; main(sys.argv[1:])",
            *argv, "--resume", f"{d.name}:{save}", "--monitor", "0"]
-    flags = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | getattr(subprocess, "DETACHED_PROCESS", 0)} \
+    # no console window (DETACHED_PROCESS made every console child, like docker, open its own window)
+    flags = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | 0x08000000} \
         if os.name == "nt" else {"start_new_session": True}
     with open(log_path, "ab") as fh:
         subprocess.Popen(cmd, cwd=str(ROOT), stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, **flags)

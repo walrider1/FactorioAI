@@ -170,6 +170,41 @@ def in_window(sched: dict, now: datetime | None = None) -> bool:
     return s <= t < e if s <= e else (t >= s or t < e)
 
 
+# ------------------------------------------------------------------ child processes, all without windows
+
+# no console window for anything the watchdog starts (DETACHED_PROCESS made every console child, like docker,
+# open its own window); a new process group so a child survives the watchdog's own Ctrl+C
+HIDDEN = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | 0x08000000} if sys.platform == "win32"
+          else {"start_new_session": True})
+
+
+def kill_tree(pid: int) -> None:
+    """The process and everything it started (the relay's ffmpeg, a monitor's server)."""
+    if sys.platform == "win32":
+        _run(["taskkill", "/PID", str(pid), "/T", "/F"])
+    else:
+        try:
+            os.killpg(pid, 15)
+        except OSError:
+            pass
+
+
+def stray_pids(pattern: str) -> list[int]:
+    """Processes whose command line matches the regex (left over from an earlier watchdog)."""
+    if sys.platform != "win32":
+        return []
+    ps = ("Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match '%s' -and $_.ProcessId -ne %d } "
+          "| ForEach-Object { $_.ProcessId }" % (pattern, os.getpid()))
+    return [int(x) for x in _run(["powershell", "-NoProfile", "-Command", ps]).split() if x.isdigit()]
+
+
+def port_open(port: int) -> bool:
+    import socket
+    with socket.socket() as sk:
+        sk.settimeout(0.5)
+        return sk.connect_ex(("127.0.0.1", port)) == 0
+
+
 # ------------------------------------------------------------------ map seeds for fresh runs
 
 def pick_seed() -> tuple[int, bool]:
@@ -317,8 +352,7 @@ class ClientKeeper:
             os.startfile(f"steam://rungameid/{STEAM_FACTORIO}")
             how = "through Steam (Launch Options: --mp-connect 127.0.0.1:34300)"
         else:
-            flags = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | getattr(subprocess, "DETACHED_PROCESS", 0)} \
-                if sys.platform == "win32" else {"start_new_session": True}
+            flags = HIDDEN
             subprocess.Popen([exe, "--mp-connect", f"127.0.0.1:{port}"], cwd=str(Path(exe).parent),
                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **flags)
             how = f"connecting to 127.0.0.1:{port}"
@@ -706,8 +740,7 @@ class Watchdog:
             request_control(d, "stop")
         WATCH.mkdir(parents=True, exist_ok=True)
         log_path = WATCH / f"fresh-{time.strftime('%Y%m%d-%H%M%S')}.log"
-        flags = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | getattr(subprocess, "DETACHED_PROCESS", 0)} \
-            if sys.platform == "win32" else {"start_new_session": True}
+        flags = HIDDEN
         with open(log_path, "ab") as fh:
             subprocess.Popen([sys.executable, "-c", "import sys; from arena.cli import main; main(sys.argv[1:])",
                               *argv, "--monitor", "0"], cwd=str(ROOT), stdout=fh, stderr=subprocess.STDOUT,
@@ -740,16 +773,71 @@ class Watchdog:
     # ---- stream on/off (phone buttons and the daily window)
 
     relay: subprocess.Popen | None = None
+    monitor: subprocess.Popen | None = None
     was_in_window: bool | None = None        # None until the first pass
+
+    def clean_strays(self) -> None:
+        """Relays (and their ffmpeg) left by an earlier watchdog would fight over the port: end them."""
+        for pid in stray_pids(r"stream[\\/]relay\.py") + stray_pids(r"ffmpeg.*127\.0\.0\.1:1935"):
+            if self.relay is not None and pid == self.relay.pid:
+                continue
+            kill_tree(pid)
+            log(f"ended a leftover relay process ({pid})")
 
     def ensure_relay(self) -> None:
         if self.relay is None or self.relay.poll() is not None:
+            self.relay = None
+            self.clean_strays()
             WATCH.mkdir(parents=True, exist_ok=True)
             fh = open(WATCH / "relay.log", "ab")
             self.relay = subprocess.Popen([sys.executable, str(ROOT / "stream" / "relay.py")], cwd=str(ROOT),
-                                          stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
+                                          stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, **HIDDEN)
             log("relay started")
             time.sleep(2)                       # let ffmpeg open its port before OBS connects
+
+    def ensure_monitor(self) -> None:
+        """The overlay and the screens come from `arena monitor` (port 8730); only needed while live."""
+        if port_open(8730):
+            return
+        WATCH.mkdir(parents=True, exist_ok=True)
+        fh = open(WATCH / "monitor.log", "ab")
+        self.monitor = subprocess.Popen(
+            [sys.executable, "-c", "import sys; from arena.cli import main; main(['monitor'])"], cwd=str(ROOT),
+            stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, **HIDDEN)
+        for _ in range(30):
+            if port_open(8730):
+                break
+            time.sleep(0.5)
+        log("monitor started" if port_open(8730) else "monitor did not come up (see runs/watch/monitor.log)")
+
+    def shut_down_helpers(self) -> None:
+        """After the stream: the relay and the monitor go and the game client closes. The bot's run ends by itself
+        once its save is done (a background thread waits for that and logs it)."""
+        for name in ("relay", "monitor"):
+            proc = getattr(self, name)
+            if proc is not None and proc.poll() is None:
+                kill_tree(proc.pid)
+                log(f"{name} closed")
+            setattr(self, name, None)
+        self.clean_strays()
+        if factorio_running():
+            _run(["taskkill", "/IM", "factorio.exe"])      # ask nicely first
+            for _ in range(10):
+                if not factorio_running():
+                    break
+                time.sleep(1)
+            if factorio_running():
+                _run(["taskkill", "/IM", "factorio.exe", "/F"])
+            log("game client closed")
+        d = self.runs.latest()
+        if d is not None and _running(d):
+            threading.Thread(target=self._wait_run_end, args=(d,), daemon=True).start()
+
+    def _wait_run_end(self, d: Path) -> None:
+        t0 = time.time()
+        while _running(d) and time.time() - t0 < 15 * 60:
+            time.sleep(10)
+        log(f"bot run {d.name} " + ("saved and stopped" if not _running(d) else "still runs after 15 min: check it"))
 
     def start_game(self) -> str:
         """The bot plays only while the stream is live. Carry on the stream's run from its newest save when it was
@@ -807,6 +895,7 @@ class Watchdog:
         was_live = bool(obs_streaming())
         if was_live and not ending:
             return self.stream_state(note="already live")
+        self.ensure_monitor()
         if not was_live:
             self.ensure_relay()
         self.reset_cards(countdown_min)
@@ -850,11 +939,11 @@ class Watchdog:
                 if not obs_streaming():
                     break
                 time.sleep(1)
-            if self.relay and self.relay.poll() is None:
-                self.relay.terminate()
             stream_cfg(since=None)
             self.reset_cards()                      # fresh cards, and OBS waits on Starting Soon for the next stream
             obs_scene(SCENE_START)
+            time.sleep(3)                           # let the cards load before their server goes
+            self.shut_down_helpers()
             self.end_timer = None
             log("stream ended")
         self.end_timer = threading.Timer(outro_s, end)
@@ -887,6 +976,8 @@ class Watchdog:
         self.next_check = time.time() + (0 if self.a.now else self.a.interval * 60)
         log(f"watchdog: reviews every {self.a.interval} min while the stream is live")
         stats()                                     # first start: the stream's counters begin now (run #1)
+        if not obs_streaming():
+            self.clean_strays()
         live, live_at, keeper, kept_at = False, 0.0, ClientKeeper(), 0.0
         while True:
             try:
@@ -894,6 +985,8 @@ class Watchdog:
                 self.handle_replies()                       # your answers are handled even off-stream
                 if time.time() - live_at > 30:
                     live, live_at = bool(obs_streaming()) or self.a.always, time.time()
+                    if live and not port_open(8730):
+                        self.ensure_monitor()               # live but the overlay's server is gone: bring it back
                 if (live or self.a.keep_client) and not self.a.no_client and time.time() - kept_at > 15:
                     kept_at = time.time()
                     keeper.tick(self.runs)                  # reconnect the game client after a server restart
