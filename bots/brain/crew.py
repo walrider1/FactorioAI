@@ -1029,16 +1029,16 @@ class Crew:
                 time.sleep(max(0.5, 3 / self.w.speed))
         return f"waited {seconds:.0f} game seconds"
 
-    def auto_research(self) -> str | None:
+    def auto_research(self, exclude: set = frozenset()) -> str | None:
         """Labs must never sit idle: queue the next technology toward the level's milestones that the packs we
-        can supply allow, else the cheapest one they allow."""
+        can supply allow, else the cheapest one they allow (`exclude`: already queued)."""
         if not self.base.of("labs"):
             return None
         # packs our own factories put in chests: the foreman carries those to the labs without being asked
         made = {what for s in self.base.sites for *_, what in s.chests if what.endswith("science-pack")}
         def ready(t: str) -> bool:
             tech = self.kn.techs.get(t) or {}
-            return (t not in self.kn.researched and not tech.get("trigger")
+            return (t not in self.kn.researched and t not in exclude and not tech.get("trigger")
                     and all(p in self.kn.researched for p in tech.get("prerequisites", []))
                     and {i["name"] for i in tech.get("unit_ingredients", [])} <= made)
         order = [t for goal in self.target_techs for t in self.kn.tech_path(goal)]
@@ -4475,7 +4475,21 @@ class Foreman:
                 self.note(f"labs were idle: queued {cur}")
             elif not quiet:
                 self.note("labs idle: nothing researchable with the science packs we make")
+        # keep RESEARCH_AHEAD technologies queued, so the labs roll on to the next one between patrols. Run
+        # 20261121-140755: one tech at a time, queued only once a patrol saw the labs idle; they stood idle eight
+        # times, and the science factories backed up meanwhile
+        queued = [t for t in ((w.research or {}).get("queue") or []) if t != cur]
+        taken = {cur, *queued}
+        for _ in range(max(0, self.RESEARCH_AHEAD - len(queued))):
+            pick = self.crew.auto_research(exclude=taken) if cur else None
+            if not pick:
+                break
+            taken.add(pick)
+        if cur and (w.research or {}).get("current") != cur:
+            w.research = {**(w.research or {}), "current": cur}   # an append does not change the one in hand
         return cur
+
+    RESEARCH_AHEAD = 2             # technologies queued behind the one in hand
 
     def _labs(self, feed_hard: bool) -> None:
         w, kn, base = self.crew.w, self.crew.kn, self.crew.base

@@ -396,6 +396,9 @@ def play(run: Run, client: ArenaClient, task: dict, strategist=None, log=print, 
             minutes = round((world.now_tick() - t0) / 3600, 1)
             results.append({"goal": goal, "ok": ok, "result": msg, "game_minutes": minutes,
                             **({"paused": True} if paused else {}), **({"urgent": True} if urgent else {})})
+            from .overseer import same_target       # repairs that keep coming back are held (nodes.repeat_block)
+            crew.fix_log = (list(getattr(crew, "fix_log", None) or [])
+                            + [(repr(same_target(goal)), round(world.now_tick() / 3600, 1), bool(ok and not paused))])[-80:]
             tel.set(current_goal=None, results=[{**r, "goal": _short(r["goal"])} for r in results[-40:]])
             tel.event("goal_end", goal=_short(goal), ok=ok, result=msg, game_minutes=minutes)
             log(f"[crew] {_short(goal)}: {'PAUSED' if paused else 'ok' if ok else 'FAILED'} - {msg} ({minutes} min)")

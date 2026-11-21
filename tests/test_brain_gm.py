@@ -389,8 +389,12 @@ def test_idle_labs_get_research_even_while_a_build_runs():
     crew.w.activity = ""
     f.busy = "factory"
     f.patrol(force=True)
-    assert sent and sent[-1]["technologies"] == ["steel-processing"] and sent[-1]["mode"] == "append"
+    assert sent and sent[0]["technologies"] == ["steel-processing"] and sent[0]["mode"] == "append"
     assert any("labs were idle" in p for p in f.problems)
+    picks = [a["technologies"][0] for a in sent]                  # and more queued behind it, none twice
+    assert 1 < len(picks) <= 1 + f.RESEARCH_AHEAD and len(set(picks)) == len(picks)
+    assert crew.w.research.get("current") == "steel-processing"
+    sent.clear()
     crew.w.research = {}
     assert "queued steel-processing" in crew.research("logistics")
 

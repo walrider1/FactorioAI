@@ -275,6 +275,21 @@ def ahead_goals(crew) -> list[dict]:
     return [min(due, key=lambda d: d[0])[1]] if due else []
 
 
+def prerequisite_goals(crew) -> list[dict]:
+    """What later stages will wait on, started as soon as it can be made. Engine units: every pump needs one (so oil
+    and water reach a floor from any distance) and blue science eats them. Run 20261121-140755: nothing made
+    engine units, so a 441-tile crude line stood without pumps and the plastics workshop never got crude."""
+    kn = crew.kn
+    if "engine" not in (getattr(kn, "researched", None) or set()):
+        return []
+    made = any(s.params.get("item") == "engine-unit" for s in crew.base.sites)
+    try:
+        made = made or any("engine-unit" in (c.get("item_out") or {}) for _, c in crew.cells())
+    except Exception:  # noqa: BLE001 - stub crews in tests
+        pass
+    return [] if made else [{"do": "build", "module": "factory", "item": "engine-unit", "per_minute": 2}]
+
+
 def closeout(crew, why: str) -> list[dict]:
     """The planned trip back before the next tier: the fixes for what this tier no longer accepts and what is
     broken, then headroom. Goals carry a reflex tag (stripped before they run) so the log says why."""
@@ -291,7 +306,7 @@ def closeout(crew, why: str) -> list[dict]:
             continue
         seen.add(key)
         goals.append(fix)
-    for g in headroom_goals(crew) + upgrade_goals(crew) + growth_goals(crew) + ahead_goals(crew):
+    for g in headroom_goals(crew) + prerequisite_goals(crew) + upgrade_goals(crew) + growth_goals(crew) + ahead_goals(crew):
         key = json.dumps(g, sort_keys=True)
         if key not in seen:
             seen.add(key)

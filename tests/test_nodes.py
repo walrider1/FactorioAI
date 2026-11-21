@@ -161,3 +161,60 @@ def test_supply_goals_offer_the_consumer_again_once_fed(crew):
     for pt in crew.sites["green"].params["ports"]:
         pt["fed"] = (3.5, -4.5)
     assert supply_goal(crew, "iron-gear-wheel", 20)["module"] in ("factory", "workshop")
+
+
+# run 20261121-140755: six ore-into-chest mines stood full while more were ordered, and repairs repeated without effect
+def _gate_crew(minute=100.0):
+    from types import SimpleNamespace
+    from brain.modules import Base
+    crew = SimpleNamespace(base=Base(), w=SimpleNamespace(now_tick=lambda: minute * 3600))
+    return crew
+
+
+def _full_mine(crew, resource="iron-ore", into="chest", full=True):
+    from brain.modules import Site
+    s = Site("electric_mine", {"resource": resource, "count": 2, "into": into}, (0, 0))
+    s.health = {"waiting_for_space_in_destination": 2} if full else {"working": 2}
+    return crew.base.add(s)
+
+
+def test_more_producers_of_an_item_wait_while_the_ones_standing_are_full():
+    from brain.nodes import surplus_block, GATE_ESCAPE_MIN
+    crew = _gate_crew()
+    goal = {"do": "build", "module": "electric_mine", "resource": "iron-ore", "count": 2, "into": "chest"}
+    _full_mine(crew)
+    assert surplus_block(crew, goal) is None                            # one full site is not a pattern
+    _full_mine(crew)
+    assert "already stand full" in surplus_block(crew, goal)
+    assert surplus_block(crew, {**goal, "into": "line"}) is None        # plates are another item
+    assert surplus_block(crew, {"do": "replace", "site": 1, "with": goal}) is None
+    crew.w.now_tick = lambda: (100.0 + GATE_ESCAPE_MIN) * 3600
+    assert surplus_block(crew, goal) is None                            # held long enough: it goes ahead
+
+
+def test_a_repair_that_keeps_coming_back_is_held_for_a_different_fix():
+    from brain.nodes import repeat_block, REPEAT_WINDOW_MIN
+    from brain.overseer import same_target
+    crew = _gate_crew()
+    goal = {"do": "relink", "site": 56, "item": "iron-plate"}
+    key = repr(same_target(goal))
+    crew.fix_log = [(key, 80.0, True)]
+    assert repeat_block(crew, goal) is None
+    crew.fix_log.append((key, 90.0, True))
+    assert "does not work" in repeat_block(crew, goal)
+    assert repeat_block(crew, {"do": "relink", "site": 42, "item": "iron-plate"}) is None   # another site
+    assert repeat_block(crew, {"do": "feed", "site": 56, "item": "coal"}) is None           # not a repair
+    crew.w.now_tick = lambda: (90.0 + REPEAT_WINDOW_MIN + 1) * 3600
+    assert repeat_block(crew, goal) is None                                                 # old news
+
+
+def test_engine_units_are_built_ahead_once_the_engine_is_researched():
+    from types import SimpleNamespace
+    from brain.modules import Base, Site
+    from brain.upkeep import prerequisite_goals
+    crew = SimpleNamespace(base=Base(), kn=SimpleNamespace(researched=set()), cells=lambda: [])
+    assert prerequisite_goals(crew) == []                                   # not researched yet
+    crew.kn.researched.add("engine")
+    assert prerequisite_goals(crew) == [{"do": "build", "module": "factory", "item": "engine-unit", "per_minute": 2}]
+    crew.base.add(Site("factory", {"item": "engine-unit", "per_minute": 2}, (0, 0)))
+    assert prerequisite_goals(crew) == []                                   # one already makes them

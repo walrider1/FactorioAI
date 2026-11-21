@@ -206,9 +206,96 @@ def starving(crew) -> dict[str, list[dict]]:
     return {k: v for k, v in out.items() if len(v) >= GATE_MIN_PORTS}
 
 
+PRODUCER_KINDS = ("electric_mine", "burner_mine", "factory", "workshop", "smelter_column")
+FULL_SHARE = 0.6               # a producer whose machines are mostly output-blocked: nothing takes what it makes
+FULL_MIN_SITES = 2             # full producers of an item before more of them wait
+
+
+def _product(kind: str, params: dict) -> str | None:
+    """What a site (or a build goal) of this kind puts out: an ore into chests, plates from furnaces or a line,
+    or a factory's item."""
+    if kind in ("electric_mine", "burner_mine"):
+        res = params.get("resource")
+        if res == "coal" or params.get("into") == "chest":
+            return res
+        return {"iron-ore": "iron-plate", "copper-ore": "copper-plate", "stone": "stone-brick"}.get(res, res)
+    return params.get("item")
+
+
+def full_producers(crew, item: str) -> list:
+    """Sites that make `item` and stand mostly output-blocked (their last patrol's machine states)."""
+    out = []
+    for s in crew.base.sites:
+        if s.kind not in PRODUCER_KINDS or _product(s.kind, s.params) != item:
+            continue
+        h = getattr(s, "health", None) or {}
+        total = sum(h.values())
+        blocked = h.get("waiting_for_space_in_destination", 0) + h.get("full_output", 0)
+        if total and blocked / total >= FULL_SHARE:
+            out.append(s)
+    return out
+
+
+REPAIRS = ("relink", "purge", "replace", "upgrade")   # repairs of one site (a bare "link" lays new links)
+REPEAT_MAX = 2                 # a repair that finished this often on one target lately...
+REPEAT_WINDOW_MIN = 45.0       # ...within these game minutes, and is asked for again, did not work
+
+
+def repeat_block(crew, goal: dict) -> str | None:
+    """Why a repair must not run again: the same repair on the same target already finished REPEAT_MAX times in
+    the last REPEAT_WINDOW_MIN game minutes, and here it is asked for again, so what it fixed came back. Run
+    20261121-140755: site 56's iron input was relinked six times ("1/1 fed" each time) while the column stayed
+    starved, and site 83's coal belt was purged six times while its inserter kept feeding copper onto it."""
+    if goal.get("do") not in REPAIRS:
+        return None
+    from .overseer import same_target
+    key = repr(same_target(goal))
+    now = _minute(crew)
+    done = [m for k, m, ok in getattr(crew, "fix_log", None) or [] if k == key and ok and now - m <= REPEAT_WINDOW_MIN]
+    if len(done) < REPEAT_MAX:
+        return None
+    return (f"held back: this repair already ran {len(done)}x in the last {REPEAT_WINDOW_MIN:.0f} game min and "
+            "what it fixed came back, so it does not work. Find the cause and fix that instead (more supply for a "
+            "short belt, rebuild the site where its inputs are, take up what feeds a belt the wrong items)")
+
+
+def surplus_block(crew, goal: dict) -> str | None:
+    """Why a build that adds more of an item must wait: FULL_MIN_SITES producers of it already stand full, with
+    nothing taking what they make. Run 20261121-140755: six ore-into-chest mines (12 drills) sat with full chests
+    while more were ordered ("build electric_mine iron-ore into chest" four times). A replace is never held, and a
+    build held GATE_ESCAPE_MIN game minutes goes ahead."""
+    if goal.get("do") != "build" or goal.get("module") not in PRODUCER_KINDS:
+        return None
+    item = _product(goal["module"], goal)
+    if not item:
+        return None
+    full = full_producers(crew, item)
+    held = getattr(crew, "_surplus_held", None)
+    if held is None:
+        held = crew._surplus_held = {}
+    key = f"{goal['module']}:{item}"
+    if len(full) < FULL_MIN_SITES:
+        held.pop(key, None)
+        return None
+    now = _minute(crew)
+    first = held.setdefault(key, now)
+    if now - first >= GATE_ESCAPE_MIN:
+        held.pop(key, None)
+        return None
+    return (f"held back: {len(full)} sites that make {item} already stand full (sites "
+            f"{sorted(s.id for s in full)[:8]}): nothing takes what they make, so another one would stand full too. "
+            f"Connect them to what needs {item} first (link, or a factory beside them)"
+            f"; asked again after {GATE_ESCAPE_MIN - (now - first):.0f} more game min it goes ahead")
+
+
 def consumer_block(crew, goal: dict) -> str | None:
-    """Why this build must wait, or None. A replace that moves a starving consumer (its old site has unfed ports
-    of that item) is the fix, never held. A build held for GATE_ESCAPE_MIN game minutes goes ahead."""
+    """Why this build must wait, or None: its output already piles up unused (surplus_block), or what it eats
+    already starves elsewhere. A replace that moves a starving consumer (its old site has unfed ports of that
+    item) is the fix, never held. A build held for GATE_ESCAPE_MIN game minutes goes ahead."""
+    for check in (repeat_block, surplus_block):
+        why = check(crew, goal)
+        if why is not None:
+            return why
     wants = goal_inputs(crew, goal)
     if not wants:
         return None
