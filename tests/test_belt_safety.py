@@ -194,3 +194,58 @@ def test_the_task_asks_red_and_green_together():
     task = config.Task.model_validate(raw)
     m = next(m for m in task.score.milestones if m.id == "science-30")
     assert m.item == "logistic-science-pack" and m.also == ["automation-science-pack"]
+
+
+# run 20261121-140755: site 83's coal link tapped the copper-plate line beside a mine's coal belt; its inserter lifted
+# copper onto the coal belt, and six purges in an hour cleaned the belt while the inserter kept feeding copper
+def _tapped_world():
+    b = {(x, 0): {"name": "transport-belt", "direction": "east", "lanes": [{"coal": 2}, {"copper-plate": 3}],
+                  "fed_by": []} for x in range(6)}
+    b[(-2, 0)] = {"name": "transport-belt", "direction": "west", "lanes": [{"copper-plate": 4}, {}], "fed_by": []}
+    b[(-1, 0)] = {"name": "inserter", "direction": "west", "drop": [0.5, 0.5]}
+    return b
+
+
+def _coal_link():
+    steps = [("belt", (x, 0), "east") for x in range(6)]
+    return {"to_site": 83, "item": "coal", "steps": steps, "ins": ((-1, 0), "west", "inserter"),
+            "source": (-2, 0), "port": {"end": [6, 0]}}
+
+
+def test_purge_finds_a_link_whose_own_source_feeds_the_wrong_item_and_lays_it_again_elsewhere():
+    w = BeltWorld(_tapped_world())
+    ln = _coal_link()
+    unlinked = []
+    crew = SimpleNamespace(w=w, links=[ln], _minute=lambda: 120.0, _link_fails={(6, 0): {}},
+                           _unlink=unlinked.append)
+    msg = purity.purge(crew, 83, "coal")
+    assert unlinked == [ln] and (-2, 0) in crew._bad_taps and "copper-plate" in msg
+    assert (6, 0) not in crew._link_fails                                     # the link step tries it again now
+
+
+def test_purge_takes_up_another_sites_inserter_dropping_onto_the_link():
+    b = _spilled_world()
+    for x in range(6):
+        b[(x, 0)]["fed_by"] = []
+    b[(4, 1)] = {"name": "inserter", "direction": "north", "drop": [4.5, 0.5]}   # a copper unit's output, say
+    b[(-1, 0)] = {"name": "inserter", "direction": "east", "drop": [0.5, 0.5]}   # the link's own: stays
+    b[(-2, 0)] = {"name": "wooden-chest", "inventories": {"chest": {"iron-plate": 50}}}
+    ln = {**_iron_link(), "ins": ((-1, 0), "west", "inserter"), "source": (-2, 0)}
+    w = BeltWorld(b)
+    crew = SimpleNamespace(w=w, links=[ln], _minute=lambda: 120.0)
+    msg = purity.purge(crew, 14, "iron-plate")
+    assert ("pickup", (4, 1)) in w.calls and ("pickup", (-1, 0)) not in w.calls
+    assert "dropped onto it" in msg and "no cause found" not in msg
+
+
+def test_a_belt_tap_is_never_another_items_line_nor_a_belt_tagged_with_something_else():
+    from brain.crew import Crew
+    crew = Crew.__new__(Crew)
+    line = {"item": "copper-plate", "tiles": [(-18, 42), (-19, 42)]}
+    crew.lines = lambda item=None: [(None, line)]
+    crew.w = SimpleNamespace(entities={(-17.5, 41.5): {"carries": ["coal"]}, (-17.5, 43.5): {"carries": ["iron-plate"]}})
+    assert not crew._may_tap((-18, 42), "coal")                                # the copper line beside the fuel belt
+    assert crew._may_tap((-18, 41), "coal")                                    # the fuel belt itself
+    assert not crew._may_tap((-18, 43), "coal")                                # tagged: it carries iron
+    crew._bad_taps = {(-18, 41)}
+    assert not crew._may_tap((-18, 41), "coal")                                # a purge found it feeding wrong

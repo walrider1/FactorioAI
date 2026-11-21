@@ -138,8 +138,51 @@ def _stop_leak(crew, q: tuple[int, int], own: set) -> str:
     return f"took up the {here['name']} at {q} that fed into it"
 
 
+INSERTERS = ["burner-inserter", "inserter", "long-handed-inserter", "fast-inserter", "filter-inserter",
+             "stack-inserter", "bulk-inserter"]
+
+
+def inserters_onto(crew, tiles) -> list[dict]:
+    """Every inserter that drops onto one of these tiles (observe gives each inserter's drop position)."""
+    want = {tuple(t) for t in tiles}
+    out, seen = [], set()
+    for part in _chunks(sorted(want)):
+        xs, ys = [t[0] for t in part], [t[1] for t in part]
+        cx, cy = (min(xs) + max(xs)) / 2 + 0.5, (min(ys) + max(ys)) / 2 + 0.5
+        r = int(max(max(xs) - min(xs), max(ys) - min(ys)) / 2) + 4
+        d = crew.w.observe(min(64, r), x=cx, y=cy, include=["entities"], names=INSERTERS)
+        for e in d.get("entities") or []:
+            drop = e.get("drop")
+            key = (e.get("x"), e.get("y"))
+            if drop and _tile(drop) in want and key not in seen:
+                seen.add(key)
+                out.append(e)
+    return out
+
+
+def _source_foreign(crew, ln: dict) -> dict[str, int]:
+    """What other than the link's item its own inserter picks up: the belt it taps or the chest it empties."""
+    ins = ln.get("ins")
+    if not ins:
+        return {}
+    tile, facing, _ = ins
+    vx, vy = VEC[facing]
+    src = (tile[0] + vx, tile[1] + vy)              # an inserter faces the tile it picks up from
+    d = crew.w.observe(2, x=src[0] + 0.5, y=src[1] + 0.5, include=["entities"], belts=True)
+    e = next((q for q in d.get("entities") or [] if _tile((q["x"], q["y"])) == src), None)
+    if e is None:
+        return {}
+    held = lane_items(e) if e.get("name") in BELTS else {
+        k: v for inv in (e.get("inventories") or {}).values() if isinstance(inv, dict) for k, v in inv.items()}
+    return {k: int(v) for k, v in held.items() if k != ln["item"] and v}
+
+
 def purge(crew, site_id, item: str | None = None) -> str:
-    """Stop every leak into the site's link(s) of this item and clean their belts."""
+    """Find what feeds foreign items into the site's link(s) of this item, stop it, and clean their belts.
+    Three ways in: a belt that joins it from the side, another inserter that drops onto it, and the link's own
+    source (the belt it taps or the chest it empties holds other items). Cleaning without stopping the cause
+    only buys minutes (run 20261121-140755: six purges of site 83's coal belt in an hour; its inserter was
+    lifting copper plates off the line beside the coal belt it was meant to tap)."""
     lns = [ln for ln in getattr(crew, "links", []) or []
            if ln.get("to_site") == site_id and (item is None or ln.get("item") == item) and ln.get("steps")]
     if not lns:
@@ -148,10 +191,32 @@ def purge(crew, site_id, item: str | None = None) -> str:
     for ln in lns:
         steps = ln["steps"]
         own = {tuple(s[1]) for s in steps}
+        bad_src = _source_foreign(crew, ln)
+        if bad_src:                                  # the source itself is wrong: lay the link again elsewhere
+            what = ", ".join(f"{n} {k}" for k, n in sorted(bad_src.items(), key=lambda kv: -kv[1]))
+            src = tuple(ln["source"])
+            taps = getattr(crew, "_bad_taps", None)
+            if taps is None:
+                taps = crew._bad_taps = set()
+            taps.add((math.floor(src[0]), math.floor(src[1])))
+            crew._unlink(ln)
+            crew._link_fails.pop(tuple(ln["port"]["end"]), None)
+            notes.append(f"{ln['item']} into site {site_id}: its inserter picked up {what} from its source at "
+                         f"{src}: the link was taken up (with what was on it) and that source is not used again; "
+                         "the link step lays it from a clean one")
+            continue
         joins = {tuple(t) for t in link_joins(steps, from_belt=ln.get("ins") is None)}
         seen = look_belts(crew, [s[1] for s in steps])
         leaks = sorted({_tile(p) for t in own for p in (seen.get(t) or {}).get("fed_by") or []} - own - joins)
         done = [_stop_leak(crew, q, own) for q in leaks]
+        same = {tuple(q["ins"][0]) for q in getattr(crew, "links", []) or []    # its own, and boosts of its item
+                if q.get("ins") and q.get("item") == ln["item"]}
+        for e in inserters_onto(crew, own):         # another site's inserter dropping onto this belt
+            at = _tile((e["x"], e["y"]))
+            if at in same:
+                continue
+            crew.w.pickup(e["name"], e["x"], e["y"], e.get("direction", "north"))
+            done.append(f"took up the {e['name']} at {at} that dropped onto it")
         dirty = [s for s in steps if any(k != ln["item"] for k in lane_items(seen.get(tuple(s[1])) or {}))]
         with job_for(crew.w, [ln["item"]], list(own), list(joins)):
             for s in dirty:                          # upstream first: clean belts carry clean items on
@@ -159,7 +224,9 @@ def purge(crew, site_id, item: str | None = None) -> str:
                 name = "underground-belt" if s[0] == "ug" else "transport-belt"
                 if crew.w.pickup(name, t[0] + 0.5, t[1] + 0.5, s[2]):
                     lay_belt(crew.w, [s])
+        cause = "" if done else "; no cause found (no side join, no other inserter, a clean source)"
         notes.append(f"{ln['item']} into site {site_id}: " + "; ".join(
-            done + [f"{len(dirty)} belt(s) cleaned" if dirty else "no foreign items left on it"]))
+            done + [f"{len(dirty)} belt(s) cleaned" if dirty else "no foreign items left on it"]) + (
+            cause if dirty else ""))
     crew._purity_at = -1e9                           # look again soon: did it hold?
     return " | ".join(notes)

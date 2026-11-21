@@ -2969,7 +2969,21 @@ class Crew:
                 if feed is not None and not self._fits(budget, self._coal_root(feed), need, item):
                     continue
                 out += [((math.floor(x), math.floor(y)), s) for name, x, y, _ in s.entities if name == "transport-belt"]
-        return out
+        return [(t, owner) for t, owner in out if self._may_tap(t, item)]
+
+    def _may_tap(self, t: tuple[int, int], item: str) -> bool:
+        """Does the belt on tile t carry `item`? Not when it is another item's line, when its tag says it carries
+        something else, or when a purge found a tap there feeding the wrong items. Run 20261121-140755: an
+        electric mine's belts all counted as its coal belt, so a coal link tapped the copper-plate line beside the
+        fuel belt; its inserter lifted copper onto site 83's coal belt, and six purges cleaned it in vain."""
+        t = tuple(t)
+        if t in (getattr(self, "_bad_taps", None) or set()):
+            return False
+        if any(t in {tuple(q) for q in ln.get("tiles", [])} for _, ln in self.lines() if ln.get("item") != item):
+            return False
+        e = (getattr(self.w, "entities", None) or {}).get((t[0] + 0.5, t[1] + 0.5)) or {}
+        carries = e.get("carries")
+        return not carries or item in carries
 
     def _plan_link(self, port: dict, srcs: list, taps: list, margin: int, rip: bool,
                    block: set = frozenset(), unblock: set = frozenset()) -> dict | None:
