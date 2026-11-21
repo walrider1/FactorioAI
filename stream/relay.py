@@ -31,6 +31,9 @@ def outputs(cfg: dict) -> list[str]:
     out = []
     for name, default in SERVERS.items():
         key = (cfg.get(f"{name}_key") or "").strip()
+        if "://" in key or "/" in key:          # the server address pasted instead of the stream key
+            sys.exit(f"{name}_key in secrets/stream.json looks like a server address ({key[:40]}). It must be the "
+                     "stream key itself: in YouTube Studio, the copy button next to 'Key: Default stream key'.")
         if key:
             out.append(f"{cfg.get(f'{name}_server', default).rstrip('/')}/{key}")
     return out + list(cfg.get("extra_outputs") or [])
