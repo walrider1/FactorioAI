@@ -1,18 +1,18 @@
 An AI is trying to beat Factorio, all the way to launching a rocket, entirely on its own.
 
-No human touches the game. The AI can't even see the screen: it reads the map as text, plans the factory, builds it through a game API, and fixes its own mistakes. Everything you see on screen was placed by the bot.
+No human touches the game. The AI can't even see the screen: it reads the map as text, plans the factory, builds it through a game API, and repairs its own mistakes. Everything you see on screen was placed by the bot.
 
-When it gets truly stuck, the stream switches to "Self-upgrading": the problem is analysed, the bot's code is improved, and the run carries on from the exact point where it stopped. Every upgrade is published on GitHub.
+When it gets truly stuck, the stream switches to "Self-upgrading". The problem is analysed, the bot's code is improved, and then it either continues from where it stopped or starts a fresh run, whichever keeps the progress steady. The counters at the top show which run this is and how many times it has upgraded itself.
 
 WHAT'S ON SCREEN
-Top: progress toward the rocket, with splits against its best earlier run
+Top: progress toward the rocket, splits against its best earlier run, run number and self-upgrades
 Right: what the AI is thinking (strategist, overseer, assessor)
 Bottom: the current instruction and the last goals it finished
 
-LINKS
-The bot's code, updated with every upgrade: [GITHUB_BOT_LINK]
-The game server it plays through (host your own, plug in any AI): [GITHUB_SERVER_LINK]
-Factorio AI competition by Tesserac: [TESSERAC_LINK]
+THE CODE
+The bot, with every self-upgrade as a commit: https://github.com/walrider1/FactorioAI
+The game server it plays through. Host your own and plug in any AI: https://github.com/tesserac-ai/factorio-ai-arena
+Built for a Factorio AI competition by Tesserac: https://github.com/tesserac-ai
 
 Factorio 2.1, base game, no mods. Fan project, not affiliated with Wube Software.
 
