@@ -1196,7 +1196,11 @@ def make_handler(runs: Runs, tok: str, wd: "Watchdog | None" = None):
             except ValueError:
                 return self._send(400, {"error": "body must be JSON"})
             if path.startswith("/api/stream/") and wd:
-                return self._stream(path.rsplit("/", 1)[-1], body)
+                try:
+                    return self._stream(path.rsplit("/", 1)[-1], body)
+                except Exception as exc:  # noqa: BLE001 - answer with the error instead of dropping the connection
+                    log(f"phone request {path} failed: {exc!r}")
+                    return self._send(500, {"error": f"the PC hit an error: {exc!r}"[:300]})
             m = re.fullmatch(r"/api/alerts/([0-9a-f-]{10,40})/reply", path)
             if not m:
                 return self._send(404, {"error": "not found"})

@@ -69,6 +69,17 @@ def configure(c) -> None:
           "Check Settings > Output > Streaming: NVENC H.264, CBR 8000 kbps, keyframe interval 2 s.")
 
 
+SCREENS = [  # scene name, browser source name, path on the monitor (stream/watchdog.py reloads these too)
+    ("Starting Soon", "Screen: Starting Soon", "/screen?mode=starting&t=10"),
+    ("Self-Upgrading", "Screen: Self-Upgrading", "/screen?mode=upgrading"),
+    ("Fixing Bugs", "Screen: Fixing Bugs", "/screen?mode=bugs"),
+    ("Between Runs", "Screen: Between Runs", "/screen?mode=between"),
+    ("BRB", "Screen: BRB", "/screen?mode=brb&t=5"),
+    ("Ending", "Screen: Ending", "/screen?mode=ending"),
+]
+LIVE = "Live"
+
+
 def browser(url: str) -> dict:
     return {"url": url, "width": 1920, "height": 1080, "fps_custom": True, "fps": 30,
             "shutdown": False, "restart_when_active": False, "reroute_audio": False}
