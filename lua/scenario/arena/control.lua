@@ -1834,10 +1834,13 @@ send_all_to_bot = function()
   return n
 end
 
+local auto_cam   -- set below, next to /cam
+
 script.on_event(defines.events.on_player_joined_game, function(event)
   local player = game.get_player(event.player_index)
   send_to_bot(player)
-  if player then player.print("Factorio AI Arena: you are a spectator. Type /bot to jump to the AI's character.") end
+  if player and auto_cam then try(function() auto_cam(player) end) end
+  if player then player.print("Factorio AI Arena: you are a spectator, following the AI (/cam off to fly freely, /bot to jump back).") end
 end)
 
 commands.add_command("bot", "Jump to the AI's character.", function(cmd)
@@ -1897,6 +1900,18 @@ local function cam_help(pl, cam)
     cam and "on" or "off", (cam or CAM_DEFAULTS).zoom, (cam or CAM_DEFAULTS).dead, (cam or CAM_DEFAULTS).ease,
     cam and cam.shots and (cam.shots .. " ticks -> script-output/arena-cam/" .. cam.folder) or "off",
     tostring((cam or CAM_DEFAULTS).day)))
+end
+
+-- A spectator who joins, or rejoins after the server restarted, gets the follow camera right away: the stream PC's
+-- client reconnects on its own (stream/watchdog.py), so nobody has to type /cam on. /cam off still works.
+auto_cam = function(pl)
+  storage.cams = storage.cams or {}
+  if storage.cams[pl.index] then return end
+  local cam = {}
+  for k, v in pairs(CAM_DEFAULTS) do cam[k] = v end
+  cam.folder = string.format("%s-t%d", pl.name, game.tick)
+  storage.cams[pl.index] = cam
+  try(function() pl.zoom = cam.zoom end)
 end
 
 commands.add_command("cam", "Recording camera that follows the AI loosely: /cam on|off|zoom|dead|ease|frames|size|day",

@@ -24,6 +24,8 @@ Phone API (for the Android app; bearer token from secrets/phone_token), on 0.0.0
 Stream: start = Starting Soon scene, relay up, OBS streaming, Live after the countdown. Stop = Ending scene, then OBS
 stops and the relay closes. With the schedule on, that happens when the daily window opens and closes. Reviews only
 run while OBS is streaming (--always overrides). Counters for the overlay: runs/watch/stats.json (--reset-counters).
+Game client: while live, the Factorio client on this PC is (re)started with --mp-connect whenever the run's game server
+restarts and nobody is connected (--keep-client: also off-stream; --no-client: never).
 """
 from __future__ import annotations
 
@@ -153,6 +155,106 @@ def in_window(sched: dict, now: datetime | None = None) -> bool:
     t = (now or datetime.now()).strftime("%H:%M")
     s, e = sched["start"], sched["end"]
     return s <= t < e if s <= e else (t >= s or t < e)
+
+
+# ------------------------------------------------------------------ the stream PC's Factorio client
+
+FACTORIO_GUESSES = [r"E:\SteamLibrary\steamapps\common\Factorio\bin\x64\factorio.exe",
+                    r"C:\Program Files (x86)\Steam\steamapps\common\Factorio\bin\x64\factorio.exe",
+                    r"C:\Program Files\Factorio\bin\x64\factorio.exe"]
+
+
+def _run(cmd: list[str], timeout: int = 20) -> str:
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
+        return (r.stdout or "") + (r.stderr or "")
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
+def factorio_running() -> bool:
+    return "factorio.exe" in _run(["tasklist", "/FI", "IMAGENAME eq factorio.exe", "/NH"]).lower()
+
+
+def factorio_exe() -> str | None:
+    """Where the game client is: remembered in runs/watch/stream.json, else a running client's path, else guesses."""
+    known = stream_cfg().get("factorio_exe")
+    if known and Path(known).exists():
+        return known
+    running = _run(["powershell", "-NoProfile", "-Command",
+                    "(Get-Process factorio -ErrorAction SilentlyContinue | Select-Object -First 1).Path"]).strip()
+    for cand in [running, *FACTORIO_GUESSES]:
+        if cand and Path(cand).exists():
+            stream_cfg(factorio_exe=cand)
+            return cand
+    return None
+
+
+class ClientKeeper:
+    """Keeps this PC's Factorio client connected to the run's game server, so the stream shows the game again by
+    itself after a resume or a fresh run (each one is a new container on the same spectator port).
+    Reads the container's log: "to(InGame)" means the server is up, [JOIN]/[LEAVE] lines say whether anyone is
+    watching. When the server is up and nobody is connected, it restarts the client with --mp-connect (at most
+    3 tries per server, 2 minutes apart). The scenario turns the follow camera on for whoever joins."""
+
+    def __init__(self):
+        self.container: str | None = None
+        self.launched_at = 0.0
+        self.tries = 0
+
+    @staticmethod
+    def port(runs: Runs) -> int:
+        d = runs.latest()
+        meta = (_json(d / "meta.json") or {}) if d else {}
+        return int((meta.get("backend") or {}).get("spectator_port_udp") or 34300)
+
+    @staticmethod
+    def server_state(cid: str) -> tuple[bool, bool]:
+        out = _run(["docker", "logs", "--tail", "20000", cid], timeout=30)
+        watching = 0
+        for line in out.splitlines():
+            if "[JOIN]" in line:
+                watching += 1
+            elif "[LEAVE]" in line:
+                watching = max(0, watching - 1)
+        return "to(InGame)" in out, watching > 0
+
+    def tick(self, runs: Runs) -> None:
+        port = self.port(runs)
+        cid = _run(["docker", "ps", "--filter", f"publish={port}/udp", "--format", "{{.ID}}"]).strip().split("\n")[0]
+        if not cid or " " in cid:                  # no game server right now (between runs), or docker is down
+            self.container = None
+            return
+        if cid != self.container:
+            self.container, self.tries, self.launched_at = cid, 0, 0.0
+            log(f"client: game server on port {port} is container {cid[:12]}")
+        ready, watching = self.server_state(cid)
+        if watching:
+            self.tries = 0
+            return
+        if not ready or time.time() - self.launched_at < 120 or self.tries >= 3:
+            if self.tries == 3:
+                log("client: 3 tries without a join; check the Factorio window (login, version 2.1.24, whitelist)")
+                self.tries += 1
+            return
+        self.launch(port)
+
+    def launch(self, port: int) -> None:
+        exe = factorio_exe()
+        if not exe:
+            log("client: factorio.exe not found; set factorio_exe in runs/watch/stream.json")
+            self.tries = 3
+            return
+        if factorio_running():
+            _run(["taskkill", "/IM", "factorio.exe", "/F"])
+            time.sleep(4)
+        flags = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | getattr(subprocess, "DETACHED_PROCESS", 0)} \
+            if sys.platform == "win32" else {"start_new_session": True}
+        subprocess.Popen([exe, "--mp-connect", f"127.0.0.1:{port}"], cwd=str(Path(exe).parent),
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **flags)
+        self.tries += 1
+        self.launched_at = time.time()
+        log(f"client: started Factorio, connecting to 127.0.0.1:{port} (try {self.tries})")
 
 
 # ------------------------------------------------------------------ alerts
@@ -619,13 +721,16 @@ class Watchdog:
         self.next_check = time.time() + (0 if self.a.now else self.a.interval * 60)
         log(f"watchdog: reviews every {self.a.interval} min while the stream is live")
         stats()                                     # first start: the stream's counters begin now (run #1)
-        live, live_at = False, 0.0
+        live, live_at, keeper, kept_at = False, 0.0, ClientKeeper(), 0.0
         while True:
             try:
                 self.follow_schedule()
                 self.handle_replies()                       # your answers are handled even off-stream
                 if time.time() - live_at > 30:
                     live, live_at = bool(obs_streaming()) or self.a.always, time.time()
+                if (live or self.a.keep_client) and not self.a.no_client and time.time() - kept_at > 15:
+                    kept_at = time.time()
+                    keeper.tick(self.runs)                  # reconnect the game client after a server restart
                 if not live:                                # automation only reviews while the stream is live:
                     self.next_check = max(self.next_check, time.time() + self.a.interval * 60)  # first one an hour in
                 elif time.time() >= self.next_check:
@@ -772,6 +877,9 @@ def main() -> None:
     p.add_argument("--packet", action="store_true", help="print the next review packet and exit")
     p.add_argument("--check-now", action="store_true", help="one review now, print the verdict, never alert")
     p.add_argument("--always", action="store_true", help="review even while the stream is off")
+    p.add_argument("--keep-client", action="store_true",
+                   help="keep the Factorio client connected even while the stream is off (default: only while live)")
+    p.add_argument("--no-client", action="store_true", help="never start or restart the Factorio client")
     p.add_argument("--reset-counters", action="store_true", help="the stream starts over: run #1, 0 upgrades")
     a = p.parse_args()
     if a.reset_counters:
