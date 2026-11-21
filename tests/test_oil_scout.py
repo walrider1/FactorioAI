@@ -222,3 +222,29 @@ def test_with_pumps_or_a_near_field_the_oil_workshop_stays_on_the_home_floor(mon
     assert ws._design(w, base, {"item": "plastic-bar", "per_minute": 15})["district"] is home and not made
     ws, w, base, home, made = _design_world(monkeypatch, pumps=False, jacks=[(-20.5, 60.5)])
     assert ws._design(w, base, {"item": "plastic-bar", "per_minute": 15})["district"] is home and not made
+
+
+def test_the_oil_floor_sits_between_the_oil_and_a_shore_in_reach_of_both():
+    ws = Workshop()
+    base = _Base(FIELD, centre=(-60, 30))
+    field = (-229.5, 401.5)
+    w = SimpleNamespace(water_hints=[(-229.5 + 150, 401.5 + 60)])     # a lake ~160 tiles east of the field
+    home = ws._oil_home(base, w)
+    reach = ws.OIL_FLOOR_REACH
+    gap = lambda a, b: abs(a[0] - b[0]) + abs(a[1] - b[1])
+    assert gap(home, field) <= reach and gap(home, w.water_hints[0]) <= reach
+    w.water_hints = [(600.0, 600.0)]                                    # no shore within two reaches
+    far = ws._oil_home(base, w)
+    assert math.dist(far, field) <= 50 and far[1] < field[1]           # beside the field, on the base's side
+
+
+def test_a_workshop_whose_water_is_out_of_reach_asks_for_pumps_instead_of_standing_dry(monkeypatch):
+    ws, w, base, home, made = _design_world(monkeypatch, pumps=False, jacks=[(-20.5, 60.5)])
+    import brain.workshop as ws_mod
+    monkeypatch.setattr(ws_mod.Planner, "plan", lambda self, item, rate, spare=None: SimpleNamespace(
+        blocked=None, cells=[SimpleNamespace(count=1)], fluids={"water": 1200}), raising=False)
+    w.water_hints = [(400.0, 400.0)]
+    with pytest.raises(BuildError, match="engine-unit"):
+        ws._design(w, base, {"item": "sulfur", "per_minute": 10})
+    w.water_hints = [(-40.0, 80.0)]                                     # a shore by the floor: built as usual
+    assert ws._design(w, base, {"item": "sulfur", "per_minute": 10})["district"] is home

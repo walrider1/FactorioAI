@@ -247,7 +247,7 @@ class Workshop(Module):
                             and self._fits(w, base, f, n)), None)
                 if oil is None:
                     home_floor = self.district
-                    oil = self._new_floor(w, base, n, home=self._oil_home(base))
+                    oil = self._new_floor(w, base, n, home=self._oil_home(base, w))
                     self.district = home_floor           # cells without crude still go on the home floor
                     if self._crude_gap(base, oil) > self.OIL_FLOOR_REACH:
                         self.floors.remove(oil)
@@ -261,6 +261,18 @@ class Workshop(Module):
                 n = sum(c.count for c in plan.cells)
         if d is None:
             d = self._new_floor(w, base, n)
+        if "water" in plan.fluids and not self._pumps_ok(w) and d.water is None:
+            # the same limit for water: a shore farther than one segment needs pumps. Build nothing that would
+            # stand dry: say what unblocks it (engine units need no oil, so pumps come before any oil product)
+            x0, y0, x1, y1 = d.box()
+            c = ((x0 + x1) / 2, (y0 + y1) / 2)
+            shore = self._nearest_water(w, c)
+            if shore is not None and abs(shore[0] - c[0]) + abs(shore[1] - c[1]) > self.OIL_FLOOR_REACH:
+                gap = abs(shore[0] - c[0]) + abs(shore[1] - c[1])
+                raise BuildError(f"{item} needs water and the nearest shore is {gap:.0f} tiles from workshop floor "
+                                 f"{d.idx}: too far to pipe without pumps. Pumps first: "
+                                 '{"do": "build", "module": "factory", "item": "engine-unit", "per_minute": 2} '
+                                 "(engine units need no oil); the water line then gets its pumps")
         design = self._place_plan(w, base, d, plan)
         design["plan"] = plan
         design["power_kw"] = planner.power_kw(plan)
@@ -300,13 +312,29 @@ class Workshop(Module):
             return 0.0
         return min(abs(home[0] - x) + abs(home[1] - y) for x, y in jacks)
 
-    def _oil_home(self, base) -> tuple[float, float]:
-        """Where an oil floor goes: beside the oil field nearest the base, on the base's side of it."""
+    @staticmethod
+    def _nearest_water(w, at) -> tuple[float, float] | None:
+        hints = list(getattr(w, "water_hints", None) or [])
+        if not hints and hasattr(w, "scan"):
+            w.scan()
+            hints = list(getattr(w, "water_hints", None) or [])
+        return min(hints, key=lambda q: math.dist(q, at)) if hints else None
+
+    def _oil_home(self, base, w=None) -> tuple[float, float]:
+        """Where an oil floor goes: beside the oil field nearest the base, toward the nearest shore when one is
+        within two pipe reaches (sulfur, acid and advanced oil processing need water on the same floor, and a
+        floor between the two gets both without pumps); else on the base's side of the field."""
         jacks = self._jacks(base)
         hub = base.centre or (0.0, 0.0)
         first = min(jacks, key=lambda j: math.dist(j, hub))
         field = [j for j in jacks if math.dist(j, first) <= 24]
         cx, cy = sum(x for x, _ in field) / len(field), sum(y for _, y in field) / len(field)
+        water = self._nearest_water(w, (cx, cy)) if w is not None else None
+        reach = self.OIL_FLOOR_REACH / math.sqrt(2)   # straight-line tiles that stay in reach on a diagonal
+        if water is not None and math.dist(water, (cx, cy)) <= 2 * reach - 30:
+            gap = math.dist(water, (cx, cy))
+            k = max(0.0, min(gap - 20, max(45.0, gap - reach + 30)))   # in reach of both, nearest the oil
+            return cx + (water[0] - cx) / gap * k, cy + (water[1] - cy) / gap * k
         dx, dy = hub[0] - cx, hub[1] - cy
         k = math.hypot(dx, dy) or 1.0
         return cx + dx / k * 45, cy + dy / k * 45
