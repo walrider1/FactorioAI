@@ -24,6 +24,8 @@ Phone API (for the Android app; bearer token from secrets/phone_token), on 0.0.0
 Stream: start = Starting Soon scene, relay up, OBS streaming, Live after the countdown. Stop = Ending scene, then OBS
 stops and the relay closes. With the schedule on, that happens when the daily window opens and closes. Reviews only
 run while OBS is streaming (--always overrides). Counters for the overlay: runs/watch/stats.json (--reset-counters).
+Game: the bot plays only while the stream is live. Starting the stream resumes the run from its newest save (or starts
+a fresh run if the last one really ended); ending it makes the bot save and stop (--no-game turns this off).
 Game client: while live, the Factorio client on this PC is (re)started with --mp-connect whenever the run's game server
 restarts and nobody is connected (--keep-client: also off-stream; --no-client: never).
 """
@@ -106,10 +108,10 @@ def obs_scene(name: str | None = None) -> str | None:
     """Switch the live scene (when name is given) and return the current one; None if OBS is unreachable."""
     try:
         from obs_setup import connect
-        c = connect()
-        if name:
-            c.set_current_program_scene(name)
-        return c.get_current_program_scene().scene_name
+        with connect() as c:                 # close every connection: open ones keep OBS from shutting down
+            if name:
+                c.set_current_program_scene(name)
+            return c.get_current_program_scene().scene_name
     except (Exception, SystemExit) as exc:  # noqa: BLE001 - OBS closed, websocket off, obsws-python missing
         if name:
             log(f"OBS: could not switch to {name!r} ({str(exc)[:120]})")
@@ -120,7 +122,8 @@ def obs_call(fn: str, *args):
     """One OBS request by name (start_stream, stop_stream, get_stream_status...); None if OBS is unreachable."""
     try:
         from obs_setup import connect
-        return getattr(connect(), fn)(*args)
+        with connect() as c:
+            return getattr(c, fn)(*args)
     except (Exception, SystemExit) as exc:  # noqa: BLE001
         log(f"OBS: {fn} failed ({str(exc)[:120]})")
         return None
@@ -622,7 +625,7 @@ class Watchdog:
                   "override. Fix it = another round with your text.")
         update_alert(al["id"], restart=restart)
 
-    def start_fresh(self, d: Path) -> str:
+    def start_fresh(self, d: Path, quiet: bool = False) -> str:
         """A new run with the same settings (task, bot, map seed) as run d: a new run number on the overlay."""
         argv = [a for a in ((_json(d / "launch.json") or {}).get("argv") or []) if isinstance(a, str)]
         if "local-run" not in argv:
@@ -637,13 +640,14 @@ class Watchdog:
             subprocess.Popen([sys.executable, "-c", "import sys; from arena.cli import main; main(sys.argv[1:])",
                               *argv, "--monitor", "0"], cwd=str(ROOT), stdout=fh, stderr=subprocess.STDOUT,
                              stdin=subprocess.DEVNULL, **flags)
-        obs_scene(SCENE_BETWEEN)
-        threading.Timer(120, obs_scene, args=(SCENE_LIVE,)).start()   # a fresh world takes a bit longer to boot
+        if not quiet:
+            obs_scene(SCENE_BETWEEN)
+            threading.Timer(120, obs_scene, args=(SCENE_LIVE,)).start()   # a fresh world takes a bit longer to boot
         log(f"started a fresh run like {d.name} (log {log_path.name})")
-        pushed = git_push() if secrets_cfg().get("git_push") else ""
+        pushed = git_push() if secrets_cfg().get("git_push") and not quiet else ""
         return f"Started a fresh run with the same settings. Stream goes back to Live in 2 min.{pushed}"
 
-    def resume(self, d: Path) -> str:
+    def resume(self, d: Path, quiet: bool = False) -> str:
         done = [s for s in saves(d) if s["complete"]]
         if not done:
             return "No complete save to resume from: start it by hand."
@@ -651,10 +655,11 @@ class Watchdog:
         r = request_resume(d, last["name"])
         if not r.get("ok"):
             return "Resume failed: " + r.get("error", "?")
-        obs_scene(SCENE_BETWEEN)
-        threading.Timer(90, obs_scene, args=(SCENE_LIVE,)).start()   # the game takes about a minute to load
+        if not quiet:
+            obs_scene(SCENE_BETWEEN)
+            threading.Timer(90, obs_scene, args=(SCENE_LIVE,)).start()   # the game takes about a minute to load
         log(f"resumed {d.name} from {last['name']}")
-        pushed = git_push() if secrets_cfg().get("git_push") else ""
+        pushed = git_push() if secrets_cfg().get("git_push") and not quiet else ""
         return f"Resumed from {last['name']} (game minute {last['minute']}). Stream goes back to Live in 90 s.{pushed}"
 
     # ---- stream on/off (phone buttons and the daily window)
@@ -671,6 +676,28 @@ class Watchdog:
             log("relay started")
             time.sleep(2)                       # let ffmpeg open its port before OBS connects
 
+    def start_game(self) -> str:
+        """The bot plays only while the stream is live. Carry on the stream's run from its newest save when it was
+        stopped for the night; start a fresh run with the same settings when the last one really ended."""
+        d = self.runs.latest()
+        if d is None:
+            return "no earlier run to copy the settings from: start the first run by hand"
+        if _running(d):
+            return "the bot is already playing"
+        result = _json(d / "result.json") or {}
+        stopped = (result.get("breakdown") or {}).get("stopped_for_resume") or result.get("stopped_for_resume")
+        if stopped and any(sv["complete"] for sv in saves(d)):
+            return self.resume(d, quiet=True)
+        return self.start_fresh(d, quiet=True)
+
+    def stop_game(self) -> str:
+        d = self.runs.latest()
+        if d is None or not _running(d):
+            return "the bot was not playing"
+        r = request_control(d, "stop")
+        log(f"stream ended: the bot saves and stops ({r.get('note') or r.get('error')})")
+        return "the bot saves and stops at its next safe point; it carries on from there next stream"
+
     def start_stream(self, countdown_min: float = 2) -> dict:
         if obs_streaming():
             return self.stream_state(note="already live")
@@ -682,15 +709,19 @@ class Watchdog:
         if obs_call("start_stream") is None:
             return self.stream_state(note="OBS did not start streaming (is OBS open?)")
         stream_cfg(since=now_iso())
+        game = self.start_game() if stream_cfg().get("game_with_stream", True) and not self.a.no_game else ""
+        if game:
+            log("game: " + game)
         threading.Timer(max(0, countdown_min) * 60, obs_scene, args=(SCENE_LIVE,)).start()
         self.next_check = time.time() + self.a.interval * 60           # first review an hour into the stream
         log(f"stream started; Live in {countdown_min} min")
-        return self.stream_state(note=f"live; switching to the game in {countdown_min:g} min")
+        return self.stream_state(note=f"live; switching to the game in {countdown_min:g} min. {game}".strip())
 
     def stop_stream(self, outro_s: float = 30) -> dict:
         if not obs_streaming():
             return self.stream_state(note="not live")
         obs_scene(SCENE_END)
+        game = self.stop_game() if stream_cfg().get("game_with_stream", True) and not self.a.no_game else ""
 
         def end():
             obs_call("stop_stream")
@@ -700,7 +731,7 @@ class Watchdog:
             stream_cfg(since=None)
             log("stream ended")
         threading.Timer(outro_s, end).start()
-        return self.stream_state(note=f"ending: the stream stops in {outro_s:g} s")
+        return self.stream_state(note=f"ending: the stream stops in {outro_s:g} s. {game}".strip())
 
     def stream_state(self, note: str = "") -> dict:
         c = stream_cfg()
@@ -883,6 +914,9 @@ def main() -> None:
     p.add_argument("--keep-client", action="store_true",
                    help="keep the Factorio client connected even while the stream is off (default: only while live)")
     p.add_argument("--no-client", action="store_true", help="never start or restart the Factorio client")
+    p.add_argument("--no-game", action="store_true",
+                   help="don't start/stop the bot's run with the stream (also: \"game_with_stream\": false in "
+                        "runs/watch/stream.json)")
     p.add_argument("--reset-counters", action="store_true", help="the stream starts over: run #1, 0 upgrades")
     a = p.parse_args()
     if a.reset_counters:
