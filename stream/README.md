@@ -51,8 +51,12 @@ Answer the alert in the app:
   the save (the stream goes to Between Runs, then Live), or "Fix it" to start another round.
 
 The phone reaches the PC at `http://<this PC's LAN IP>:8740` at home, or over Tailscale (`tailscale up`, then
-`http://<this PC's Tailscale IP>:8740`). The first time the watchdog starts, Windows asks whether to allow Python through the
-firewall: allow it on private networks.
+`http://<this PC's Tailscale IP>:8740`). Open the port once in an admin PowerShell (a port rule keeps working when uv
+changes which python.exe runs the watchdog; a per-program rule breaks then):
+
+```
+New-NetFirewallRule -DisplayName "Lights Out phone API" -Direction Inbound -Protocol TCP -LocalPort 8740 -Action Allow -Profile Private,Public -RemoteAddress LocalSubnet,100.64.0.0/10
+```
 
 **Starting over:** `uv run --no-sync python stream/watchdog.py --reset-next` makes the next stream start reset the
 counters (Run #1, 0 upgrades) and begin a new game on a new map; `--cancel-reset` undoes it. Without it, a start

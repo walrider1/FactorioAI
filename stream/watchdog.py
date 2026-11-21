@@ -489,8 +489,29 @@ def packet(d: Path, window_s: float, prev: dict | None) -> dict:
     logs = sorted(d.glob("*.log"), key=lambda f: f.stat().st_mtime)
     if logs and (not p["playing"] or p["seconds_since_bot_update"] > 300):
         p["process_log_tail"] = logs[-1].read_text(encoding="utf-8", errors="replace").splitlines()[-40:]
+    p["window"]["rebuilt_spots"] = churn(d, now - window_s)
     p["flags"] = flags(p)
     return clip(p, 400)
+
+
+def churn(d: Path, since: float) -> dict:
+    """Spots where the bot placed something and took it up again over and over: a build loop that goal results
+    never show. Run 20261121-140755: one link's 45 belts were laid and taken up 56 times in two hours while
+    every goal read "collecting plates" and the review said ok."""
+    placed: Counter = Counter()
+    picked: Counter = Counter()
+    for a in _tail_lines(d / "actions.jsonl", 12_000_000):
+        if a.get("t", 0) < since or not a.get("ok"):
+            continue
+        act = a.get("action") or {}
+        if act.get("type") == "place" and act.get("entity"):
+            placed[(act["entity"], act.get("x"), act.get("y"))] += 1
+        elif act.get("type") == "pickup" and not (a.get("data") or {}).get("cleared"):   # not trees or rocks
+            picked[(act.get("x"), act.get("y"))] += 1
+    again = {k: n for k, n in placed.items() if n >= 4 and picked.get(k[1:], 0) >= 3}
+    top = sorted(again.items(), key=lambda kv: -kv[1])[:5]
+    return {"spots": len(again), "placements": sum(again.values()),
+            "worst": [f"{e} at ({x}, {y}) placed {n}x" for (e, x, y), n in top]}
 
 
 def flags(p: dict) -> list[str]:
@@ -502,6 +523,10 @@ def flags(p: dict) -> list[str]:
         f.append(f"more goals failed than succeeded this window ({w['goals_failed']} vs {w['goals_ok']})")
     if w["goals_repeated_3x_or_more"]:
         f.append(f"{len(w['goals_repeated_3x_or_more'])} goal(s) repeated 3+ times: possible loop")
+    c = w.get("rebuilt_spots") or {}
+    if c.get("spots", 0) >= 5:
+        f.append(f"build loop: {c['spots']} spots placed and taken up again 4+ times ({c['placements']} placements, "
+                 f"e.g. {'; '.join(c['worst'][:2])}): look for a build that keeps rolling back")
     s = p.get("since_last_review") or {}
     if s and not s.get("new_milestones") and s.get("research_then") == p.get("research"):
         f.append("no new milestone and research unchanged since the last review")

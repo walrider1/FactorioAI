@@ -174,7 +174,8 @@ def _link_crew(w, unlocked=()):
     crew.removals = 0
     crew.unlock_items = lambda items: None
     crew.make = lambda kit, extra=False: None
-    crew._power_tile = lambda t, avoid=frozenset(): None
+    crew._pole_plan = lambda t, avoid=frozenset(): []      # every inserter is covered by a pole
+    crew._power_tile = lambda t, avoid=frozenset(), plan=None: None
     crew._minute = lambda: 30.0
     crew.foreman = SimpleNamespace(note=lambda *a: None)
     return crew
@@ -226,6 +227,28 @@ def test_a_link_the_game_refuses_half_way_is_taken_up_and_its_tile_avoided():
     assert plan2["steps"][3][1] != plan["steps"][3][1] or all(s[1] not in crew._bad_belt for s in plan2["steps"])
     rec = crew._build_link(plan2, port, site, "item", None)
     assert port["fed"] == [0.5, 0.5] and rec in crew.links and set(rec["entities"]) <= set(site.entities)
+
+
+def test_an_inserter_no_pole_can_reach_is_found_before_any_belt_is_laid():
+    # run 20261121-140755: a science link laid its whole belt, found no room for the inserter's pole, took it all
+    # up again, and repeated that 56 times in two hours
+    w = GridWorld(used={(0, 0)})                                        # the source chest
+    crew = _link_crew(w)
+    site = Site("factory", {"item": "x"}, (12, 0))
+    crew.base.add(site)
+    port = {"item": "iron-plate", "end": [10, 0], "approach": [9, 0], "fed": None}
+    plan = crew._plan_link(port, [(0.5, 0.5, None)], [], 30, False)
+
+    def boxed_in(t, avoid=frozenset()):
+        raise BuildError(f"no room for a pole to power the link's inserter at {t}")
+    crew._pole_plan = boxed_in
+    with pytest.raises(BuildError, match="no room for a pole"):
+        crew._build_link(plan, port, site, "item", None)
+    assert w.placed == [] and crew.links == []                          # nothing laid, nothing to take up
+    assert crew._plan_link(port, [(0.5, 0.5, None)], [], 30, False) is None   # the planner skips such starts
+    crew._pole_plan = lambda t, avoid=frozenset(): [] if t[1] < 0 else boxed_in(t)   # only the north side powers
+    plan2 = crew._plan_link(port, [(0.5, 0.5, None)], [], 30, False)
+    assert plan2 is not None and plan2["ins"][1] < 0                    # another side of the source instead
 
 
 def test_a_new_link_can_tap_a_belt_that_already_carries_the_item():

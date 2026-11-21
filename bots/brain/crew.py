@@ -3028,6 +3028,9 @@ class Crew:
             if ins is not None and (ins in tiles or ins in soft):   # over its own inserter's tile: another start
                 skip.add(steps[0][1])
                 continue
+            if ins is not None and not self._can_power(ins, avoid=others | tiles | {ins}):
+                skip.add(steps[0][1])                 # an inserter no pole can reach: another side of the source
+                continue
             moved = []
             for t in tiles:
                 ln = owner_of.get(t)
@@ -3102,6 +3105,11 @@ class Crew:
         steps, ins, facing = plan["steps"], plan["ins"], plan["facing"]
         others = {tuple(t) for s, pt in self.all_ports() if pt is not port for t in (pt["end"], pt["approach"])}
         need = belts.count(steps)
+        # the inserter's power is worked out before anything is crafted or laid. Run 20261121-140755: the green
+        # science link into site 53 laid its whole 45-tile belt, found no room for the inserter's pole, took it
+        # all up again, and did that 56 times in two hours (every port, every escalation level, every goal).
+        power = (self._pole_plan(ins, avoid=others | set(belts.tiles_of(steps)) | {ins})
+                 if ins is not None else None)
         ins_kind = "fast-inserter" if "fast-inserter" in self.kn.unlocked else "inserter"
         lift = {ins_kind: 1} if ins is not None else {}  # a line's own belt runs on: nothing lifts the items
         self.unlock_items([k for k, v in need.items() if v] + list(lift))
@@ -3115,7 +3123,7 @@ class Crew:
                                belts.link_joins(steps, from_belt=ins is None)):
                 belts.lay_belt(self.w, steps)
             if ins is not None:
-                self._power_tile(ins, avoid=others | set(belts.tiles_of(steps)))
+                self._power_tile(ins, avoid=others | set(belts.tiles_of(steps)), plan=power)
         except BuildError as exc:
             self.w.recorder = None
             bad = getattr(exc, "tile", None)
@@ -3397,12 +3405,13 @@ class Crew:
                          + (f", {len(failed)} without power" if failed else ""))
         return notes
 
-    def _power_tile(self, t: tuple[int, int], avoid: set = frozenset()) -> None:
-        """Make sure a lone electric building (a link's inserter) is inside a pole's supply area and that pole is
-        on the network: a pole beside it when none covers it, then the cheapest bridge to the network."""
+    def _pole_plan(self, t: tuple[int, int], avoid: set = frozenset()) -> list[tuple[int, int]]:
+        """The poles that would power a lone electric building (a link's inserter) at t: [] when a pole already
+        covers it, else a pole beside it and the cheapest bridge to the network. Places nothing; raises
+        BuildError when there is no room for them."""
         poles = self.existing_poles()
         if any(abs(p[0] - t[0]) <= 2 and abs(p[1] - t[1]) <= 2 for p in poles):
-            return
+            return []
         spot = next((q for q in sorted(((t[0] + dx, t[1] + dy) for dx in (-1, 0, 1) for dy in (-1, 0, 1)),
                                        key=lambda q: abs(q[0] - t[0]) + abs(q[1] - t[1]))
                      if q != t and q not in avoid and self.w.free({q})), None)
@@ -3412,9 +3421,25 @@ class Crew:
         bridge = route_poles([spot], self.base.powered_poles(), poles, free, margin=16)
         if bridge is None:
             raise BuildError(f"no pole route to power the link's inserter at {t}")
+        return [spot] + bridge
+
+    def _can_power(self, t: tuple[int, int], avoid: set = frozenset()) -> bool:
+        try:
+            self._pole_plan(t, avoid)
+        except BuildError:
+            return False
+        return True
+
+    def _power_tile(self, t: tuple[int, int], avoid: set = frozenset(),
+                    plan: list[tuple[int, int]] | None = None) -> None:
+        """Make sure a lone electric building (a link's inserter) is inside a pole's supply area and that pole is
+        on the network (`plan`: poles worked out before anything was laid, see _build_link)."""
+        todo = self._pole_plan(t, avoid) if plan is None else plan
+        if not todo:
+            return
         self.unlock_items([POLE])
-        self.make({POLE: len(bridge) + 1}, extra=True)
-        for q in [spot] + bridge:
+        self.make({POLE: len(todo)}, extra=True)
+        for q in todo:
             self.w.place(POLE, q[0] + 0.5, q[1] + 0.5, "north", {q})
 
     # ======================================================= hand or automate
