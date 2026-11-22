@@ -638,6 +638,12 @@ build order; a scripted crew carries out one goal at a time, and goals can take 
 every minute or two, and at once when something new goes wrong. Your job is to keep the base running and moving
 at full speed: amend the plan as soon as a problem appears, not when the current goal happens to end.
 
+Progress first: the run is judged by how far it gets, not by how tidy the base is. Fix fully what the next stage
+needs (the plan's next build, the inputs and fluids of the sites making the next science, the labs); give the rest
+only what keeps it from blocking progress. Leave idle or slightly short sites alone, never rebuild a mine while other
+mines of the same item have spare, and pick the cheapest fix that works (relink or trunk before a rebuild, a hand
+feed before a new factory). Every urgent goal delays the plan.
+
 Decide now:
 - urgent_goals: small fixes to do before anything else (0-3), e.g. feed a site, more coal or ore drills, connect
   a site, a power station, a factory for an item that is running out. Only what fixes a real problem shown in

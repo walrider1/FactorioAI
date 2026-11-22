@@ -25,10 +25,10 @@ def test_fixes_go_first_until_the_plan_has_waited_too_long():
     crew, plan = _queues(urgent=[dict(FIX) for _ in range(9)], closeout=[{"do": "replace", "site": 4}]), [GREEN]
     goal, source, _ = upkeep.next_goal(crew, plan, now=80 * MIN)
     assert source == "urgent" and crew.plan_starved_since == 80 * MIN       # the plan's clock starts here
-    goal, source, waited = upkeep.next_goal(crew, plan, now=99 * MIN)
-    assert source == "urgent" and round(waited) == 19
-    goal, source, waited = upkeep.next_goal(crew, plan, now=100 * MIN)
-    assert source == "aged" and goal is GREEN and round(waited) == 20
+    goal, source, waited = upkeep.next_goal(crew, plan, now=87 * MIN)
+    assert source == "urgent" and round(waited) == 7
+    goal, source, waited = upkeep.next_goal(crew, plan, now=88 * MIN)        # progress first: 8 minutes, not 20
+    assert source == "aged" and goal is GREEN and round(waited) == 8
     assert crew.plan_starved_since is None and plan == []                   # it ran: the clock stops
 
 

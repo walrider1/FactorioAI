@@ -22,7 +22,7 @@ import math
 
 SEAL_MIN = 10.0                 # game minutes a site must run on its own before it is sealed
 INTERRUPT_GAP_MIN = 10.0        # at most one pause of a non-frontier goal for site-level trouble this often
-CLOSEOUT_MAX_GOALS = 8          # one trip back fixes this much at most; the rest is listed for the planner
+CLOSEOUT_MAX_GOALS = 4          # one trip back fixes this much at most; the rest is listed for the planner
 POWER_HEADROOM = 1.3            # capacity the close-out keeps over what the network draws
 COAL_HEADROOM = 1.25            # coal mined over coal burned
 SUPPLY_HEADROOM = 1.25          # any other item: made over used (supply.shortfalls)
@@ -33,7 +33,7 @@ BASE_WIDE = ("power-capacity", "coal-deficit", "walk")
 FRONTIER_MODULES = {"pumpjack", "workshop", "silo", "factory", "research_station", "outpost", "smelter_column"}
 NEUTRAL_KINDS = {"poles", "storage"}           # nothing to sustain
 # frontier aging: the plan never waits longer than this behind fixes and the close-out (see next_goal)
-PLAN_STARVE_MIN = 20.0
+PLAN_STARVE_MIN = 8.0          # progress first: upkeep gets a few minutes, then the plan goes (was 20)
 QUICK_FIX_DOS = ("feed", "connect")            # rule-floor fuel/power fixes (seconds each): still before an aged goal
 NO_RESET_DOS = ("wait", "research")            # plan goals that take no crew time: they do not end the wait
 
@@ -190,15 +190,55 @@ def rebuild_due(crew, site) -> str | None:
     return None
 
 
+SMELTS_TO = {"iron-ore": "iron-plate", "copper-ore": "copper-plate", "stone": "stone-brick"}
+NEED_HEADROOM = {"coal": 1.5}    # the other mines must give this many times what the base uses (default 1.25)
+
+
+def mine_product(site) -> str | None:
+    r = site.params.get("resource")
+    if site.kind == "electric_mine" and site.params.get("into") in ("furnace", "line") or \
+            site.kind == "burner_mine" and site.params.get("into", "furnace" if r not in ("coal", "stone") else "chest") == "furnace":
+        return SMELTS_TO.get(r, r)
+    return r
+
+
+def still_needed(crew, site) -> bool:
+    """Would the base run short of what this mine makes without it? The other mines of the same product (not
+    running dry themselves) against what the base really uses (game statistics). A mine nobody needs is not
+    rebuilt when its ore runs out: it comes down and its belts are laid again from the mines that stand (a relink
+    takes a minute or two, a rebuild 10-30). Run 20261121-140755: half the game time from minute 600 went into
+    rebuilding 1-2 drill mines while 81% of all drills stood idle. Unknown use (no statistics): needed."""
+    items = (getattr(crew.w, "stats", None) or {}).get("items") or {}
+    product = mine_product(site)
+    if not items or not product:
+        return True
+    used = float((items.get(product) or {}).get("used_per_min") or 0)
+    others = 0.0
+    for s in crew.base.sites:
+        if s is site or s.kind not in MINES or mine_product(s) != product or mine_depleted(s):
+            continue
+        runway = mine_runway(crew, s)
+        if runway is not None and runway < REBUILD_AHEAD_MIN:
+            continue
+        others += mine_rate(s) * (0.5 if product == "stone-brick" else 1.0)
+    return others < used * NEED_HEADROOM.get(product, SUPPLY_HEADROOM)
+
+
 def depleted_fix(crew, site) -> dict:
     """A mined-out mine: the same mine again on fresh tiles of its ore first, then the old one comes down; its
     belts are taken up with it and the link step belts the new chests to whatever the old ones fed (run
     20261119-202811: coal mines ran dry under boilers' coal belts and the only fix on offer was to remove them).
-    Just removed when it is no mine, or its patches near the base have no room left (an outpost is the move)."""
+    Just removed when it is no mine, when the other mines give enough without it (still_needed), or when its
+    patches near the base have no room left (an outpost is the move)."""
     gone = {"do": "remove", "site": site.id, "force": True}
     r = site.params.get("resource")
     if site.kind not in MINES or not r:
         return gone
+    try:
+        if not still_needed(crew, site):
+            return gone
+    except Exception:  # noqa: BLE001 - stub crews and worlds in tests: rebuild as before
+        pass
     full = (getattr(crew, "_patch_full", None) or {}).get(r)
     if full is not None and hasattr(crew, "_base_sig") and full[1] == crew._base_sig():
         return gone
@@ -414,7 +454,9 @@ def closeout(crew, why: str) -> list[dict]:
             continue
         seen.add(key)
         goals.append(fix)
-    for g in headroom_goals(crew) + prerequisite_goals(crew) + upgrade_goals(crew) + growth_goals(crew) + ahead_goals(crew):
+    # progress first: what the next tier needs (prerequisites) before headroom; faster machines and growth are the
+    # planners' call, not upkeep's (run 20261121-140755: a close-out upgrade spent 10 minutes on bricks and failed)
+    for g in prerequisite_goals(crew) + headroom_goals(crew) + ahead_goals(crew):
         key = json.dumps(g, sort_keys=True)
         if key not in seen:
             seen.add(key)
@@ -439,14 +481,11 @@ def closeout_due(crew) -> str | None:
     if "closeout_stage" not in st:                    # the first look only takes note of where the run is
         st["closeout_stage"], st["closeout_belts"], st["closeout_machines"] = stage, belts, sorted(better)
         return None
-    why = None
-    new = better - set(st.get("closeout_machines", []))
-    if stage > st["closeout_stage"]:
+    why = None                                        # a faster machine unlocked is no reason to stop: upgrades
+    if stage > st["closeout_stage"]:                  # are the planners' call (progress first)
         why = f"tier {stage} reached: make what stands run on its own before the next one"
     elif belts and not st.get("closeout_belts"):
         why = "logistics researched: coal belts and electric drills replace hand fuelling"
-    elif new:
-        why = f"{', '.join(sorted(new))} unlocked: faster machines where the old ones stand"
     st["closeout_stage"], st["closeout_belts"] = max(stage, st["closeout_stage"]), belts
     st["closeout_machines"] = sorted(better)
     return why

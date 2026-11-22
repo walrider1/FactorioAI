@@ -94,6 +94,14 @@ Look hard at, among others:
 - the plan: is the strategist's queue the right next thing? Are the assessor's fixes helping or churning?
 - your own previous orders (previous_overseer): did they work? Do not repeat what failed; change approach.
 
+Progress first. The run is judged by how far it gets (the next science, the next research, the rocket), not by how
+tidy the base is. The parts on the way to the next stage must work properly: the plan's next build, the inputs and
+fluids of the sites that make the next science, the labs and their packs. Fix those fully and first. Everything
+else gets the least upkeep that keeps it from blocking progress: idle drills, a slow mine, a site a little short,
+mines running low while others have spare (81% of drills idle is a reason NOT to rebuild mines) are left alone.
+Choose the cheapest fix that works: a relink or a trunk before a rebuild, feeding a few items by hand before a new
+factory, one targeted repair before several. Never order upkeep "while waiting": the plan runs instead.
+
 When to act at all:
 - Act only on a problem you can point to in the report: an alert, machines standing still, a measured supply
   gap, a goal that fails, loops or runs far too long, a plan whose next step is wrong. Being asked is not a reason

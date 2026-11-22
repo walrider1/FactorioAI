@@ -261,14 +261,14 @@ def test_a_factory_nobody_takes_from_goes_idle_loses_its_seal_and_may_go():
     assert upgrade.idle_sites(crew) == []
 
 
-def test_a_better_machine_unlocked_brings_a_close_out_with_upgrades(monkeypatch):
+def test_a_better_machine_unlocked_brings_no_close_out_upgrades_are_the_planners_call(monkeypatch):
+    """Progress first: faster machines are optional; the close-out no longer stops the run for them."""
     crew, w, minute = _crew(unlocked=("electric-mining-drill",))
     monkeypatch.setattr(upkeep, "stage_index", lambda c: 4)
     crew.base.add(Site("electric_mine", {"resource": "iron-ore"}, (0, 0), entities=[("stone-furnace", 1.0, 1.0, "north")],
                        health={"working": 2}))
     assert upkeep.closeout_due(crew) is None
     crew.kn.unlocked |= {"steel-furnace"}
-    why = upkeep.closeout_due(crew)
-    assert "steel-furnace" in why
-    assert {"do": "upgrade", "site": 1} in [{k: v for k, v in g.items() if k != "reflex"}
-                                           for g in upkeep.closeout(crew, why)]
+    assert upkeep.closeout_due(crew) is None
+    assert {"do": "upgrade", "site": 1} not in [{k: v for k, v in g.items() if k != "reflex"}
+                                               for g in upkeep.closeout(crew, "tier 5 reached")]
