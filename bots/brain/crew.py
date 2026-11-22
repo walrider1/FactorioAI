@@ -594,6 +594,12 @@ class Crew:
             near = self._inputs_centre(mod.name, params)    # build where its inputs are: short links
             if near is not None:
                 params["near"] = near
+        if mod.name == "workshop":
+            # its design (cached for the build below) says first if a fluid cannot reach the floor. Run
+            # 20261121-140755: blue science built a 2-engine steam station for 15 game minutes, then failed on a
+            # shore 407 tiles away that the design would have named at once
+            with self.w.step("design"):
+                mod.kit(self.w, self.base, params)
         first = self._coal_first(mod.name, params)
         first += self._power_first(mod.name, params)
         first += self._fuel_first(mod.name, params)

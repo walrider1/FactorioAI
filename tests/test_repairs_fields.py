@@ -292,3 +292,30 @@ def test_a_smelting_column_beside_a_field_stays_off_the_ore():
                                                         "toward": [60, 15]})
     placed = {(int(e[1]), int(e[2])) for e in w.placed}
     assert not placed & w.resources["iron-ore"] and col.params["ports"]
+
+
+# ------------------------------------------------------------------ fluids out of reach fail before any work
+def test_a_workshop_whose_water_is_out_of_reach_fails_before_power_is_built(monkeypatch):
+    """Run 20261121-140755: blue science built a steam station for 15 game minutes, then failed on a shore 407 tiles
+    away. The design runs first now, so that failure costs nothing."""
+    from contextlib import contextmanager
+    from brain.modules import MODULES, BuildError
+    called = []
+
+    @contextmanager
+    def step(name):
+        yield
+    crew = SimpleNamespace(
+        _check_forbidden=lambda g: None, w=SimpleNamespace(step=step), base=None,
+        _coal_first=lambda *a: called.append("coal") or "", _power_first=lambda *a: called.append("power") or "",
+        _fuel_first=lambda *a: called.append("fuel") or "", _plates_first=lambda *a: called.append("plates") or "")
+
+    def no_water(w, base, p):
+        raise BuildError("chemical-science-pack needs water and the nearest shore is 407 tiles from workshop floor 1")
+    monkeypatch.setattr(MODULES["workshop"], "kit", no_water)
+    try:
+        Crew.build(crew, {"do": "build", "module": "workshop", "item": "chemical-science-pack", "per_minute": 12})
+        assert False, "the build should fail"
+    except BuildError as exc:
+        assert "407 tiles" in str(exc)
+    assert called == []

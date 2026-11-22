@@ -487,8 +487,10 @@ def packet(d: Path, window_s: float, prev: dict | None) -> dict:
             "research_then": prev.get("research"),
         }
     logs = sorted(d.glob("*.log"), key=lambda f: f.stat().st_mtime)
-    if logs and (not p["playing"] or p["seconds_since_bot_update"] > 300):
-        p["process_log_tail"] = logs[-1].read_text(encoding="utf-8", errors="replace").splitlines()[-40:]
+    if logs:                                   # what the bot itself said: detours and waits no event records
+        tail = logs[-1].read_text(encoding="utf-8", errors="replace").splitlines()[-60:]
+        p["process_log_tail"] = [clip(x, 240) for x in tail]
+    p["window"]["time_by_kind"], p["window"]["longest_goals"] = time_spent(ev)
     p["window"]["rebuilt_spots"] = churn(d, now - window_s)
     p["findings"] = findings(d, p, ev, live, prev)
     p["flags"] = flags(p)
@@ -518,10 +520,13 @@ def findings(d: Path, p: dict, ev: list, live: dict, prev: dict | None) -> list[
     if starved:
         add("gathering", f"{len(starved)} goal(s) failed waiting for materials",
             examples=[clip(e.get("result", ""), 100) for e in starved[:3]])
-    long_ = [e for e in goals if (e.get("game_minutes") or 0) >= 15]
+    # goal_end events carry no duration: time_spent pairs them with their goal_start (the old check never fired live)
+    long_ = [(e.get("goal", ""), e.get("game_minutes")) for e in goals if (e.get("game_minutes") or 0) >= 15]
+    long_ += [(g["goal"], g["game_minutes"]) for g in (p.get("window") or {}).get("longest_goals") or []
+              if g["game_minutes"] >= 15 and not any(g["goal"] == clip(x, 120) for x, _ in long_)]
     if long_:
         add("slow-goals", f"{len(long_)} goal(s) took 15+ game minutes",
-            examples=[f"{clip(e.get('goal', ''), 60)}: {e.get('game_minutes')} min" for e in long_[:4]])
+            examples=[f"{clip(g, 60)}: {m} min" for g, m in long_[:4]])
     repairs = Counter(clip(e.get("goal", ""), 90) for e in goals
                       if str(e.get("goal", "")).startswith(("relink", "purge", "replace", "upgrade")))
     again = {g: n for g, n in repairs.items() if n >= 2}
@@ -572,6 +577,29 @@ def findings(d: Path, p: dict, ev: list, live: dict, prev: dict | None) -> list[
             if f["key"] in before:
                 f["again"] = True
     return out
+
+
+def time_spent(ev: list) -> tuple[dict, list]:
+    """Where the window's game time went: minutes per goal kind (start to end), and the longest goals with what they
+    ended in. Run 20261121-140755: replacements took 203 of 570 game minutes and relinks 100, which no goal count
+    showed; a blue-science build spent 15 minutes on a steam station before failing on its water."""
+    open_: dict[str, list[float]] = {}
+    by_kind: Counter = Counter()
+    longest = []
+    for e in ev:
+        g, m = e.get("goal", ""), e.get("minute")
+        if m is None or not g:
+            continue
+        if e.get("kind") == "goal_start":
+            open_.setdefault(g, []).append(m)
+        elif e.get("kind") == "goal_end" and open_.get(g):
+            took = max(0.0, m - open_[g].pop())
+            by_kind[goal_kind(g)] += took
+            longest.append((took, g, e.get("ok"), e.get("result", "")))
+    longest.sort(key=lambda x: -x[0])
+    return ({k: round(v, 1) for k, v in by_kind.most_common()},
+            [{"game_minutes": round(t, 1), "goal": clip(g, 120), "ok": ok, "result": clip(r, 200)}
+             for t, g, ok, r in longest[:6]])
 
 
 def churn(d: Path, since: float) -> dict:
@@ -660,14 +688,33 @@ steps starved behind fixes, idle labs, sites standing still, missing fluids, re-
 Dig into the run folder {run} as far as you need (bot_live.json = live state with every site's machine states; \
 bot_events.jsonl = goals, plans, overseer notes; actions.jsonl is ~100 MB: only tail or grep it) and the code (bots/).
 
-For EVERY finding: confirm it in the data, find its cause, and decide whether it is noise or a real problem. Also \
-look for what the findings do not cover: time going into rework instead of growth, the same problem in another \
-form, decisions that will block a later stage (oil, blue science, the silo), resources running out, waste.
+Your stance: something can almost always be better. A run that "keeps moving" is not a good run; the question is \
+where the last hour's game time went and how much of it a better bot would have saved. Do not stop at the first \
+explanation that sounds fine: open the data behind it.
+
+Work through ALL of these every time, with numbers:
+1. Time: window.time_by_kind and window.longest_goals. For each of the longest goals, read the bot's log \
+(process_log_tail, and the newest *.log in the run folder) around it and say what the minutes went into (gathering, \
+walking, a detour like building power or coal first, retries) and whether that order of work made sense.
+2. Failures: every failed or soft-failed goal. Was the cause found before time was spent? Was the bot's next move \
+the shortest path to the fix, or did the planners order something unneeded (a factory for an item the crew can \
+hand-craft, a repair of a sealed site, the same fix again)?
+3. Progress: research (current tech, queue, idle labs), milestones since the last review, the roadmap's next stage \
+and exactly what blocks it. How long until the next stage at this pace?
+4. Base health: sites standing still (base[].health in bot_live.json) and why; mines and patches running out \
+(ore_outlook, upkeep); power headroom; fluids; repeated repairs; build loops.
+5. Planner quality: overseer, assessor and strategist notes. Did their orders help, and were they cheap?
+6. Stream: the "stream" field. Is OBS streaming the Live scene, the relay up, the game client open?
+For EVERY finding, also confirm it in the data, find its cause, and decide whether it is noise or a real problem. \
+Look for what the findings do not cover: rework instead of growth, the same problem in another form, decisions \
+that will block a later stage (oil, blue science, the silo), resources running out, waste.
 
 Verdicts:
-- "ok": progressing well AND every finding is explained as noise (say why for each in "analysis").
-- "problems": anything real, even while it progresses: a systemic issue, a loop, wasted hours, a stage that will \
-block. This alerts the organizer's phone with your analysis and plan, exactly as the engineer would report it.
+- "ok": only when, after all six checks, nothing you found is worth a self-upgrade (say why for each finding in \
+"analysis"). Expect this to be rare.
+- "problems": anything real, even while it progresses: a systemic issue, a loop, wasted game time, an unneeded \
+detour, a stage that will block, a clear improvement worth a code change. This alerts the organizer's phone with \
+your analysis and plan, exactly as the engineer would report it.
 - "stuck": it cannot recover by itself (no progress, its own recovery failing, the process died). "certain": true \
 only if you would bet on it.
 - "unsure": you could not tell from the data; you are asked again in {unsure} minutes.
@@ -682,7 +729,8 @@ it easier. Do not change any files.
 
 Answer with ONLY one JSON object, nothing around it:
 {{"verdict": "ok"|"problems"|"stuck"|"unsure", "certain": true|false, "title": "<= 60 chars", \
-"summary": "<= 200 chars, read on a phone lock screen", "analysis": "markdown"}}"""
+"summary": "<= 200 chars, read on a phone lock screen", "analysis": "markdown", \
+"improvements": ["the 1-3 changes that would save the most game time, best first, one line each: even with ok"]}}"""
 
 FIX_PROMPT = """The live stream shows the "Self-Upgrading" screen. The bot's run {run_id} is saved and stopped. \
 The organizer read the watchdog's analysis and approved a fix.
@@ -750,13 +798,20 @@ class Watchdog:
             log(f"review skipped: alert {open_[-1]['id']} is still waiting for you")
             return "waiting"
         p = packet(d, self.a.interval * 60, self.prev.get(d.name))
+        try:                                         # what viewers get: a run nobody can see is not progressing
+            st = self.stream_state()
+            p["stream"] = {"obs_streaming": st["streaming"], "scene": st["scene"],
+                           "relay_running": bool(stray_pids(r"stream.relay\.py")),
+                           "game_client_running": factorio_running()}
+        except Exception as exc:  # noqa: BLE001 - the review goes on without it
+            p["stream"] = {"error": str(exc)[:120]}
         REVIEWS.mkdir(parents=True, exist_ok=True)
         stamp = time.strftime("%Y%m%d-%H%M%S")
         pp = REVIEWS / f"{stamp}-{d.name}-packet.json"
         pp.write_text(json.dumps(p, indent=2, default=str), encoding="utf-8")
         log(f"review: {d.name} at game minute {p['game_minute']}, flags: {p['flags'] or 'none'}")
         out = run_claude(REVIEW_PROMPT.format(packet=pp, run=d, unsure=self.a.unsure_interval),
-                         REVIEW_TOOLS, self.a.model, 20 * 60, edits=False)
+                         REVIEW_TOOLS, self.a.model, 30 * 60, edits=False)
         (REVIEWS / f"{stamp}-{d.name}-verdict.json").write_text(json.dumps(out, indent=2), encoding="utf-8")
         self.prev[d.name] = p
         if "error" in out:
@@ -765,6 +820,8 @@ class Watchdog:
             return "unsure"
         verdict = out.get("verdict", "unsure")
         log(f"verdict: {verdict} (certain={out.get('certain')}) {out.get('title', '')} -- {out.get('summary', '')}")
+        for k, imp in enumerate(out.get("improvements") or [], 1):
+            log(f"  improvement {k}: {clip(str(imp), 240)}")
         write_status(last_check=now_iso(), last_verdict=verdict, note=out.get("summary", "")[:200])
         if alert and (verdict == "problems" or (verdict == "stuck" and out.get("certain"))):
             kind = "stuck" if verdict == "stuck" else "problems"

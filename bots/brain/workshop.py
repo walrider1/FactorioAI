@@ -272,7 +272,9 @@ class Workshop(Module):
                 raise BuildError(f"{item} needs water and the nearest shore is {gap:.0f} tiles from workshop floor "
                                  f"{d.idx}: too far to pipe without pumps. Pumps first: "
                                  '{"do": "build", "module": "factory", "item": "engine-unit", "per_minute": 2} '
-                                 "(engine units need no oil); the water line then gets its pumps")
+                                 "(engine units need no oil). The crew hand-crafts the pumps from engine units, so "
+                                 "no pump factory is needed: once engine units are made, build this again and the "
+                                 "water line gets a pump every 200 tiles")
         design = self._place_plan(w, base, d, plan)
         design["plan"] = plan
         design["power_kw"] = planner.power_kw(plan)
@@ -483,6 +485,7 @@ class Workshop(Module):
                 if water_pump is None:
                     raise BuildError("no shore for the workshop's water pump within reach of the floor")
                 terminals.append(water_pump["target"])
+                self._survey_line(w, d, terminals, fl)       # a far shore: the router needs the ground seen
             if fl == "crude-oil":
                 for t in self._pumpjack_ports(w, base, d):
                     terminals.append(t)
@@ -604,7 +607,7 @@ class Workshop(Module):
     SURVEY_MIN = 48          # a crude source farther than this from the floor: look along the way first
     SURVEY_STEP = 40         # tiles between looks along it (each look sees 24 tiles around)
 
-    def _survey_line(self, w: FreeWorld, d: District, terminals: list[Tile]) -> None:
+    def _survey_line(self, w: FreeWorld, d: District, terminals: list[Tile], fluid: str = "crude-oil") -> None:
         """Look along the way from the floor to its nearest far crude source, so the pipe router knows those tiles.
         It routes only over tiles seen (w.free); run 20261120-211555's pumpjack stood ~470 tiles from the floor
         over ground nobody had looked at, every plastic workshop failed with "no pipe route", and the planners
@@ -621,7 +624,8 @@ class Workshop(Module):
         if key in done:
             return
         n = max(1, int(math.dist(c, t) // self.SURVEY_STEP))
-        getattr(w, "doing", lambda *a: None)(f"surveying the way for a crude pipe from {t} to the workshop floor")
+        what = "water" if fluid == "water" else "crude"
+        getattr(w, "doing", lambda *a: None)(f"surveying the way for a {what} pipe from {t} to the workshop floor")
         for k in range(n + 1):
             px, py = c[0] + (t[0] - c[0]) * k / n, c[1] + (t[1] - c[1]) * k / n
             seen = getattr(w, "seen", set())

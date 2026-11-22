@@ -42,6 +42,29 @@ def test_the_review_packet_lists_every_problem_a_person_would_find(tmp_path):
             "fluid", "no-milestone"} <= keys
 
 
+def test_the_packet_says_where_game_time_went(tmp_path):
+    """Real goal_end events carry no duration: it comes from the goal's start and end minutes, and a long goal is a
+    finding even then (the blue-science build that spent 15 minutes on power before failing on its water)."""
+    import watchdog as w
+    now = time.time()
+    blue = "build workshop {'item': 'chemical-science-pack', 'per_minute': 12}"
+    ev = [{"t": now - 900, "kind": "milestone", "minute": 630.0, "ids": ["x"]},
+          {"t": now - 800, "kind": "goal_start", "goal": blue, "minute": 635.0},
+          {"t": now - 700, "kind": "goal_end", "goal": blue, "ok": False, "minute": 650.3,
+           "result": "chemical-science-pack needs water and the nearest shore is 407 tiles"},
+          {"t": now - 600, "kind": "goal_start", "goal": "relink {'site': 22}", "minute": 650.3},
+          {"t": now - 500, "kind": "goal_end", "goal": "relink {'site': 22}", "ok": True, "minute": 653.3}]
+    live = {"updated": now, "game_minute": 660.0, "research": {"current": "x", "queue": ["y"]},
+            "foreman": {"problems": []}, "base": []}
+    d = _run(tmp_path, ev, live)
+    (d / "resume-1.log").write_text("[crew] power first: 4490 kW more would leave -1535 kW spare\n", encoding="utf-8")
+    p = w.packet(d, 3600, None)
+    assert p["window"]["time_by_kind"] == {"build": 15.3, "relink": 3.0}
+    assert p["window"]["longest_goals"][0]["goal"].startswith("build workshop")
+    assert any("power first" in x for x in p["process_log_tail"])
+    assert "slow-goals" in {f["key"] for f in p["findings"]}
+
+
 def test_a_clean_hour_has_no_findings(tmp_path):
     import watchdog as w
     now = time.time()

@@ -416,7 +416,10 @@ or so and brings plates, coal, stone and ore from the mines, so plate supply mus
 (drill -> furnace -> chest) are the plate supply for workshops; "roadmap.plates" compares supply with what the
 cells take. Every machine draws power: keep "roadmap.power.headroom_kw" positive with steam_power before a big
 workshop. oil-processing is a trigger technology (pumping crude oil): a pumpjack does it; anything with plastic,
-sulfur or acid needs pumpjacks first (about one per 300 crude a minute). The "silo" module builds the rocket
+sulfur or acid needs pumpjacks first (about one per 300 crude a minute). A fluid line longer than about 200
+tiles needs pumps along it: the crew hand-crafts them from engine units and places and powers them itself, so
+an engine-unit factory is all it takes (never a pump factory); a workshop whose water or crude is too far says
+so. The "silo" module builds the rocket
 silo once rocket-silo is researched and its kit (1000 steel and concrete, 200 processing units and electric
 engines) sits in workshop chests; the courier feeds it, and a finished rocket launches on its own.
 "roadmap" is computed every time: the stages to the rocket, research left (techs, packs, lab hours), each
