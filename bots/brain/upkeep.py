@@ -97,6 +97,12 @@ def needs(crew, site) -> list[dict]:
     if site.params.get("pipe_gaps"):
         out.append({"kind": "broken", "why": f"{len(site.params['pipe_gaps'])} pipe(s) never placed",
                     "fix": {"do": "repair", "site": site.id}})
+    if site.params.get("gaps"):                       # gaps.py: refused buildings, holes in belt lines
+        from .gaps import pending
+        todo = pending(site)
+        out.append({"kind": "broken", "why": f"{len(site.params['gaps'])} building(s) never placed"
+                    + ("" if todo else " (repairs failed: rebuild it elsewhere)"),
+                    "fix": {"do": "repair", "site": site.id} if todo else None})
     if site.kind == "workshop":
         out.append({"kind": "courier", "why": "courier-fed workshop (by design)", "fix": None})
     dry = _bad(site, "no_fuel")

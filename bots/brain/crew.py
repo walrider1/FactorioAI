@@ -368,16 +368,25 @@ class Crew:
         return f"site {site.id} piped again: " + self.repair(site.id)
 
     def repair(self, site_id=None) -> str:
-        """Place the pipes a workshop's build could not (pipe_gaps): a gap stops the fluid behind it."""
-        sites = [self.base.get(site_id)] if site_id is not None else \
-            [s for s in self.base.sites if s.params.get("pipe_gaps")]
-        sites = [s for s in sites if s is not None and s.params.get("pipe_gaps")]
+        """Place what a build could not: a workshop's pipes (pipe_gaps: a gap stops the fluid behind it) and any
+        site's buildings the game refused or a belt line's holes (gaps.py). No site: every site with either."""
+        from . import gaps as gapmod
+        has = lambda s: s is not None and (s.params.get("pipe_gaps") or gapmod.pending(s))  # noqa: E731
+        sites = [self.base.get(site_id)] if site_id is not None else [s for s in self.base.sites if has(s)]
+        sites = [s for s in sites if has(s)]
         if not sites:
-            raise BuildError("no pipe gaps to repair" + (f" in site {site_id}" if site_id is not None else ""))
+            raise BuildError("no pipe gaps or missing buildings to repair"
+                             + (f" in site {site_id}" if site_id is not None else ""))
         done, left = 0, []
         with self.w.step("build"):
             for s in sites:
-                gaps = s.params["pipe_gaps"]
+                if gapmod.pending(s):
+                    n, rest = gapmod.repair(self, s)
+                    done += n
+                    left += [f"site {s.id} {r}" for r in rest]
+                gaps = s.params.get("pipe_gaps")
+                if not gaps:
+                    continue
                 need = {"pipe": sum(1 for g in gaps if g[1] == "pipe"),
                         "pipe-to-ground": sum(1 for g in gaps if g[1] != "pipe")}
                 need = {k: v for k, v in need.items() if v}
@@ -400,8 +409,8 @@ class Crew:
                     if any(g[0] == "crude-oil" for g in gaps):
                         self._join_pumpjacks(s)
         if not done:
-            raise BuildError("no pipe gap could be closed: " + "; ".join(left[:3]))
-        return f"closed {done} pipe gap(s)" + (f"; still open: {'; '.join(left[:3])}" if left else "")
+            raise BuildError("nothing could be placed: " + "; ".join(left[:3]))
+        return f"placed {done} missing building(s)" + (f"; still open: {'; '.join(left[:3])}" if left else "")
 
     def _join_pumpjacks(self, site: Site) -> None:
         """The workshop floor's crude line is whole now: its pumpjacks count as joined (no second line)."""

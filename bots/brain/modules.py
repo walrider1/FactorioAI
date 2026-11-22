@@ -95,13 +95,15 @@ class Site:
 
     def brief_params(self) -> dict:
         """Its params for a message: a line as its item and rate, not its tiles."""
-        out = {k: v for k, v in self.params.items() if k != "line"}
+        out = {k: v for k, v in self.params.items() if k not in ("line", "gaps")}
         if self.params.get("line"):
             out["line"] = {"item": self.params["line"]["item"], "per_minute": self.params["line"]["rate"]}
         return out
 
     def brief(self) -> dict:
-        params = {k: v for k, v in self.params.items() if k not in ("ports", "line")}
+        params = {k: v for k, v in self.params.items() if k not in ("ports", "line", "gaps")}
+        if self.params.get("gaps"):                 # buildings never placed (gaps.py): how many, not the list
+            params["missing_buildings"] = len(self.params["gaps"])
         if self.params.get("line"):
             params["line"] = {"item": self.params["line"]["item"], "per_minute": self.params["line"]["rate"]}
         if "ports" in self.params:                 # input ports: which a belt feeds, which still wait for one
@@ -1364,6 +1366,9 @@ class Factory(Module):
             site.port_lanes = sorted({tuple(t) for path in ways.values() if path for t in path})
         site.note = f"{report['placed']} built" + (f", {len(report['failed'])} failed (first: "
                                                    f"{report['failed'][0][:120]})" if report["failed"] else "")
+        if report.get("gaps"):                   # kept on the site: the gap alert has repair place them
+            from .gaps import record
+            record(site, report["gaps"])
         if d.per_minute < self.rate(p):
             site.note += (f"; designed for {d.per_minute}/min of the {self.rate(p)}/min asked "
                           "(the largest that fit): build another for the rest")

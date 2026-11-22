@@ -267,7 +267,7 @@ class FreeWorld(ab.World):
                 continue
             half_w, half_h = (0.45, 0.45) if kind == "tree" else (1.6, 1.2)
             for t in self._box(x, y, half_w, half_h):
-                self.obstacles[t] = (x, y)
+                self.obstacles.add(t, (x, y))       # every one of them: two trees can cover one tile
             if kind == "tree":
                 self.trees[ab.tile(x, y)] = (x, y)
         if "entities" in d:
@@ -680,12 +680,15 @@ class FreeWorld(ab.World):
                 if math.dist((x, y), self.pos) > ab.REACH - 1.5:
                     self.near(x, y, dist=ab.REACH - 2)    # inside the pocket: walks there work
                 if name == "obstacle":
-                    r = self.run.pickup(x, y)
-                    for k in [k for k, v in self.obstacles.items() if v == (x, y)]:
-                        del self.obstacles[k]
-                        door.add(k)
-                    if r.get("ok"):
-                        taken.append(("tree or rock", x, y, ""))
+                    # the tiles this one covers open only when every tree or rock on them is gone
+                    covers = [t for t, on in self.obstacles._every().items() if (x, y) in on]
+                    for q in self.obstacles.on(covers) or [(x, y)]:
+                        if math.dist(q, self.pos) > ab.REACH - 1.5:
+                            self.near(*q, dist=ab.REACH - 2)
+                        r = self.run.pickup(*q)
+                        door.update(self.obstacles.remove(q))
+                        if r.get("ok"):
+                            taken.append(("tree or rock", q[0], q[1], ""))
                     continue
                 if self.pickup(name, x, y, dirn):
                     taken.append((name, x, y, dirn))
@@ -873,8 +876,7 @@ class FreeWorld(ab.World):
             near = {t: p for t, p in self.trees.items() if within is None or math.dist(p, here) <= within}
             t = min(near, key=lambda q: math.dist(ab.centre(q), self.pos))
             pos = self.trees.pop(t)
-            for k in [k for k, v in self.obstacles.items() if v == pos]:
-                del self.obstacles[k]
+            self.obstacles.remove(pos)
             self.near(*pos, dist=8)
             self.wait_hands()
             r = self.act({"type": "pickup", "x": pos[0], "y": pos[1]})
@@ -972,16 +974,18 @@ class FreeWorld(ab.World):
         except BuildError as exc:
             if "would_merge" in str(exc):           # the guard refused a join nobody planned: the caller routes
                 raise BuildError(str(exc)) from None    # around this tile (lay_belt marks it), no retry here
-            if "cannot_place" not in str(exc) or not tiles:
-                raise BuildError(self.why(str(exc))) from None
+            if "cannot_place" not in str(exc) or (entity == "offshore-pump" and not tiles):
+                raise BuildError(self.why(str(exc))) from None      # a pump is refused for the shore's shape
             # often a second rock or tree on the tile the last look missed: look again (the obstacles there
-            # become known), and place once more (place clears the tiles first)
+            # become known), and place once more (place clears the tiles first). A caller that gave no tiles
+            # gets the building's own footprint cleared (run 20261122-133537: a tree beside a factory's port)
+            retry_tiles = set(tiles) or self.footprint(entity, x, y, direction)
             try:
-                self.observe(4, x=x, y=y, include=["entities", "obstacles"])
+                self.relook(retry_tiles)
             except BuildError:
                 pass
             try:
-                ent = super().place(entity, x, y, direction, tiles, **belt)
+                ent = super().place(entity, x, y, direction, retry_tiles, **belt)
             except BuildError as exc2:
                 raise BuildError(self.why(str(exc2))) from None
         self.inventory[entity] = max(0, self.inventory.get(entity, 0) - 1)
@@ -1039,6 +1043,14 @@ class FreeWorld(ab.World):
             return super().free(tiles, need_seen)
         return all((not self.blocked(t) or t in self.movable) and t not in self.keepout
                    and (t in self.seen or not need_seen) for t in tiles)
+
+    def relook(self, tiles) -> None:
+        """A look at what stands on and around these tiles (remote: no walk), so their trees and rocks are known."""
+        tiles = list(tiles)
+        xs, ys = [t[0] for t in tiles], [t[1] for t in tiles]
+        r = int(max(max(xs) - min(xs), max(ys) - min(ys)) / 2) + 4
+        self.observe(min(32, r), x=(min(xs) + max(xs)) / 2 + 0.5, y=(min(ys) + max(ys)) / 2 + 0.5,
+                     include=["entities", "obstacles"])
 
     def clear(self, tiles) -> None:
         """Trees and rocks off these tiles, and any storage chest on them moved elsewhere (contents and all)."""

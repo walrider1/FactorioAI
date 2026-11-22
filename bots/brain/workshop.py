@@ -769,17 +769,23 @@ class Workshop(Module):
         if design["water"]:
             self._place_water(w, d, design)
         failed = []
+        refused = []                                  # buildings the game did not take: gaps a repair places
         for c in design["cells"]:
             for n, x, y, dd in c["entities"]:
+                recipe = c["recipe"] if n == c["machine"] and c.get("recipe") and n != "rocket-silo" else None
                 try:
                     w.place(n, x, y, dd, footprint(kn, n, x, y, dd))
                 except BuildError as exc:
                     failed.append(str(exc)[:120])
+                    refused.append({"name": n, "x": x, "y": y, "dir": dd, "why": str(exc)[:120], "tries": 0,
+                                    **({"recipe": recipe} if recipe else {})})
                     continue
-                if n == c["machine"] and c.get("recipe") and n != "rocket-silo":
-                    r = w.act({"type": "set_recipe", "x": x, "y": y, "recipe": c["recipe"]})
+                if recipe:
+                    r = w.act({"type": "set_recipe", "x": x, "y": y, "recipe": recipe})
                     if not r.get("ok"):
                         failed.append(f"set_recipe {c['recipe']}: {r.get('code')}")
+                        refused.append({"name": n, "x": x, "y": y, "dir": dd, "recipe": recipe, "placed": True,
+                                        "why": f"set_recipe {recipe}: {r.get('code')}", "tries": 0})
             site.poles += [tuple(q) for q in c["poles"]]
             d.used[c["slot"]] = -1
         gaps = []                                     # pipes the game refused: the fluid stops there
@@ -806,6 +812,8 @@ class Workshop(Module):
                 d.poles_done.add(t)
             except BuildError as exc:
                 failed.append(f"pole at {t}: {str(exc)[:80]}")
+                refused.append({"name": POLE, "x": t[0] + 0.5, "y": t[1] + 0.5, "dir": "north",
+                                "why": f"pole at {t}: {str(exc)[:80]}", "tries": 0})
         d.nets = design["nets"]
         if not any(g[0] == "crude-oil" for g in gaps):  # a broken crude line joins nothing: repair it, or route again
             for s in base.of("pumpjack"):
@@ -817,6 +825,9 @@ class Workshop(Module):
                       for c in design["cells"]]
         if gaps:
             site.params["pipe_gaps"] = gaps
+        if refused:                                    # gaps.py: the gap alert has repair place them
+            from .gaps import record
+            record(site, refused)
         if design.get("unpumped"):                     # Crew.split_pipelines pumps it once pumps can be made
             site.params["needs_pumps"] = True
         ports = [c["port"] for c in site.cells if c.get("port")]

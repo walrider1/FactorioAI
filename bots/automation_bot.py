@@ -49,6 +49,67 @@ class BuildError(RuntimeError):
     pass
 
 
+class Obstacles(dict):
+    """Trees and rocks by tile. As a dict: tile -> the position of one obstacle on it (enough for "is this tile
+    blocked"). `every` keeps all of them: one tree's trunk can cover the tile next to its own, so two trees often
+    cover the same tile. Run 20261122-133537: a map that kept one obstacle per tile cleared one of the two trees in
+    front of a gear factory's input port; the other one blocked the factory's first two belts and the factory got
+    no iron for the rest of the run.
+
+        add(tile, pos)   one more obstacle covers the tile
+        on(tiles)        every obstacle covering any of these tiles (each once)
+        remove(pos)      that obstacle is gone: the tiles it covered stay blocked if another one covers them too
+    """
+
+    def _every(self) -> dict:
+        # set lazily: unpickling a dict subclass sets its items before its __dict__ comes back
+        return self.__dict__.setdefault("every", {})
+
+    def add(self, t: Tile, pos: tuple[float, float]) -> None:
+        on = self._every().setdefault(t, [])
+        if pos not in on:
+            on.append(pos)
+        super().__setitem__(t, on[0])
+
+    def __setitem__(self, t: Tile, pos: tuple[float, float]) -> None:
+        self.add(t, pos)
+
+    def __delitem__(self, t: Tile) -> None:
+        super().__delitem__(t)
+        self._every().pop(t, None)
+
+    def pop(self, t, *default):
+        self._every().pop(t, None)
+        return super().pop(t, *default)
+
+    def clear(self) -> None:
+        super().clear()
+        self._every().clear()
+
+    def on(self, tiles) -> list[tuple[float, float]]:
+        out: list = []
+        every = self._every()
+        for t in sorted(tiles):
+            for pos in every.get(t) or ([self[t]] if t in self else []):
+                if pos not in out:
+                    out.append(pos)
+        return out
+
+    def remove(self, pos: tuple[float, float]) -> list[Tile]:
+        """Forget one obstacle; returns the tiles that are free of obstacles now."""
+        freed = []
+        every = self._every()
+        for t in [t for t, v in self.items() if v == pos or pos in (every.get(t) or ())]:
+            left = [q for q in (every.get(t) or [self[t]]) if q != pos]
+            if left:
+                every[t] = left
+                super().__setitem__(t, left[0])
+            else:
+                del self[t]
+                freed.append(t)
+        return freed
+
+
 class World:
     """What the bot has seen: resources, water, obstacles, and the tiles it has built on."""
 
@@ -57,7 +118,7 @@ class World:
         self.resources: dict[str, set[Tile]] = {}
         self.water: set[Tile] = set()
         self.cliffs: set[Tile] = set()
-        self.obstacles: dict[Tile, tuple[float, float]] = {}    # tile -> position to pick up
+        self.obstacles = Obstacles()          # tile -> position to pick up (all of them: Obstacles.on)
         self.seen: set[Tile] = set()
         self.used: set[Tile] = set()
         self.keepout: set[Tile] = set()       # stays free for belts and pipes: no buildings here
@@ -65,6 +126,24 @@ class World:
         self.water_summary: dict | None = None
         self.water_hints: list[tuple[float, float]] = []   # nearest water from every observe so far
         self.pos = (0.0, 0.0)
+
+    @property
+    def obstacles(self) -> Obstacles:
+        o = self.__dict__.get("_obstacles")
+        if o is None:                         # a world pickled before Obstacles: its plain dict carries over
+            o = self.__dict__["_obstacles"] = Obstacles()
+            for t, pos in (self.__dict__.pop("obstacles", None) or {}).items():
+                o.add(t, pos)
+        return o
+
+    @obstacles.setter
+    def obstacles(self, value) -> None:
+        if not isinstance(value, Obstacles):
+            o = Obstacles()
+            for t, pos in (value or {}).items():
+                o.add(t, pos)
+            value = o
+        self.__dict__["_obstacles"] = value
 
     # ------------------------------------------------------------ sensing
     def observe(self, radius: int = 20) -> dict:
@@ -85,7 +164,7 @@ class World:
                 continue
             half_w, half_h = (0.45, 0.45) if kind == "tree" else (1.6, 1.2)
             for t in self._box(x, y, half_w, half_h):
-                self.obstacles[t] = (x, y)
+                self.obstacles.add(t, (x, y))
         for e in d.get("entities") or []:
             self.used.add(tile(e["x"], e["y"]))
         self.summary = d.get("resource_summary") or {}
@@ -126,19 +205,33 @@ class World:
             self.go(x + ux * stop, y + uy * stop)
 
     def clear(self, tiles) -> None:
-        """Pick up every tree or rock on these tiles."""
-        done = set()
-        for t in sorted(tiles):
-            pos = self.obstacles.get(t)
-            if pos is None or pos in done:
-                continue
+        """Pick up every tree or rock on these tiles (all of them: two trees can cover one tile)."""
+        for pos in self.obstacles.on(tiles):
             self.near(*pos, dist=REACH - 1)
             r = self.run.pickup(*pos)
-            done.add(pos)
-            for k in [k for k, v in self.obstacles.items() if v == pos]:
-                del self.obstacles[k]
+            self.obstacles.remove(pos)
             if not r["ok"]:
                 self.log(f"could not clear {pos}: {r['code']}")
+
+    def relook(self, tiles) -> None:
+        """Look again at what stands on these tiles (a tree or rock the last look missed)."""
+        xs, ys = [t[0] for t in tiles], [t[1] for t in tiles]
+        self.near((min(xs) + max(xs)) / 2 + 0.5, (min(ys) + max(ys)) / 2 + 0.5)
+        self.observe(int(max(max(xs) - min(xs), max(ys) - min(ys)) / 2) + 6)
+
+    def retry_blocked(self, tiles, act):
+        """act() is one game action (a place or place_line result). When the game refuses the tiles
+        (cannot_place), the usual cause is an obstacle the map does not know about: look again, clear what is
+        there and try once more. Returns the last result."""
+        r = act()
+        if r.get("ok") or r.get("code") != "cannot_place" or not tiles:
+            return r
+        try:
+            self.relook(tiles)
+        except BuildError:
+            return r
+        self.clear(tiles)
+        return act()
 
     def step_out(self, tiles) -> None:
         """Walk off a footprint we are about to build on (buildings collide with the character)."""

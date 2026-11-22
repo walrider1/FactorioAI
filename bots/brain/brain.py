@@ -56,8 +56,9 @@ GOAL_HELP = """Goals you may give (JSON objects, done in order by the crew):
                                                     1->2->3, stone->steel furnace, fast inserters): same layout,
                                                     picked up and placed one by one; no site: the one that gains
                                                     most. Only helps a site that waits on its machines
-- {"do": "repair", "site": <id>}                     place the pipes a build could not (the pipe-gap alert names
-                                                    them): fluid stops at a gap
+- {"do": "repair", "site": <id>}                     place the pipes and buildings a build could not, and close
+                                                    holes in a site's belt lines (the pipe-gap and gap alerts
+                                                    name them): fluid and items stop at a gap
 - {"do": "repipe", "site": <id>}                     pipe a workshop machine's right connection (the pipe-ports
                                                     alert names it): a fluid on the wrong one never flows
 - {"do": "scout", "resource": "<ore>"}                walk out in rings until a patch of the ore nobody works yet

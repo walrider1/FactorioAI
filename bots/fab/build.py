@@ -46,12 +46,28 @@ def _runs(route) -> list[tuple[str, list[Tile], str]]:
     return out
 
 
+def _gap(name: str, x: float, y: float, direction: str, why: str, **extra) -> dict:
+    """A building of the design the game did not take: what repair (Crew.repair) places later."""
+    return {"name": name, "x": x, "y": y, "dir": direction, "why": why[:140], "tries": 0,
+            **{k: v for k, v in extra.items() if v is not None}}
+
+
+def _retry(world, tiles, act):
+    """One game action, tried again after a fresh look and clearing when the game refuses the tiles (an obstacle
+    the map did not know: run 20261122-133537 lost a factory's two input belts to a tree beside them)."""
+    retry = getattr(world, "retry_blocked", None)
+    return retry(tiles, act) if retry is not None else act()
+
+
 def build(world: "ab.World", design: Design, log=print, anchors: list[Tile] = ()) -> dict:
-    """Place the whole design. Never stops at the first failure: each failure is recorded and the rest goes on."""
+    """Place the whole design. Never stops at the first failure: each failure is recorded and the rest goes on.
+    Returns {"placed", "failed": [text], "gaps": [building]}: every building the game refused (after a fresh look
+    and a second try) is a gap the site keeps, so a repair can place it once the tile is free."""
     failed: list[str] = []
+    gaps: list[dict] = []
     placed = 0
 
-    def attempt(what: str, fn) -> bool:
+    def attempt(what: str, fn, gap: dict | None = None) -> bool:
         nonlocal placed
         try:
             fn()
@@ -60,6 +76,8 @@ def build(world: "ab.World", design: Design, log=print, anchors: list[Tile] = ()
         except ab.BuildError as exc:
             failed.append(f"{what}: {str(exc)[:140]}")
             log(f"[build] {what} failed: {str(exc)[:140]}")
+            if gap is not None:
+                gaps.append({**gap, "why": f"{what}: {str(exc)[:100]}"})
             return False
 
     def run_ok(r: dict, what: str) -> None:
@@ -69,36 +87,55 @@ def build(world: "ab.World", design: Design, log=print, anchors: list[Tile] = ()
     # 1. cells: drills, furnaces (fuelled), assemblers (recipe set)
     for c in _tour(design.cells, lambda c: c.centre(), world.pos):
         for e in c.entities():
-            ok = attempt(f"{e.name} of {c.id}", lambda e=e: world.place(e.name, e.x, e.y, e.direction, set(e.tiles)))
+            recipe = c.recipe if e.name == "assembling-machine-1" else None
+            fuel = 50 if e.name == "stone-furnace" else None
+            ok = attempt(f"{e.name} of {c.id}", lambda e=e: world.place(e.name, e.x, e.y, e.direction, set(e.tiles)),
+                         _gap(e.name, e.x, e.y, e.direction, "", recipe=recipe, fuel=fuel))
             if ok and e.name == "stone-furnace":
                 world.fuel(e.x, e.y, 50)                # 50 coal runs a stone furnace ~37 minutes
-            if ok and e.name == "assembling-machine-1":
+            if ok and recipe:
                 attempt(f"recipe of {c.id}",
-                        lambda e=e, c=c: run_ok(world.run.set_recipe(e.x, e.y, c.recipe), "set_recipe"))
+                        lambda e=e, c=c: run_ok(world.run.set_recipe(e.x, e.y, c.recipe), "set_recipe"),
+                        _gap(e.name, e.x, e.y, e.direction, "", recipe=recipe, placed=True))
     # 2. inserters and output chests
     feeds = design.feed_ids()                  # a feed's pin tile is where the link's belt ends: no inserter
     ins = [(p.site.inserter, p.site.inserter_dir(p.into_cell), r.item, p.cell) for r in design.routes for p in r.pins
            if p.cell not in feeds]
     for t, face, item, cid in _tour(ins, lambda it: _centre(it[0]), world.pos):
-        attempt(f"inserter {item} at {cid}", lambda t=t, face=face: world.place("inserter", *_centre(t), face, {t}))
+        attempt(f"inserter {item} at {cid}", lambda t=t, face=face: world.place("inserter", *_centre(t), face, {t}),
+                _gap("inserter", *_centre(t), face, ""))
     chests = [t for r in design.routes for t in r.chests]
     for t in _tour(chests, _centre, world.pos):
-        attempt(f"chest {t}", lambda t=t: world.place("iron-chest", *_centre(t), "north", {t}))
-    # 3. belts, net by net, runs of up to 10 tiles laid with one place_line (all of it within reach)
+        attempt(f"chest {t}", lambda t=t: world.place("iron-chest", *_centre(t), "north", {t}),
+                _gap("iron-chest", *_centre(t), "north", ""))
+    # 3. belts, net by net, runs of up to 10 tiles laid with one place_line (all of it within reach). A run the
+    #    game refuses even after a fresh look goes down tile by tile: one blocked tile is one gap, not ten
     for r in _tour(design.routes, lambda r: _centre(r.path[0]) if r.path else world.pos, world.pos):
         for kind, tiles, face in _runs(r):
             if kind == "line":
+                def lay_one(t, face=face):
+                    world.clear([t])
+                    world.near(*_centre(t), dist=3)
+                    run_ok(_retry(world, [t], lambda: world.run.place("transport-belt", *_centre(t), face)),
+                           f"belt {t}->{t}")
+                    world.used.add(t)
+
                 def lay(tiles=tiles, face=face):
                     world.clear(tiles)
                     mid = tiles[len(tiles) // 2]
                     world.near(*_centre(mid), dist=3)
                     if len(tiles) == 1:
-                        res = world.run.place("transport-belt", *_centre(tiles[0]), face)
+                        act = lambda: world.run.place("transport-belt", *_centre(tiles[0]), face)  # noqa: E731
                     else:
-                        res = world.run.place_line("transport-belt", *_centre(tiles[0]), *_centre(tiles[-1]))
-                    run_ok(res, f"belt {tiles[0]}->{tiles[-1]}")
+                        act = lambda: world.run.place_line("transport-belt", *_centre(tiles[0]),  # noqa: E731
+                                                           *_centre(tiles[-1]))
+                    run_ok(_retry(world, tiles, act), f"belt {tiles[0]}->{tiles[-1]}")
                     world.used.update(tiles)
-                attempt(f"{r.item} belt {tiles[0]}", lay)
+                if not attempt(f"{r.item} belt {tiles[0]}", lay, None if len(tiles) > 1 else
+                               _gap("transport-belt", *_centre(tiles[0]), face, "")) and len(tiles) > 1:
+                    for t in tiles:                  # place what can be placed, keep the rest as gaps
+                        attempt(f"{r.item} belt {t}", lambda t=t: lay_one(t),
+                                _gap("transport-belt", *_centre(t), face, ""))
             else:
                 d, bt = face.split("/")
 
@@ -107,14 +144,17 @@ def build(world: "ab.World", design: Design, log=print, anchors: list[Tile] = ()
                     world.near(*_centre(t))
                     if abs(world.pos[0] - t[0] - 0.5) < 1.2 and abs(world.pos[1] - t[1] - 0.5) < 1.2:
                         world.step_out({t})
-                    run_ok(world.run.place("underground-belt", *_centre(t), d, bt), f"underground {t}")
+                    run_ok(_retry(world, [t], lambda: world.run.place("underground-belt", *_centre(t), d, bt)),
+                           f"underground {t}")
                     world.used.add(t)
-                attempt(f"{r.item} underground {tiles[0]}", ug)
+                attempt(f"{r.item} underground {tiles[0]}", ug,
+                        _gap("underground-belt", *_centre(tiles[0]), d, "", type=bt))
     # 4. poles, then a line to the nearest powered pole if the design is not already in reach of one
     for t in _tour(design.poles, _centre, world.pos):
-        attempt(f"pole {t}", lambda t=t: world.place("small-electric-pole", *_centre(t), "north", {t}))
+        attempt(f"pole {t}", lambda t=t: world.place("small-electric-pole", *_centre(t), "north", {t}),
+                _gap("small-electric-pole", *_centre(t), "north", ""))
     if anchors and design.poles:
         a, p = min(((a, p) for a in anchors for p in design.poles), key=lambda ap: math.dist(*ap))
         if math.dist(a, p) > 7.5:
             attempt(f"pole line to {a}", lambda: ab.build_poles(world, p, a))
-    return {"placed": placed, "failed": failed}
+    return {"placed": placed, "failed": failed, "gaps": gaps}

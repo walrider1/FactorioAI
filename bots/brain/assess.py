@@ -30,7 +30,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any
 
 FUELS = ("coal", "wood")
-CRITICAL = ("coal", "boiler", "power", "fuel", "pipe", "belt-foreign")   # alert keys the rule floor fixes itself
+CRITICAL = ("coal", "boiler", "power", "fuel", "pipe", "belt-foreign", "gap-")   # keys the rule floor fixes itself
 SOON = ("rebuild-",)            # keys it queues by itself without pausing the goal in hand (planned, not urgent)
 GOAL_DOS = ("build", "research", "stock", "remove", "replace", "connect", "feed", "priority", "wait",
             "link", "link_science", "scout", "upgrade", "repair", "repipe", "relink", "purge", "trunk")
@@ -533,6 +533,14 @@ def detect(crew) -> list[dict]:
     try:
         from .purity import check as belt_check
         out.extend(belt_check(crew))
+    except Exception:  # noqa: BLE001 - a stub crew in a test, or a failed look: no verdict this time
+        pass
+    # buildings a site never got (refused tiles, holes in belt lines; gaps.py): the rule floor repairs them
+    try:
+        from . import gaps
+        for note in gaps.audit(crew):
+            crew.w.log(f"[gaps] {note}")
+        out.extend(gaps.alerts(crew))
     except Exception:  # noqa: BLE001 - a stub crew in a test, or a failed look: no verdict this time
         pass
 
