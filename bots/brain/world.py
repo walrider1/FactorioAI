@@ -240,10 +240,12 @@ class FreeWorld(ab.World):
         self.pos = (d["position"]["x"], d["position"]["y"])
         cx, cy = (d.get("centre") or d["position"])["x"], (d.get("centre") or d["position"])["y"]
         r = d.get("radius", radius)
+        amounts = self.__dict__.setdefault("ore_amount", {})   # tile -> ore left there, as of its last look
         if "resources" in d:                      # forget ore tiles that were mined out since the last look
             for tiles in self.resources.values():
                 for t in [t for t in tiles if math.hypot(t[0] + 0.5 - cx, t[1] + 0.5 - cy) <= r - 1]:
                     tiles.discard(t)
+                    amounts.pop(t, None)
         # Only a full look (water, ore and obstacles all included) makes tiles "seen": a tile marked seen after a
         # trees-only look would count as dry land for good, and the power builder would never find the shore.
         if "obstacles" in d and "water" in d and "resources" in d:
@@ -255,6 +257,9 @@ class FreeWorld(ab.World):
                         self.trees.pop((tx, ty), None)
         for name, tiles in (d.get("resources") or {}).items():
             self.resources.setdefault(name, set()).update(ab.tile(x, y) for x, y, *_ in tiles)
+            for x, y, *rest in tiles:            # the game says how much each tile holds: mines plan on it
+                if rest and isinstance(rest[0], (int, float)):
+                    amounts[ab.tile(x, y)] = int(rest[0])
         self.water.update(ab.tile(x, y) for x, y in d.get("water") or [])
         for x, y, kind in d.get("obstacles") or []:
             if kind == "cliff":

@@ -503,9 +503,13 @@ one-tile margin for belts. A refinery with a full output stops the whole oil cha
 what takes the surplus.
 Think ahead about ore. "ore_outlook" says per ore how much is left on the patches we mine, how fast it goes,
 whether there is room for more drills, and the next patch known. There are no trains: when a patch is full or
-has less than about four game hours left, build an outpost on the next patch (drills, a pole line home, a
-trunk belt to a smelting column at the base; one goal does all three), or scout for one first. An outpost is
-a long build: plan it as a frontier goal, not as an urgent fix.
+has less than about four game hours left, build an outpost on the next patch (drills on both sides of one
+belt, a pole line home, the ore smelted beside the field when it is near the base or at the base end of a trunk
+belt when far; one goal does it all), or scout for one first. An outpost is a long build: plan it as a frontier
+goal, not as an urgent fix. Big consumers (purple and yellow science, the silo) get their plates from such dense
+fields set aside for them, built BEFORE the factory: the close-out plans an iron and a copper field once blue
+science is researched; build the factories after they stand, so they are placed where the plate lines arrive.
+Mines running low are rebuilt on fresh ore by the crew itself before they run dry: do not order that.
 
 The report's "stuck" block says how long the base has gone without progress (no milestone, research or
 successful build). When it grows, your current approach is not working: change it (another place, a smaller

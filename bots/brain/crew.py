@@ -31,6 +31,7 @@ from arena_sdk import ArenaError
 from .knowledge import PLATES, SMELTED
 from .modules import ELECTRIC, GENERATORS, MODULES, UNPLUGGED, Base, Site, coal_belts_ready, lines_ready
 from .power import MEDIUM_REACH, REACH, route_poles
+from .upkeep import ORE_LOOK_MIN
 from .world import BuildError, FreeWorld, Preempted
 
 FUEL = {"coal": 1, "wood": 1}
@@ -62,7 +63,7 @@ PLACE_GRACE_MIN = 8.0
 # 20261119-202811: five goals took 86% of 114 game minutes (a pumpjack 34+, a mine replacement 28, a link pass 18).
 GOAL_BUDGET_MIN = {"build": 25.0, "replace": 30.0, "remove": 8.0, "link": 10.0, "link_science": 10.0, "stock": 8.0,
                    "feed": 4.0, "connect": 6.0, "upgrade": 20.0, "repair": 8.0, "scout": 10.0, "design": 4.0,
-                   "priority": 1.0, "purge": 10.0}
+                   "priority": 1.0, "purge": 10.0, "relink": 12.0}
 MODULE_BUDGET_MIN = {"outpost": 45.0, "workshop": 40.0, "silo": 60.0, "factory": 30.0, "steam_power": 15.0,
                      "research_station": 15.0, "electric_mine": 12.0, "burner_mine": 8.0, "pumpjack": 15.0,
                      "smelter_column": 15.0, "labs": 8.0}
@@ -81,6 +82,13 @@ LEAN_REVISIT_CRITICAL = 90 * 60   # ... but coal mines and the power station eve
 AUTOMATED_REVISIT = 6 * 3600
 SEALED_REVISIT = 15 * 3600
 FAR_REVISIT = 5 * 3600            # a hand-fed site out of observe range: walked to at most this often
+# Spare parts carried for repairs and rebuilds. Run 20261121-140755: repairs spent most of their time gathering
+# (a relink 21 game minutes, an upgrade 21, a replace 28 "collecting plates"), so the factories they were meant to
+# fix starved meanwhile. The foreman tops these up in quiet patrols, only from plates already on hand or in
+# storage (never by hand-mining), so a repair starts with its parts in the inventory.
+SPARES = {"transport-belt": 100, "underground-belt": 10, "inserter": 16, "long-handed-inserter": 6,
+          "small-electric-pole": 16, "pipe": 20, "electric-mining-drill": 4, "stone-furnace": 6}
+SPARES_EVERY_MIN = 4.0
 FINE = ("working", "normal", "waiting_for_space_in_destination")   # health that needs nobody
 SCARCE_FUEL = 40           # below this much fuel on hand, coal goes to coal mines and power first
 FEEDER_TARGET = 200        # packs of each kind the foreman keeps in a lab row's feeder chest (refilled at half)
@@ -293,7 +301,7 @@ class Crew:
         if do in ("link", "link_science"):
             return self.link()
         if do == "relink":
-            return self.relink(goal.get("site"), goal.get("item"))
+            return self.triaged_relink(goal)
         if do == "purge":
             from .purity import purge
             return purge(self, goal.get("site"), goal.get("item"))
@@ -478,9 +486,16 @@ class Crew:
                 rate *= 2                              # two stone a brick
             n = max(1, min(24, math.ceil(per / rate)))
             before = {s.id for s in self.base.sites}
+            home = self.base.centre or self.w.pos
+            # beside the field when it is near: plates ride out, the ore never crowds the base (mining, then
+            # smelting, then the belt out); far out the column stays at the base, where its coal belt is short
+            beside = site.params.get("field") or math.dist(tuple(site.params["head"]), home) <= outposts.FIELD_SMELT_MAX
+            col_goal = {"do": "build", "module": "smelter_column", "resource": r, "count": n,
+                        "toward": site.params["head"]}
+            if beside and r != "coal":
+                col_goal["near"] = list(site.params["head"])
             try:
-                self.build({"do": "build", "module": "smelter_column", "resource": r, "count": n,
-                            "toward": site.params["head"]})
+                self.build(col_goal)
             except BuildError as exc:
                 # the column may stand even so (its power or link step failed after it was placed): claim it,
                 # or the next try builds yet another one
@@ -2471,6 +2486,8 @@ class Crew:
         one: only when what it has left covers the port in full."""
         if root is None:
             return True
+        if tuple(root) in (getattr(self, "_avoid_roots", None) or ()):
+            return False                              # a relink found this source did not feed its port
         load, supply = budget.get(tuple(root)) or [0.0, self._source_rate(tuple(root), item)]
         left = supply - load
         return left > 0.5 and (load <= 0.5 or need <= left + 0.5)
@@ -2724,7 +2741,25 @@ class Crew:
         listed = ", ".join(f"{h} x{n}" if n > 1 else h for h, n in groups.items())
         return listed + ". First: " + "; ".join(failed[:2])
 
-    def relink(self, site_id, item: str | None = None) -> str:
+    def triaged_relink(self, goal: dict) -> str:
+        """A relink, after finding out what is really wrong (triage.py): when the cause is not the belt, the repair
+        that fits is queued first in its place and the relink is not done."""
+        from . import triage
+        from .overseer import same_target
+        try:
+            fix, note, avoid = triage.route(self, goal)
+        except Exception as exc:  # noqa: BLE001 - a failed diagnosis falls back to the plain relink
+            fix, note, avoid = None, f"no diagnosis ({type(exc).__name__}: {str(exc)[:80]})", []
+        self.log(f"[crew] relink site {goal.get('site')} {goal.get('item') or ''}: {note}")
+        if fix is not None and fix.get("skip"):
+            return f"{note}; no relink"
+        if fix is not None:
+            if not any(same_target(g) == same_target(fix) for g in self.urgent):
+                self.urgent.insert(0, {**fix, "reflex": f"triage: {note}"[:160]})
+            return f"{note}; a relink would not fix that, so {triage._short(fix)} goes first instead"
+        return f"{note}. " + self.relink(goal.get("site"), goal.get("item"), avoid=avoid)
+
+    def relink(self, site_id, item: str | None = None, avoid=()) -> str:
         """Take up the belts into one site's input ports (of one item, or all) and lay them again: from a line
         that exists now, or around what walled them in. The site itself stays: rework by input, not by whole
         site (docs/logistics-plan.md, phases 4-5)."""
@@ -2749,10 +2784,13 @@ class Crew:
             self._unlink(q)
         for e in ends:
             self._link_fails.pop(e, None)
+        self._avoid_roots = {tuple(r) for r in avoid}   # sources that already failed this input: not again
         try:
             msg = self.link()
         except BuildError as exc:
             msg = str(exc)[:300]
+        finally:
+            self._avoid_roots = set()
         fed = sum(1 for pt in ports if pt.get("fed"))
         return (f"site {site.id}: took up {len(gone)} link(s) into its {item or 'input'} ports and laid them "
                 f"again: {fed}/{len(ports)} fed. {msg[:240]}")
@@ -4253,6 +4291,8 @@ class Foreman:
                 done = self.crew.courier()
                 if done:
                     self.last_courier = done
+                w.foreman("spares")
+                self._spares()
         except Preempted:                     # the supervisor's pause: let it reach the main loop, not a "crash"
             raise
         except BuildError as exc:
@@ -4267,6 +4307,31 @@ class Foreman:
             w.foreman(None)
         w.doing(before)
         self.crew.checkpoint()
+
+    def _spares(self) -> str | None:
+        """Top up one spare part (SPARES) from what is on hand or in storage. Returns what it made, if anything."""
+        crew = self.crew
+        now = crew._minute()
+        if now - self.__dict__.get("_spares_at", -1e9) < SPARES_EVERY_MIN:
+            return None
+        self._spares_at = now
+        unlocked = getattr(crew.kn, "unlocked", set()) or set()
+        inv = crew.w.inventory
+        for item, want in SPARES.items():
+            if item not in unlocked:
+                continue
+            have = inv.get(item, 0) + crew.stored(item)
+            if have >= want // 2:
+                continue
+            try:
+                raw = dict(crew.kn.kit_plan({item: want - have}, {}, supplied=crew.ready_items()).raw)
+            except Exception:  # noqa: BLE001 - no recipe data (a stub): nothing to top up
+                return None
+            if not raw or any(inv.get(k, 0) + crew.stored(k) < v for k, v in raw.items()):
+                continue                              # not without gathering: the next build gathers anyway
+            crew.make({item: want})
+            return f"{want} {item}"
+        return None
 
     def note(self, p: str) -> None:
         if p not in self.problems:
@@ -4374,7 +4439,12 @@ class Foreman:
                 radius = min(32, max(6, int(max((math.dist((x, y), (cx, cy)) for x, y in own), default=0)) + 3))
                 if far:
                     w.near(cx, cy, dist=20)
-                d = w.observe(radius, x=cx, y=cy, include=["entities"], names=names[:20])
+                # a mine's ground too, now and then: the ore left under its drills says when to rebuild it
+                ground = s.kind in ("electric_mine", "burner_mine", "outpost") and                     self.crew._minute() - s.params.get("ore_look", -1e9) >= ORE_LOOK_MIN
+                d = w.observe(radius, x=cx, y=cy, include=["entities"] + (["resources"] if ground else []),
+                              names=names[:20])
+                if ground and "resources" in d:
+                    s.params["ore_look"] = round(self.crew._minute(), 1)
             except BuildError:
                 continue
             ents = [e for e in d.get("entities") or [] if (e["x"], e["y"]) in own]

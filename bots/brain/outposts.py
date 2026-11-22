@@ -22,7 +22,8 @@ from __future__ import annotations
 
 import math
 
-from .modules import Module, Site, coal_belts_ready, foreign_ore, line_record, lines_ready, mixes_ore
+from .modules import (DRILL_REACH, Module, Site, coal_belts_ready, foreign_ore, line_record, lines_ready,
+                      mixes_ore, reserved, thin_ground)
 from .world import BuildError, _same_patch
 
 ORES = ("iron-ore", "copper-ore", "coal", "stone")
@@ -33,6 +34,11 @@ FURNACE_IN = {"stone-furnace": 18.75, "steel-furnace": 37.5}
 RUNWAY_MIN = 240.0              # game minutes of ore left on worked patches before the next patch is prepared
 DRILL_PER_MIN = 30.0            # an electric drill's ore a minute
 POLE = "small-electric-pole"
+# Smelting next to the ore (the plates ride the belt out, the base keeps its room) when the field is this close to
+# the base; farther out the column stays at the base end, where its coal belt is short.
+FIELD_SMELT_MAX = 130.0
+FIELD_ORE_MIN = 8               # ore tiles of its 5x5 mining area a drill of a dense field needs
+FIELD_DRILLS = 16               # a dense field's drills by default: ~480 ore a minute, one belt's worth and change
 
 
 # ------------------------------------------------------------------ the patches we work, and the next ones
@@ -84,6 +90,29 @@ def outlook(crew) -> dict:
     return out
 
 
+def plan_field(crew, resource: str, drills: int = FIELD_DRILLS) -> dict | None:
+    """Set a clean patch aside for a big build ahead of time: the largest spare patch of the ore near the base
+    (nobody works it, no other ore mixed in at its centre), reserved so ordinary mines keep off it until the
+    field stands. Returns the build goal for it, or None (no such patch known: the ore outlook scouts)."""
+    w, base = crew.w, crew.base
+    home = base.centre or w.pos
+    key = f"plan-{resource}"
+    fields = w.__dict__.setdefault("ore_fields", {})
+    spare = [q for q in spare_patches(w, base, resource, min_tiles=120) if q.get("box")]
+    if not spare:
+        fields.pop(key, None)
+        return None
+
+    def far(q):
+        c = (q["centre"]["x"], q["centre"]["y"]) if q.get("centre") else (q["nearest"]["x"], q["nearest"]["y"])
+        return math.dist(c, home)
+    near = [q for q in spare if far(q) <= 2 * FIELD_SMELT_MAX] or spare
+    q = max(near, key=lambda q: (int(q.get("amount") or 0) or q.get("tiles", 0)) / (1.0 + far(q) / 100.0))
+    fields[key] = list(q["box"])
+    return {"do": "build", "module": "outpost", "resource": resource, "count": drills, "dense": True,
+            "field": True, "box": list(q["box"]), "field_key": key}
+
+
 def scout(w, resource: str, worked_boxes: list, min_tiles: int = 60, max_rings: int = 2,
           home: tuple[float, float] | None = None) -> dict | None:
     """Walk out like a player leaving the start area (8 directions a ring, around `home`: the base) until a patch
@@ -117,16 +146,135 @@ def scout(w, resource: str, worked_boxes: list, min_tiles: int = 60, max_rings: 
 # ------------------------------------------------------------------ the far end
 class Outpost(Module):
     name = "outpost"
-    describe = ("remote mining for when the patches near the base are full or running low (see ore_outlook): "
-                "a row of electric drills on the nearest patch of `resource` nobody works yet, dropping onto one "
-                "collector belt, a pole line home, a trunk belt to a smelting column built at the base edge "
-                "(plates into chests there, its furnaces fed coal by belt; coal goes into depot chests instead). "
-                "The crew builds all three in one goal. Scout first if no spare patch is known. "
-                "args: {resource, count (drills, 2-14)}")
+    describe = ("mining a whole patch nobody works yet, for when the patches near the base are full or running "
+                "low (see ore_outlook), and for big builds (purple and yellow science want hundreds of plates a "
+                "minute): electric drills on BOTH sides of one collector belt (twice as dense as a mine row, "
+                "every tile of the band mined), a pole line home, the ore smelted in a furnace column right beside "
+                "the field when it is near the base (else at the base end of a trunk belt), its plates on one line "
+                "out. The patch is set aside: ordinary mines keep off it. The crew builds it all in one goal. "
+                "Scout first if no spare patch is known. args: {resource, count (drills, 4-30, default 16)}")
+
+    @staticmethod
+    def _n(p: dict) -> int:
+        return max(2, min(30 if p.get("dense", True) else 14, int(p.get("count", FIELD_DRILLS))))
 
     def kit(self, w, base, p):
-        n = max(2, min(14, int(p.get("count", 8))))
+        n = self._n(p)
+        if p.get("dense", True):
+            return {"electric-mining-drill": n, "transport-belt": 2 * n + 6, POLE: n // 4 + 3}
         return {"electric-mining-drill": n, "transport-belt": 3 * n + 2, POLE: n // 2 + 2}
+
+    # A dense band, seen from its collector belt at row y + 2 flowing toward the base: drills of the north row are
+    # centred on row y and face south, drills of the south row on y + 4 and face north, so both drop onto the
+    # belt (one lane each). Along the belt drills go in pairs, 3 tiles apart, then a free column for a pole
+    # (x + 5 from a pair's first drill): pitch 7 per pair. The 5x5 mining areas overlap, so every ore tile of the
+    # band (rows y - 2 .. y + 6) is mined. A pole in each free column, on row y + 1, powers both rows (its 5x5
+    # supply area reaches the north drills and the top row of the south ones) and the next pole is 7 tiles on.
+    @staticmethod
+    def drill_x(sx: int, k: int) -> int:
+        return sx + 7 * (k // 2) + 3 * (k % 2)
+
+    @staticmethod
+    def drill_tiles(cx: int, cy: int) -> set:
+        return {(cx + dx, cy + dy) for dx in (-1, 0, 1) for dy in (-1, 0, 1)}
+
+    def _dense_ok(self, w, ore: set, foreign: set, cx: int, cy: int, own) -> bool:
+        area = sum((cx + dx, cy + dy) in ore for dx in range(-DRILL_REACH, DRILL_REACH + 1)
+                   for dy in range(-DRILL_REACH, DRILL_REACH + 1))
+        tiles = self.drill_tiles(cx, cy)
+        return area >= FIELD_ORE_MIN and not mixes_ore(cx, cy, foreign) and not thin_ground(w, cx, cy) \
+            and not reserved(w, tiles, own) and w.free(tiles)
+
+    def _dense(self, w, resource: str, n: int, flow: int, box=None, own=None, home=None) -> dict | None:
+        """The best dense band of up to n drills on the patch: {"y", "sx", "drills": [(cx, cy, facing)],
+        "belt": [tiles in flow order], "poles": [tiles]} or None."""
+        ore = w.resources.get(resource, set())
+        if box is not None:
+            ore = {t for t in ore if box[0] - 1 <= t[0] <= box[2] + 1 and box[1] - 1 <= t[1] <= box[3] + 1}
+        if not ore:
+            return None
+        foreign = foreign_ore(w, resource)
+        xs = sorted({t[0] for t in ore})
+        ys = sorted({t[1] for t in ore})
+        best, best_score = None, None
+        starts = [(sx, sy) for sy in range(ys[0], ys[-1] - 2) for sx in range(xs[0] - 1, xs[-1] - 1)]
+        if len(starts) > 6000:                         # a huge patch: every other start is plenty
+            starts = starts[::max(2, len(starts) // 6000)]
+        for sx, sy in starts:
+            drills, belt, poles = [], [], []
+            pole0 = (sx - 2, sy + 1)
+            if w.free({pole0}):
+                poles.append(pole0)
+            k = 0
+            while len(drills) < n:
+                cx = self.drill_x(sx, k)
+                span = [(cx + dx, sy + 2) for dx in (-1, 0, 1)]
+                gap = [(cx + 2, sy + 2)] if k % 2 else []
+                if not w.free(set(span + gap)):
+                    break
+                here = []
+                if self._dense_ok(w, ore, foreign, cx, sy, own):
+                    here.append((cx, sy, "south"))
+                if len(drills) + len(here) < n and self._dense_ok(w, ore, foreign, cx, sy + 4, own):
+                    here.append((cx, sy + 4, "north"))
+                if not here:
+                    break
+                drills += here
+                belt += span + gap
+                if k % 2 and w.free({(cx + 2, sy + 1)}):
+                    poles.append((cx + 2, sy + 1))
+                k += 1
+            if len(drills) < 2:
+                continue
+            x0, x1 = belt[0][0], belt[-1][0]
+            head_x = x1 + 1 if flow > 0 else x0 - 1    # the trunk (or the column's short link) starts past the end
+            if not w.free({(head_x, sy + 2)}):
+                continue
+            mid = ((x0 + x1) / 2, sy + 2)
+            score = (-len(drills), math.dist(mid, home) if home else 0)
+            if best_score is None or score < best_score:
+                ordered = sorted(belt, key=lambda t: t[0] * flow)
+                best, best_score = {"y": sy, "sx": sx, "drills": drills, "belt": ordered, "poles": poles}, score
+                if len(drills) >= n:
+                    break
+        return best
+
+    def _build_dense(self, w, base, p, r: str, n: int, cands: list, home) -> Site:
+        own = p.get("field_key")
+        lay, c, q = None, None, None
+        for q in cands[:3]:
+            c = (q["centre"]["x"], q["centre"]["y"]) if q.get("centre") else (q["nearest"]["x"], q["nearest"]["y"])
+            flow = -1 if home[0] < c[0] else 1         # the collector runs toward the base
+            w.survey_area(*c, half=min(48, max(16, int(math.sqrt(q.get("tiles", 100))))), step=32)
+            lay = self._dense(w, r, n, flow, q.get("box"), own, home)
+            if lay is not None:
+                break
+        if lay is None:
+            raise BuildError(f"no room for a dense band of 2+ drills on the spare {r} patches known")
+        d = "east" if flow > 0 else "west"
+        site = Site(self.name, {"resource": r, "count": 0, "outpost": True, "dense": True}, c)
+        for t in lay["belt"]:
+            w.place("transport-belt", t[0] + 0.5, t[1] + 0.5, d, {t})
+        for cx, cy, facing in lay["drills"]:
+            w.place("electric-mining-drill", cx + 0.5, cy + 0.5, facing, self.drill_tiles(cx, cy))
+            site.params["count"] += 1
+        for t in lay["poles"]:
+            if w.free({t}):
+                w.place(POLE, t[0] + 0.5, t[1] + 0.5, "north", {t})
+                site.poles.append(t)
+        head = lay["belt"][-1]
+        start = (head[0] + flow, head[1])
+        xs = [t[0] for t in lay["belt"]]
+        box = [min(xs) - 2, lay["y"] - 2, max(xs) + 2, lay["y"] + 6]
+        site.params.update({"head": list(head), "head_dir": d, "trunk_to": None, "box": box,
+                            "per_minute": DRILL_PER_MIN * site.params["count"],
+                            **({"field": True} if p.get("field") else {})})
+        site.centre = (sum(xs) / len(xs) + 0.5, lay["y"] + 2.5)
+        w.keepout |= {start}
+        fields = w.__dict__.setdefault("ore_fields", {})
+        fields.pop(own, None)                          # the plan's reservation becomes the field's own ground
+        fields[f"field-{r}-{head[0]},{head[1]}"] = box
+        return site
 
     @staticmethod
     def unit(cx: int, cy: int) -> dict:
@@ -160,14 +308,20 @@ class Outpost(Module):
         return best
 
     def build(self, w, base, p):
-        r, n = p["resource"], max(2, min(14, int(p.get("count", 8))))
+        r, n = p["resource"], self._n(p)
         if not base.powered_poles():
             raise BuildError("an outpost needs the power network to reach it: build steam_power first")
         cands = spare_patches(w, base, r)
+        if p.get("box"):                               # the patch the plan set aside for it, if still known
+            planned = [q for q in w.patches if q["name"] == r and q.get("box")
+                       and _same_patch(q["box"], p["box"])]
+            cands = planned + [q for q in cands if q not in planned]
         if not cands:
             raise BuildError(f"no {r} patch known that nobody works yet: scout first "
                              f'({{"do": "scout", "resource": "{r}"}})')
         home = base.centre or w.pos
+        if p.get("dense", True):
+            return self._build_dense(w, base, p, r, n, cands, home)
         for q in cands[:3]:
             c = (q["centre"]["x"], q["centre"]["y"]) if q.get("centre") else (q["nearest"]["x"], q["nearest"]["y"])
             flow = -1 if home[0] < c[0] else 1         # the collector runs toward the base
@@ -258,6 +412,8 @@ class SmelterColumn(Module):
         toward = tuple(p.get("toward") or home)
         trunk = bool(p.get("trunk", r in ORES))               # fed by an outpost, not by the link step
         spot = None
+        # never on ore: a column beside a field (or anywhere) would sit on the vein it is meant to serve
+        ore = set().union(*[t for k, t in (getattr(w, "resources", {}) or {}).items() if k != "crude-oil"])             if getattr(w, "resources", None) else set()
         for size in range(n, 0, -1):
             for ring in range(1, 9):
                 rr = 12 * ring
@@ -266,7 +422,7 @@ class SmelterColumn(Module):
                 for bx, by in sorted(cands, key=lambda q: (math.dist(q, home) * 0.6 + math.dist(q, toward) * 0.4)):
                     area = self.tiles(bx, by, size, into)
                     w.survey_area(bx - 3, by + size, half=max(12, size + 6), step=32)
-                    if w.free(area):
+                    if w.free(area) and not (area & ore) and not reserved(w, area):
                         spot = (bx, by)
                         break
                 if spot:

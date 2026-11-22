@@ -115,6 +115,81 @@ def mine_depleted(site) -> bool:
     return drills > 0 and n >= max(1, math.ceil(drills / 2))
 
 
+# A mine is rebuilt before it runs dry, not after. Run 20261121-140755: 13 mines were replaced only once half
+# their drills stood on bare ground, so the factories they fed starved while the crew gathered the new mine's
+# parts (2-13 game minutes each, 21 for one), then relinked every consumer. Now the game's own ore amounts under
+# the drills say how long a mine has left; when that is less than a rebuild takes plus margin, the same mine goes
+# on fresh ore while the old one still runs, and the old one comes down once the new one stands.
+REBUILD_AHEAD_MIN = 45.0         # game minutes of ore left under a mine when its replacement is started
+ORE_LOOK_MIN = 20.0              # the foreman looks at a mine's ground again after this long
+MINING_REACH = {"electric-mining-drill": 2, "burner-mining-drill": 0}    # tiles around the centre it mines
+DRILL_RATE = {"electric-mining-drill": 30.0, "burner-mining-drill": 15.0}  # ore a minute, flat out
+
+
+def mine_rate(site) -> float:
+    """Ore a minute the mine takes out of the ground: its drills, slowed to its furnaces' pace when each drill
+    drops into a furnace."""
+    furnace = 37.5 if any(e[0] == "steel-furnace" for e in site.entities) else 18.75
+    into_furnace = site.kind == "electric_mine" and site.params.get("into") in ("furnace", "line")
+    rate = 0.0
+    for e in site.entities:
+        r = DRILL_RATE.get(e[0])
+        if r:
+            rate += min(r, furnace) if into_furnace else r
+    return rate
+
+
+def mine_ore_left(w, site) -> int | None:
+    """Ore left under the mine's drills (each tile counted once), from the game's amounts at the last look;
+    None when the ground under it was never measured."""
+    amounts = getattr(w, "ore_amount", None)
+    r = site.params.get("resource")
+    if not amounts or not r:
+        return None
+    ore = (getattr(w, "resources", {}) or {}).get(r, set())
+    tiles: set = set()
+    for e in site.entities:
+        reach = MINING_REACH.get(e[0])
+        if reach is None:
+            continue
+        cx, cy = math.floor(e[1]), math.floor(e[2])
+        if e[0] == "burner-mining-drill":          # 2x2: its centre is a tile corner
+            tiles |= {(cx - 1 + dx, cy - 1 + dy) for dx in (0, 1) for dy in (0, 1)}
+        else:
+            tiles |= {(cx + dx, cy + dy) for dx in range(-reach, reach + 1) for dy in range(-reach, reach + 1)}
+    known = [amounts[t] for t in tiles if t in amounts and t in ore]
+    if not known and not any(t in ore for t in tiles):
+        return 0 if tiles else None
+    return sum(known) if known else None
+
+
+def mine_runway(crew, site) -> float | None:
+    """Game minutes of ore the mine has left (None: unknown). The amounts are as of the foreman's last look at
+    it, so what the drills took since then comes off."""
+    left = mine_ore_left(crew.w, site)
+    rate = mine_rate(site)
+    if left is None or rate <= 0:
+        return None
+    looked = site.params.get("ore_look")
+    since = max(0.0, crew._minute() - looked) if looked is not None and hasattr(crew, "_minute") else 0.0
+    return max(0.0, left / rate - since)
+
+
+def rebuild_due(crew, site) -> str | None:
+    """Why this mine should be rebuilt now while it still runs (None: not yet). One drill already on bare
+    ground counts too: drills of one row run dry one by one, and the rest follow within the hour."""
+    if site.kind not in MINES or mine_depleted(site) or not site.params.get("resource"):
+        return None
+    drills = sum(1 for e in site.entities if e[0] in DRILL_RATE)
+    dry = site.health.get("no_minable_resources", 0)
+    runway = mine_runway(crew, site)
+    if runway is not None and runway < REBUILD_AHEAD_MIN:
+        return f"about {runway:.0f} game minutes of ore left under its drills"
+    if dry and drills >= 2:
+        return f"{dry} of its {drills} drills already on mined-out ground"
+    return None
+
+
 def depleted_fix(crew, site) -> dict:
     """A mined-out mine: the same mine again on fresh tiles of its ore first, then the old one comes down; its
     belts are taken up with it and the link step belts the new chests to whatever the old ones fed (run
@@ -287,7 +362,40 @@ def prerequisite_goals(crew) -> list[dict]:
         made = made or any("engine-unit" in (c.get("item_out") or {}) for _, c in crew.cells())
     except Exception:  # noqa: BLE001 - stub crews in tests
         pass
-    return [] if made else [{"do": "build", "module": "factory", "item": "engine-unit", "per_minute": 2}]
+    out = [] if made else [{"do": "build", "module": "factory", "item": "engine-unit", "per_minute": 2}]
+    return out + field_goals(crew)
+
+
+FIELD_ORES = ("iron-ore", "copper-ore")
+
+
+def field_goals(crew) -> list[dict]:
+    """Plates for purple and yellow science before their factories: once blue science is researched, a clean
+    iron patch and a clean copper patch are set aside and mined densely, smelted beside the ore, their plates
+    belted out (outposts.plan_field). The factories that come next are placed where those lines arrive, so they
+    start fed instead of starving and being relinked (run 20261121-140755: green science and the steel column
+    were built first and fed from whatever mine rows there were, then repaired for hours)."""
+    kn = crew.kn
+    done = getattr(kn, "researched", None) or set()
+    if "chemical-science-pack" not in done or "electric-mining-drill" not in done:
+        return []
+    if not getattr(crew.base, "powered_poles", lambda: [])():
+        return []
+    out = []
+    try:
+        from .outposts import plan_field
+    except Exception:  # noqa: BLE001
+        return []
+    for r in FIELD_ORES:
+        if any(s.kind == "outpost" and s.params.get("field") and s.params.get("resource") == r
+               for s in crew.base.sites):
+            continue
+        try:
+            g = plan_field(crew, r)
+        except Exception:  # noqa: BLE001 - stub crews in tests, a world without patches
+            g = None
+        out.append(g or {"do": "scout", "resource": r})
+    return out
 
 
 def closeout(crew, why: str) -> list[dict]:

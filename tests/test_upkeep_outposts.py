@@ -104,7 +104,7 @@ def _ore_world(w, box=(40, 0, 70, 20)):
 def test_an_outpost_lays_drills_on_one_side_of_a_collector_that_runs_toward_the_base():
     crew, w, _ = _crew()
     _ore_world(w)
-    site = outposts.Outpost().build(w, crew.base, {"resource": "iron-ore", "count": 6})
+    site = outposts.Outpost().build(w, crew.base, {"resource": "iron-ore", "count": 6, "dense": False})
     drills = [e for e in w.placed if e[0] == "electric-mining-drill"]
     belts_ = [e for e in w.placed if e[0] == "transport-belt"]
     assert len(drills) == 6 and len(belts_) == 18 and all(e[3] == "west" for e in belts_)   # the base is west

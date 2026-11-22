@@ -31,6 +31,7 @@ from typing import Any
 
 FUELS = ("coal", "wood")
 CRITICAL = ("coal", "boiler", "power", "fuel", "pipe", "belt-foreign")   # alert keys the rule floor fixes itself
+SOON = ("rebuild-",)            # keys it queues by itself without pausing the goal in hand (planned, not urgent)
 GOAL_DOS = ("build", "research", "stock", "remove", "replace", "connect", "feed", "priority", "wait",
             "link", "link_science", "scout", "upgrade", "repair", "relink", "purge")
 LONG_GOAL_MIN = 8.0
@@ -310,6 +311,39 @@ def rebuild_alerts(crew) -> list[dict]:
     return out
 
 
+def _diagnoses(crew) -> list[dict]:
+    try:
+        from .triage import diagnoses
+        return diagnoses(crew)
+    except Exception:  # noqa: BLE001 - stub crews in tests, a report line is never worth a crash
+        return []
+
+
+def rebuild_soon_alerts(crew) -> list[dict]:
+    """Mines running out: the same mine on fresh ore while the old one still runs (upkeep.rebuild_due). The rule
+    floor queues it at once (no LLM needed, nothing paused), so the factories it feeds never see a gap."""
+    out: list[dict] = []
+    from .upkeep import MINES, depleted_fix, rebuild_due
+    feeding = {(round(ln["source"][0], 2), round(ln["source"][1], 2)) for ln in getattr(crew, "links", [])}
+    for s in crew.base.sites:
+        if s.kind not in MINES:
+            continue
+        srcs = [(x, y) for x, y, _ in s.chests] + ([tuple(s.params["line"]["source"])] if s.params.get("line") else [])
+        if s.params.get("resource") != "coal" and not any((round(x, 2), round(y, 2)) in feeding for x, y in srcs):
+            continue                                  # nobody draws on it: rebuilding it early only spends parts
+        why = rebuild_due(crew, s)
+        if not why:
+            continue
+        fix = depleted_fix(crew, s)
+        if fix.get("do") != "replace":
+            continue                                  # no room for it near the base: the ore outlook says what next
+        out.append({"level": "urgent", "key": f"rebuild-{s.id}",
+                    "what": f"site {s.id} ({s.kind} {s.params.get('resource')}): {why}; the same mine goes on fresh "
+                            "ore now while this one still runs, then this one comes down and its belts follow",
+                    "fix": {**fix, "early": True}})
+    return out
+
+
 def depleted_alerts(crew) -> list[dict]:
     """Mines on mined-out ground. One that feeds a belt, or any coal mine, goes onto fresh ore now and its belts
     follow (depleted_fix); a coal one is a coal-* alert, which the rule floor acts on by itself."""
@@ -364,6 +398,7 @@ def detect(crew) -> list[dict]:
                                    "swap: use less (no new boilers or furnace rows) until electric furnaces"),
                         "fix": fix})
     out += depleted_alerts(crew)
+    out += rebuild_soon_alerts(crew)
     out += rebuild_alerts(crew)
     for s in crew.coal_mines():
         dry = s.health.get("no_fuel", 0)
@@ -529,6 +564,7 @@ def situation(crew, alerts: list[dict], doctrine: str = "") -> dict:
                                                                                               "count", "engines", "fuel")},
                    "health": s.health} for s in base.sites][:30],
         "stuck_links": crew.stuck_links() if hasattr(crew, "stuck_links") else [],
+        "repair_diagnoses": _diagnoses(crew),
         **_nodes_view(crew),
         "short_coal_belts": crew.coal_chains() if hasattr(crew, "coal_chains") else [],
         "short_belts": [c for c in (crew.short_chains() if hasattr(crew, "short_chains") else [])
@@ -566,13 +602,14 @@ class RuleAssessor:
     cost_usd = 0.0
 
     def decide(self, sit: dict, alerts: list[dict], answered: set[str]) -> dict:
-        goals, keys = [], []
+        goals, keys, stop = [], [], False
         for a in alerts:
-            if a["level"] == "urgent" and a.get("fix") and a["key"].startswith(CRITICAL) and a["key"] not in answered:
+            if a["level"] == "urgent" and a.get("fix") and a["key"].startswith(CRITICAL + SOON)                     and a["key"] not in answered:
                 goals.append(a["fix"])
                 keys.append(a["key"])
+                stop = stop or a["key"].startswith(CRITICAL)
         return {"note": "; ".join(a["what"][:80] for a in alerts if a["key"] in keys)[:240],
-                "urgent_goals": goals, "interrupt": bool(goals), "replan": False, "priority": None, "keys": keys}
+                "urgent_goals": goals, "interrupt": stop, "replan": False, "priority": None, "keys": keys}
 
 
 ASSESS_PROMPT = """You are the shift supervisor of a Factorio AI racing to launch a rocket. A strategist plans the
@@ -595,7 +632,10 @@ Read site health for the cause, not the symptom: furnaces with no_fuel make thei
 waiting_for_space and the factories they feed show waiting_for_source_items. That is a fuel problem (the fuel
 alerts say which coal belt to link or feed), and a link goal does not fix it. stuck_links lists links that
 already failed and why: do not ask for "link" again for them; it only helps after something changed (a site
-built or removed). Before logistics (underground belts) burners and furnaces are fed by hand, nearly a stack at
+built or removed). repair_diagnoses says, for each starving site, what is really wrong (a dry or stopped source,
+a source shared too thin, a polluted belt, a missing belt) and the repair that fits: order that repair. A relink
+only fixes a missing or broken belt; the crew diagnoses every relink and swaps in the fitting repair anyway.
+Before logistics (underground belts) burners and furnaces are fed by hand, nearly a stack at
 a time; once logistics is researched, coal moves by belt and the link step fits the hand-fed rows and boilers
 with coal belts where they stand: then prefer electric coal mines and coal-belt fixes over feeding by hand.
 Never remove a working site or belt just to make room for another coal belt.

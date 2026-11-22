@@ -75,6 +75,9 @@ Look hard at, among others:
 - the "idle" census: how much of each machine type works. A third of the drills idle is a big waste.
 - goals that loop, run for a very long time, or build the same thing again and again (the current goal's
   minutes, recent_results, failure counts, churn hints, sites of one kind piling up unfed).
+- repair_diagnoses: for each starving site, what is really wrong and the repair that fits (a dry, stopped or
+  overdrawn source, a polluted belt, a missing belt). Order that repair, not a relink: a relink only lays the belt
+  again, from the same source. The crew diagnoses every relink and swaps in the fitting repair anyway.
 - belts: unfed ports, stuck links and why, short coal belts. A port nobody can belt to needs its consumer moved
   (replace it with the same build, which goes on open ground near its inputs) or a new source next to it.
 - power: capacity against what the network really draws (power.demand_kw; demand_source says whether the game
@@ -188,6 +191,14 @@ def _links(crew) -> list[dict]:
              "kind": ln.get("kind"), "laid_minute": ln.get("minute")} for ln in getattr(crew, "links", [])]
 
 
+def _diagnoses(crew) -> list[dict]:
+    try:
+        from .triage import diagnoses
+        return diagnoses(crew)
+    except Exception:  # noqa: BLE001 - a report line is never worth a crash
+        return []
+
+
 def full_report(crew, base_report: dict, results: list[dict], previous: list[dict], extra: dict | None = None) -> dict:
     """Everything the bot knows, for the overseer. base_report: the strategist's own report."""
     w = crew.w
@@ -220,6 +231,7 @@ def full_report(crew, base_report: dict, results: list[dict], previous: list[dic
         "machines": per_site,
         "idle": idle,
         "links": _links(crew),
+        "repair_diagnoses": _diagnoses(crew),
         "ports": ports,
         "plates": plates,
         "lines": lines,

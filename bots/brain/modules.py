@@ -1377,6 +1377,17 @@ class Factory(Module):
 DRILL_REACH = 2              # an electric drill mines a 5 x 5 area around its centre (mining_radius 2.49)
 
 
+def reserved(w, tiles, own=None) -> bool:
+    """Is any of these tiles inside an ore field set aside for a big build (outposts: a dense field planned ahead
+    of purple and yellow science)? Ordinary mines keep off it, so the field gets the clean vein it was planned on.
+    `own`: the key of the field being built, which may of course use its own ground."""
+    fields = getattr(w, "ore_fields", None)
+    if not fields:
+        return False
+    boxes = [f for k, f in fields.items() if k != own]
+    return any(f[0] <= x <= f[2] and f[1] <= y <= f[3] for f in boxes for x, y in tiles)
+
+
 def foreign_ore(w, resource: str) -> set:
     """Tiles of every other ore a drill could mine (crude oil is pumped, not mined)."""
     out: set = set()
@@ -1392,6 +1403,28 @@ def mixes_ore(cx: int, cy: int, foreign: set) -> bool:
     factory's input belt jammed with what its inserters do not take."""
     return bool(foreign) and any((cx + dx, cy + dy) in foreign for dx in range(-DRILL_REACH, DRILL_REACH + 1)
                                  for dy in range(-DRILL_REACH, DRILL_REACH + 1))
+
+
+# A drill put on ground that is nearly mined out runs dry within the hour, and its mine is rebuilt again (run
+# 20261121-140755: replacements went next to the old rows, onto the thin edge they had left). Where the game told
+# us the amounts, a drill goes only where its 5x5 mining area holds at least this much ore: about three hours of a
+# drill into a furnace.
+MIN_DRILL_ORE = 3500
+
+
+def drill_ore(w, cx: int, cy: int, reach: int = DRILL_REACH) -> int | None:
+    """Ore in a drill's mining area as of the last look (None: never measured there)."""
+    amounts = getattr(w, "ore_amount", None)
+    if not amounts:
+        return None
+    vals = [amounts[(cx + dx, cy + dy)] for dx in range(-reach, reach + 1) for dy in range(-reach, reach + 1)
+            if (cx + dx, cy + dy) in amounts]
+    return sum(vals) if vals else None
+
+
+def thin_ground(w, cx: int, cy: int) -> bool:
+    got = drill_ore(w, cx, cy)
+    return got is not None and got < MIN_DRILL_ORE
 
 
 class ElectricMine(Module):
@@ -1480,8 +1513,8 @@ class ElectricMine(Module):
                 u = self.unit(cx, sy, into, fuel)
                 pole = ({(cx + 2, sy - 3)} if into in ("furnace", "line") else {(cx + 2, sy - 2)}) if len(run) % 2 == 0                     else set()          # a chest row's pole too (site 50 of run 20261119-154451 got none)
                 port = set(self.fuel_port(cx, sy)) if fuel and not run else set()
-                if sum(t in ore for t in u["drill"]) < 7 or mixes_ore(cx, sy, foreign) \
-                        or not w.free(u["drill"] | u["rest"] | pole | port):
+                if sum(t in ore for t in u["drill"]) < 7 or mixes_ore(cx, sy, foreign) or thin_ground(w, cx, sy) \
+                        or reserved(w, u["drill"]) or not w.free(u["drill"] | u["rest"] | pole | port):
                     break
                 run.append((cx, sy))
                 cx += self.UNIT_W
