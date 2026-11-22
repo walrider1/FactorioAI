@@ -505,8 +505,9 @@ def _near_line(t, a, b, width: float) -> bool:
 TRUNK_WIDTHS = (12, 28, 56)     # corridor half-widths tried in turn
 
 
-def plan_trunk(crew, start: tuple, port: dict) -> list | None:
-    """The trunk's route: belts from `start` into the port, inside a corridor along the straight line."""
+def plan_trunk(crew, start: tuple, port: dict, block: set = frozenset()) -> list | None:
+    """The trunk's route: belts from `start` into the port, inside a corridor along the straight line, never over
+    `block` (the inserter that loads it, say)."""
     from . import belts
     end, appr = tuple(port["end"]), tuple(port["approach"])
     others = {tuple(t) for s, pt in crew.all_ports() if pt is not port for t in (pt["end"], pt["approach"])}
@@ -514,7 +515,7 @@ def plan_trunk(crew, start: tuple, port: dict) -> list | None:
     ug = "underground-belt" in crew.kn.unlocked
     for width in TRUNK_WIDTHS:
         free = lambda t, wd=width: ((t in mine or crew._belt_free(t)) and t not in crew._bad_belt
-                                    and _near_line(t, start, appr, wd))
+                                    and t not in block and _near_line(t, start, appr, wd))
         steps = belts.route_belt(free, start, appr, end, avoid=others - mine, underground=ug, margin=width,
                                  limit=600_000, ug_block=crew.ug_cover() if ug and hasattr(crew, "ug_cover") else None)
         if steps:
@@ -547,7 +548,8 @@ def lay_trunk(crew, outpost: Site, column: Site) -> dict:
                          + ")")
     need = belts.count(steps)
     crew.unlock_items([k for k, v in need.items() if v])
-    crew.make({k: v for k, v in need.items() if v}, extra=True)
+    make_for = getattr(crew, "make_for", None)        # what is on hand counts (no kit on top of a hoard)
+    (make_for or (lambda k: crew.make(k, extra=True)))({k: v for k, v in need.items() if v})
     ents: list = []
     crew.w.recorder = ents
     try:

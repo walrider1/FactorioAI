@@ -83,7 +83,8 @@ def upgrade_site(crew, site, limit: int = UPGRADE_MAX) -> str:
     for _, b in todo:
         need[b] = need.get(b, 0) + 1
     crew.unlock_items(list(need))
-    crew.make(need, extra=True)
+    make_for = getattr(crew, "make_for", None)        # the machines on hand count (no kit on top of a hoard)
+    (make_for or (lambda k: crew.make(k, extra=True)))(need)
     recipes = _recipes(crew, site, [e for e, _ in todo])
     done, kept, swaps = 0, [], {}
     for e, new in todo:

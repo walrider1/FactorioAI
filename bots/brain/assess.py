@@ -33,7 +33,7 @@ FUELS = ("coal", "wood")
 CRITICAL = ("coal", "boiler", "power", "fuel", "pipe", "belt-foreign")   # alert keys the rule floor fixes itself
 SOON = ("rebuild-",)            # keys it queues by itself without pausing the goal in hand (planned, not urgent)
 GOAL_DOS = ("build", "research", "stock", "remove", "replace", "connect", "feed", "priority", "wait",
-            "link", "link_science", "scout", "upgrade", "repair", "relink", "purge")
+            "link", "link_science", "scout", "upgrade", "repair", "relink", "purge", "trunk")
 LONG_GOAL_MIN = 8.0
 
 
@@ -169,8 +169,11 @@ def relocate_fix(crew, q: dict) -> dict | None:
     near its inputs (research stations and steel columns look for their sources), then the old one comes down.
     Sealed sites are not moved this way."""
     site = crew.base.get(q.get("into_site")) if q.get("into_site") is not None else None
-    if site is None or site.id in getattr(crew, "sealed", {}):
-        return None
+    if site is None or (site.id in getattr(crew, "sealed", {}) and q.get("failed", 0) < 3):
+        return None                                   # a sealed site moves only once its inputs failed 3x
+    if q.get("at") and q["at"][0] == "boost":
+        # extra supply into a chain that has no side to join: lay the site's input again from a spare source
+        return {"do": "relink", "site": site.id, "item": q.get("item")}
     if site.kind == "labs" and site.params.get("station"):
         new = {"do": "build", "module": "research_station", "count": int(site.params.get("count") or 2)}
     elif site.kind == "factory" and site.params.get("item"):
@@ -470,7 +473,8 @@ def detect(crew) -> list[dict]:
                         "what": f"the {q['item']} link into site {q['into_site']} failed {q['failed']}x: {q['why'][:200]}"
                                 + f"; it retries by itself within {15 * min(4, q['failed'])} min (a relink goal: now)"
                                 + ("; it is walled in: rebuild it where its inputs are (the new one first)"
-                                   if fix else ""),
+                                   if fix and fix.get("do") == "replace" else
+                                   "; lay its input again from a spare source" if fix else ""),
                         "fix": fix})
     # plates made but not delivered: the totals say "surplus" while factories starve (nodes.py)
     try:
@@ -482,7 +486,10 @@ def detect(crew) -> list[dict]:
         if row["unfed_ports"]:
             out.append({"level": "warn", "key": f"plate-routing-{row['item']}",
                         "what": row["text"] + ": the shortage is routing, not supply. More mines or another "
-                                f"{row['item']} consumer change nothing until those ports get a belt", "fix": None})
+                                f"{row['item']} consumer change nothing until those ports get a belt. A relink "
+                                f"reaches only sources within {getattr(crew, 'LINK_MAX_TILES', 150)} tiles: a "
+                                "farther spare source needs a trunk goal, or a new mine or smelter next to the "
+                                "starving site; not another relink", "fix": None})
     for s in base.sites:
         n = sum(s.health.values())
         idle = sum(v for k, v in s.health.items() if k in ("no_ingredients", "item_ingredient_shortage",

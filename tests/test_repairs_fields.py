@@ -321,11 +321,9 @@ def test_a_workshop_whose_water_is_out_of_reach_fails_before_power_is_built(monk
     assert called == []
 
 
-def test_a_pump_factory_is_refused_since_the_crew_hand_crafts_pumps():
-    from brain.modules import BuildError
-    crew = SimpleNamespace(_check_forbidden=lambda g: None)
-    try:
-        Crew.build(crew, {"do": "build", "module": "factory", "item": "pump", "per_minute": 1})
-        assert False, "a pump factory should be refused"
-    except BuildError as exc:
-        assert "hand-crafted" in str(exc)
+def test_a_pump_factory_becomes_the_crew_making_the_pumps_the_line_needs():
+    made = []
+    crew = SimpleNamespace(_check_forbidden=lambda g: None, small_need=lambda item: 3 if item == "pump" else None,
+                           _make_instead=lambda item: made.append(item) or f"made {item}")
+    assert Crew.build(crew, {"do": "build", "module": "factory", "item": "pump", "per_minute": 1}) == "made pump"
+    assert made == ["pump"]

@@ -236,29 +236,33 @@ class Workshop(Module):
             k = max(1, math.ceil(plan.fluids["crude-oil"] / 300))
             raise BuildError(f"{item} needs {plan.fluids['crude-oil']:.0f} crude oil a minute: build pumpjacks "
                              f"first ({{\"do\": \"build\", \"module\": \"pumpjack\", \"count\": {k}}})")
-        if "crude-oil" in plan.fluids and not self._pumps_ok(w):
-            far = self._crude_gap(base, d, home=base.centre or w.pos)
-            if far > self.OIL_FLOOR_REACH:
-                # crude only reaches a floor by pipe, and a pipe past one segment needs pumps (engine units) the
-                # crew cannot make yet: an oil floor goes beside the pumpjacks, and the courier carries what it
-                # makes home. Run 20261121-140755 (and 20261120-211555): the plastics workshop stood in the base,
-                # 441 pipe tiles from the oil field, and got no crude at all
-                oil = next((f for f in self.floors if f is not d and self._crude_gap(base, f) <= self.OIL_FLOOR_REACH
-                            and self._fits(w, base, f, n)), None)
-                if oil is None:
-                    home_floor = self.district
-                    oil = self._new_floor(w, base, n, home=self._oil_home(base, w))
-                    self.district = home_floor           # cells without crude still go on the home floor
-                    if self._crude_gap(base, oil) > self.OIL_FLOOR_REACH:
-                        self.floors.remove(oil)
-                        raise BuildError(f"{item} needs crude oil, the oil field is {far:.0f} tiles from the "
-                                         "workshop floor (pumps needed: engine units) and no free area for a floor "
-                                         "was found beside the pumpjacks")
-                w.log(f"[workshop] {item} goes on oil floor {oil.idx} beside the pumpjacks (the home floor is "
-                      f"{far:.0f} tiles from the crude, too far without pumps)")
-                d = oil
-                plan = plan_for(d)
-                n = sum(c.count for c in plan.cells)
+        # the crude line's pumps, counted like the water line's: one per PUMP_EVERY tiles (a detour adds one)
+        far = self._crude_gap(base, d, home=base.centre or w.pos) if "crude-oil" in plan.fluids else 0.0
+        crude_pumps = int(far // PUMP_EVERY) + 1
+        if far > self.OIL_FLOOR_REACH:
+            self._need_pumps(w, crude_pumps)
+        if far > self.OIL_FLOOR_REACH and not self._pumps_ok(w, crude_pumps):
+            # crude only reaches a floor by pipe, and a pipe past one segment needs pumps (engine units) the
+            # crew cannot make yet: an oil floor goes beside the pumpjacks, and the courier carries what it
+            # makes home. Run 20261121-140755 (and 20261120-211555): the plastics workshop stood in the base,
+            # 441 pipe tiles from the oil field, and got no crude at all
+            oil = next((f for f in self.floors if f is not d and self._crude_gap(base, f) <= self.OIL_FLOOR_REACH
+                        and self._fits(w, base, f, n)), None)
+            if oil is None:
+                home_floor = self.district
+                oil = self._new_floor(w, base, n, home=self._oil_home(base, w))
+                self.district = home_floor           # cells without crude still go on the home floor
+                if self._crude_gap(base, oil) > self.OIL_FLOOR_REACH:
+                    self.floors.remove(oil)
+                    raise BuildError(f"{item} needs crude oil, the oil field is {far:.0f} tiles from the "
+                                     f"workshop floor ({crude_pumps} pumps needed: {crude_pumps} engine units"
+                                     f"{self._engine_note(w, base)}) and no free area for a floor was found "
+                                     "beside the pumpjacks")
+            w.log(f"[workshop] {item} goes on oil floor {oil.idx} beside the pumpjacks (the home floor is "
+                  f"{far:.0f} tiles from the crude, too far without {crude_pumps} pumps)")
+            d = oil
+            plan = plan_for(d)
+            n = sum(c.count for c in plan.cells)
         if d is None:
             d = self._new_floor(w, base, n)
         if "water" in plan.fluids and d.water is None:
@@ -270,16 +274,14 @@ class Workshop(Module):
             shore = self._nearest_water(w, c)
             gap = abs(shore[0] - c[0]) + abs(shore[1] - c[1]) if shore is not None else 0.0
             pumps = int(gap // PUMP_EVERY) + 1
+            if gap > self.OIL_FLOOR_REACH:
+                self._need_pumps(w, pumps)
             if gap > self.OIL_FLOOR_REACH and not self._pumps_ok(w, pumps):
-                engines = "" if base.of("factory") and any(s.params.get("item") == "engine-unit"
-                                                          for s in base.of("factory")) else \
-                    ' Pumps first: {"do": "build", "module": "factory", "item": "engine-unit", "per_minute": 2} ' \
-                    "(engine units need no oil)."
                 raise BuildError(f"{item} needs water and the nearest shore is {gap:.0f} tiles from workshop floor "
-                                 f"{d.idx}: too far to pipe without about {pumps} pumps (one engine unit each)."
-                                 f"{engines} The crew hand-crafts the pumps, so no pump factory is needed: once "
-                                 f"{pumps} engine units are made, build this again and the water line gets a pump "
-                                 "every 200 tiles")
+                                 f"{d.idx}: too far to pipe without about {pumps} pumps (one engine unit each)"
+                                 f"{self._engine_note(w, base)}. The crew hand-crafts the pumps, so no pump factory "
+                                 f"is needed: once {pumps} engine units are made, build this again and the water "
+                                 "line gets a pump every 200 tiles")
         design = self._place_plan(w, base, d, plan)
         design["plan"] = plan
         design["power_kw"] = planner.power_kw(plan)
@@ -302,6 +304,29 @@ class Workshop(Module):
     def _pumps_ok(w, n: int = 2) -> bool:
         can = getattr(w, "obtainable", None)
         return bool(can is not None and can("pump", n))
+
+    @staticmethod
+    def _need_pumps(w, n: int) -> None:
+        """Say how many pumps a fluid line of ours needs: a pump factory goal becomes the crew making that many
+        (Crew.small_need), and the planners see the number."""
+        needs = getattr(w, "small_needs", None)
+        if needs is None:
+            try:
+                needs = w.small_needs = {}
+            except AttributeError:                     # a world that takes no new attributes (a test stub)
+                return
+        needs["pump"] = max(int(n), 1)
+
+    @staticmethod
+    def _engine_note(w, base) -> str:
+        """Where the engine units come from: the engine-unit factory's measured output, or what to build."""
+        if any(s.params.get("item") == "engine-unit" for s in base.of("factory")):
+            rate = getattr(w, "rate", None)
+            got = rate("engine-unit") if rate is not None else 0.0
+            return (f"; our engine-unit factory makes {got:.1f}/min now (its inputs decide that: see its site's "
+                    "health)")
+        return ('; first {"do": "build", "module": "factory", "item": "engine-unit", "per_minute": 2} (engine '
+                "units need no oil)")
 
     @staticmethod
     def _jacks(base) -> list[tuple[float, float]]:

@@ -23,6 +23,16 @@ LEFT = {"north": "west", "west": "south", "south": "east", "east": "north"}
 RIGHT = {v: k for k, v in LEFT.items()}
 UG_REACH = 5                        # underground-belt max_underground_distance (catalog)
 AXIS = {"north": "ns", "south": "ns", "east": "ew", "west": "ew"}
+# A link (inserter, belt, port) is a repair-sized job: its source within LINK_REACH tiles (Manhattan) of the port
+# and its route at most LINK_ROUTE_MAX belt tiles. Farther is a trunk, a goal of its own. Run 20261121-140755: a
+# copper link inside a pump build walked ~460 tiles each way three times for a belt from x=391 to x=-88.
+LINK_REACH = 150
+LINK_ROUTE_MAX = 200
+
+
+def route_len(steps: list[tuple]) -> int:
+    """Tiles a route spans, the ground an underground pair goes under included."""
+    return sum(abs(a[1][0] - b[1][0]) + abs(a[1][1] - b[1][1]) for a, b in zip(steps, steps[1:])) + (1 if steps else 0)
 
 
 def ug_cover(ugs) -> dict[str, set[Tile]]:

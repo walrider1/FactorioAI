@@ -44,7 +44,12 @@ GOAL_HELP = """Goals you may give (JSON objects, done in order by the crew):
                                                     and workshop cells that take them (the book does it on its own)
 - {"do": "relink", "site": <id>, "item"?: "<item>"}  take up the belts into one site's input ports and lay them
                                                     again (from a plate line built since, or around what walled
-                                                    them in): rework one input, not the whole site
+                                                    them in): rework one input, not the whole site. A link reaches
+                                                    at most 150 tiles: a farther source needs a trunk
+- {"do": "trunk", "site": <id>, "item": "<item>"}  one long belt (more than 150 tiles) from the nearest spare source
+                                                    of the item into the site's unfed port, as a goal of its own.
+                                                    Only for a far source: a nearer mine or a factory next to its
+                                                    source is usually the better fix
 - {"do": "purge", "site": <id>, "item": "<item>"}   a belt into the site carries something else (alert
                                                     belt-foreign): stop what joins it and clean its belts
 - {"do": "upgrade", "site": <id>}                    faster machines where the old ones stand (assembling machine
@@ -591,7 +596,7 @@ class LLMStrategist:
             out = {}
         goals = [g for g in out.get("goals") or [] if isinstance(g, dict) and g.get("do") in
                  ("build", "research", "stock", "remove", "replace", "connect", "design", "wait", "feed",
-                  "priority", "link", "link_science", "relink", "upgrade", "scout", "repair", "purge")][:6]
+                  "priority", "link", "link_science", "relink", "upgrade", "scout", "repair", "purge", "trunk")][:6]
         if out.get("doctrine"):
             self.doctrine = str(out["doctrine"])[:800]
         plan = {"note": str(out.get("note", ""))[:300], "doctrine": self.doctrine, "goals": goals,

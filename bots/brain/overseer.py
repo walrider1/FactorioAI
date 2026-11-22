@@ -106,7 +106,9 @@ When to act at all:
   factories no belt reaches and sources whose chests sit full. That is a routing problem: more mines or another
   consumer of that item fix nothing (the crew holds such builds back while the item's ports starve). Fix the
   route: remove what walls a port in, {{"do": "relink", "site": id}} to lay one site's input belts again (from a
-  line built since, say), or replace the starving factory with one next to its source. "lines" lists each
+  line built since, say), or replace the starving factory with one next to its source. A link (and a relink)
+  reaches only sources within 150 tiles: when the spare sources are farther, the fix is {{"do": "trunk", "site":
+  id, "item": item}} (one long belt, a goal of its own) or a nearer mine, never another relink. "lines" lists each
   plate line, what it carries, what is drawn and what is left: a new factory belongs where a line has spare.
 
 How to act (only for a problem named above):

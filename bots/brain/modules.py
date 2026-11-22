@@ -1537,13 +1537,26 @@ class ElectricMine(Module):
         others = sorted((q for q in w.patches if q["name"] == resource and q["tiles"] >= 30),
                         key=lambda q: math.dist((q["centre"]["x"], q["centre"]["y"]), base.centre or w.pos))
         plate = {"iron-ore": "iron-plate", "copper-ore": "copper-plate", "stone": "stone-brick"}.get(resource, resource)
+        from .belts import LINK_REACH
+        made = plate if into == "furnace" else resource
+        # where what it makes is wanted: plates in chests no link can reach help nobody (run 20261121-140755:
+        # ~150 copper a minute sat in full chests at x~390 while every copper consumer starved near x~-80)
+        wanted = [tuple(pt["end"]) for s in base.sites for pt in s.params.get("ports", [])
+                  if pt.get("item") == made and not pt.get("trunk")] if resource != "coal" else []
+        too_far: list[float] = []
         for q in others[:3]:
             c = (q["centre"]["x"], q["centre"]["y"])
+            if wanted and min(abs(c[0] - e[0]) + abs(c[1] - e[1]) for e in wanted) > LINK_REACH + 60:
+                too_far.append(min(abs(c[0] - e[0]) + abs(c[1] - e[1]) for e in wanted))
+                continue                                 # a big patch's edge may still be in reach: 60 tiles slack
             w.survey_area(*c, half=min(40, max(12, int(math.sqrt(q["tiles"])))), step=32)
             lay = self.layout(w, p)
             fuel = lay in ("furnace", "line") and self.fuel_belt(w) and w.inventory.get("long-handed-inserter", 0) >= 1
             units = self._rows(w, resource, n, lay, base.centre or c, fuel)
             if not units:
+                continue
+            if wanted and min(abs(units[0][0] - e[0]) + abs(units[0][1] - e[1]) for e in wanted) > LINK_REACH:
+                too_far.append(min(abs(units[0][0] - e[0]) + abs(units[0][1] - e[1]) for e in wanted))
                 continue
             site = Site(self.name, {"resource": resource, "count": 0, "into": lay}, c)
             from . import belts
@@ -1591,6 +1604,11 @@ class ElectricMine(Module):
             elif into == "furnace":
                 site.params["fuel"] = "hand"
             return site
+        if too_far:
+            raise BuildError(f"the {resource} patches with room are {min(too_far):.0f}+ tiles from every {made} "
+                             f"consumer, beyond a belt link's {LINK_REACH}: its {made} would sit in chests. Build "
+                             f'{{"do": "build", "module": "outpost", "resource": "{resource}"}} (its trunk belts '
+                             "the ore home to a smelting column), or the consumer beside the patch")
         raise BuildError(f"no room for a row of electric drills on the {resource} patches near the base")
 
     PLATE_RATE = 18.75           # a stone furnace's plates a minute: the slower half of a drill-into-furnace unit
