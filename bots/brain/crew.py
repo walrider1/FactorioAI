@@ -587,6 +587,11 @@ class Crew:
             if real is None:
                 raise BuildError(f"unknown resource {params['resource']!r}: use one of {self.kn.resource_names}")
             params["resource"] = real
+        if mod.name == "factory" and params.get("item") == "pump":
+            # a long fluid line needs a handful, hand-crafted by the crew from engine units as it lays the line
+            # (run 20261121-140755: the planners ordered a pump factory twice; one ran 32 game minutes, then dropped)
+            raise BuildError("pumps are hand-crafted from engine units when a fluid line needs them: no pump factory. "
+                             "Make engine units (an engine-unit factory), then build the workshop again")
         if mod.name == "factory":             # items/s or items/min: one rate from here on
             params["per_minute"] = mod.rate(params)
             params.pop("per_second", None)

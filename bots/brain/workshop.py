@@ -261,20 +261,25 @@ class Workshop(Module):
                 n = sum(c.count for c in plan.cells)
         if d is None:
             d = self._new_floor(w, base, n)
-        if "water" in plan.fluids and not self._pumps_ok(w) and d.water is None:
-            # the same limit for water: a shore farther than one segment needs pumps. Build nothing that would
-            # stand dry: say what unblocks it (engine units need no oil, so pumps come before any oil product)
+        if "water" in plan.fluids and d.water is None:
+            # the same limit for water: a shore farther than one segment needs pumps, as many as the line has
+            # segments (a detour adds one). Build nothing that would stand dry: say what unblocks it (engine units
+            # need no oil, so pumps come before any oil product)
             x0, y0, x1, y1 = d.box()
             c = ((x0 + x1) / 2, (y0 + y1) / 2)
             shore = self._nearest_water(w, c)
-            if shore is not None and abs(shore[0] - c[0]) + abs(shore[1] - c[1]) > self.OIL_FLOOR_REACH:
-                gap = abs(shore[0] - c[0]) + abs(shore[1] - c[1])
+            gap = abs(shore[0] - c[0]) + abs(shore[1] - c[1]) if shore is not None else 0.0
+            pumps = int(gap // PUMP_EVERY) + 1
+            if gap > self.OIL_FLOOR_REACH and not self._pumps_ok(w, pumps):
+                engines = "" if base.of("factory") and any(s.params.get("item") == "engine-unit"
+                                                          for s in base.of("factory")) else \
+                    ' Pumps first: {"do": "build", "module": "factory", "item": "engine-unit", "per_minute": 2} ' \
+                    "(engine units need no oil)."
                 raise BuildError(f"{item} needs water and the nearest shore is {gap:.0f} tiles from workshop floor "
-                                 f"{d.idx}: too far to pipe without pumps. Pumps first: "
-                                 '{"do": "build", "module": "factory", "item": "engine-unit", "per_minute": 2} '
-                                 "(engine units need no oil). The crew hand-crafts the pumps from engine units, so "
-                                 "no pump factory is needed: once engine units are made, build this again and the "
-                                 "water line gets a pump every 200 tiles")
+                                 f"{d.idx}: too far to pipe without about {pumps} pumps (one engine unit each)."
+                                 f"{engines} The crew hand-crafts the pumps, so no pump factory is needed: once "
+                                 f"{pumps} engine units are made, build this again and the water line gets a pump "
+                                 "every 200 tiles")
         design = self._place_plan(w, base, d, plan)
         design["plan"] = plan
         design["power_kw"] = planner.power_kw(plan)
@@ -294,9 +299,9 @@ class Workshop(Module):
     OIL_FLOOR_REACH = 160          # Manhattan tiles from a floor's centre to its nearest pumpjack
 
     @staticmethod
-    def _pumps_ok(w) -> bool:
+    def _pumps_ok(w, n: int = 2) -> bool:
         can = getattr(w, "obtainable", None)
-        return bool(can is not None and can("pump", 2))
+        return bool(can is not None and can("pump", n))
 
     @staticmethod
     def _jacks(base) -> list[tuple[float, float]]:
