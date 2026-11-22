@@ -382,7 +382,7 @@ class Crew:
         if not sites:
             raise BuildError("no pipe gaps or missing buildings to repair"
                              + (f" in site {site_id}" if site_id is not None else ""))
-        done, left = 0, []
+        done, pipes, left = 0, 0, []
         with self.w.step("build"):
             for s in sites:
                 if gapmod.pending(s):
@@ -403,7 +403,7 @@ class Crew:
                     try:
                         self.w.place(name, t[0] + 0.5, t[1] + 0.5, d if name != "pipe" else "north", {tuple(t)})
                         s.entities.append((name, t[0] + 0.5, t[1] + 0.5, d if name != "pipe" else "north"))
-                        done += 1
+                        pipes += 1
                     except BuildError as exc:
                         keep.append([fl, kind, t, d])
                         left.append(f"{fl} {name} at {tuple(t)}: {str(exc)[:60]}")
@@ -413,9 +413,10 @@ class Crew:
                     s.params.pop("pipe_gaps", None)
                     if any(g[0] == "crude-oil" for g in gaps):
                         self._join_pumpjacks(s)
-        if not done:
+        if not done and not pipes:
             raise BuildError("nothing could be placed: " + "; ".join(left[:3]))
-        return f"placed {done} missing building(s)" + (f"; still open: {'; '.join(left[:3])}" if left else "")
+        said = ([f"closed {pipes} pipe gap(s)"] if pipes else []) + ([f"placed {done} missing building(s)"] if done else [])
+        return ", ".join(said) + (f"; still open: {'; '.join(left[:3])}" if left else "")
 
     def _join_pumpjacks(self, site: Site) -> None:
         """The workshop floor's crude line is whole now: its pumpjacks count as joined (no second line)."""
