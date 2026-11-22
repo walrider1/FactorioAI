@@ -4530,18 +4530,40 @@ class Crew:
             self.foreman.note(f"research by hand-crafted packs: {', '.join(f'{k} x{v}' for k, v in by_hand.items())}")
         return bool(by_hand)
 
+    # Run 20261122-133537: "build pumpjack" waited 15.6 and then 15.1 game minutes on fluid-handling stuck at 36%
+    # (the labs had red packs and no green), each time until its budget ran out. Research that has not moved for
+    # this long while the foreman fed the labs will not move by waiting: the goal fails and says which packs.
+    RESEARCH_STALL_MIN = 3.0
+
     def _wait_research(self, tech: str, path: list[str]) -> str:
         secs = sum(self.kn.research_seconds(t, self.base.count("labs")) for t in path)
         deadline = time.monotonic() + secs * 4 / self.w.speed + 120
+        mark, since = None, self._minute()
         while time.monotonic() < deadline and self.w.minutes_left > 0.5:
             self.checkpoint()
-            self.w.doing(f"waiting for research: {tech} ({(self.w.research or {}).get('progress', 0):.0%})")
+            rs = self.w.research or {}
+            self.w.doing(f"waiting for research: {tech} ({rs.get('progress', 0):.0%})")
             self.foreman.patrol(force=True, feed_hard=True)
             self.w.read_stats(1)
             if tech in self.kn.researched:
                 return f"researched {tech}"
+            rs = self.w.research or {}
+            now_mark = (rs.get("current"), round(float(rs.get("progress") or 0), 4),
+                        sum(1 for t in path if t in self.kn.researched))
+            if now_mark != mark:
+                mark, since = now_mark, self._minute()
+            elif self._minute() - since >= self.RESEARCH_STALL_MIN:
+                raise BuildError(self._research_stalled(tech, rs, self._minute() - since))
             time.sleep(2)
         raise BuildError(f"research {tech} did not finish in time")
+
+    def _research_stalled(self, tech: str, rs: dict, minutes: float) -> str:
+        cur = rs.get("current") or tech
+        packs = [i["name"] for i in (self.kn.techs.get(cur) or {}).get("unit_ingredients") or []]
+        return (f"research stalled: {cur} has not moved from {float(rs.get('progress') or 0):.0%} in "
+                f"{minutes:.0f} game minutes, so {tech} will not finish by waiting. Its labs need "
+                f"{', '.join(packs) or 'science packs'} flowing: get those science factories fed and linked to the "
+                "labs first (or stock the packs), then build what needs the research")
 
     # ============================================================== making
     @contextmanager
