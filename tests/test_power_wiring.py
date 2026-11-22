@@ -83,6 +83,8 @@ class GridCrew:
     INSERTER_DUTY, UTIL_FLOOR = Crew.INSERTER_DUTY, Crew.UTIL_FLOOR
     on_grid = Crew.on_grid
     short_note = Crew.short_note
+    _off_grid_anchors = Crew._off_grid_anchors
+    _cover_unpowered = Crew._cover_unpowered
 
     def __init__(self, base, statuses, networks):
         self.base, self.statuses, self.networks = base, statuses, networks

@@ -842,8 +842,11 @@ class Factory(Module):
                 "undergrounds (once logistics is researched), poles; the product collects in an output chest. "
                 "Any item made in assemblers (see factory_can_make in the report), e.g. science, circuits, or "
                 "buildings for a mall. A modular block: `inputs` lists what comes in from outside through input "
-                "ports, any items at all (plates, gears, circuits, steel...); everything else in its chain it "
-                "makes itself. Ore is for drills only: by default iron and copper plates are inputs too, so the "
+                "ports, any items at all (plates, gears, circuits, steel...); the rest of its chain it makes "
+                "itself, up to 12 assemblers: a bigger chain is split, and its biggest intermediates (gears, "
+                "circuits...) come in through ports too, from feeder factories the build makes FIRST (sized to "
+                "what is not already spare); if a feeder cannot be built the build fails and names it, rather than "
+                "leave ports nothing can feed. Ore is for drills only: by default iron and copper plates are inputs too, so the "
                 "factory goes on open ground off the ore, and electric_mine rows supply its plates (built first "
                 "when short; then \"link\" belts each mine chest to a port, the courier carries until then). "
                 "Items no assembler makes from plates (steel, plastic, sulfur...) are always inputs. "
@@ -938,8 +941,11 @@ class Factory(Module):
 
     def inputs(self, kn, item: str, rate: float, split=()) -> tuple[set[str], object]:
         """What a belt factory for `item` takes from other factories, and its plan. Items no assembler makes from
-        plates always; then, while the chain has more than MAX_ASM assemblers, its biggest intermediate becomes a
-        factory of its own that feeds this one (a chain of smaller factories routes where one big one cannot)."""
+        plates always; then, while the chain has more than MAX_ASM assemblers, its biggest intermediate becomes an
+        input of this one (a chain of smaller factories routes where one big one cannot). Nothing here builds the
+        feeder: Crew._intermediates_first does, before this factory, for every such input that has an assembler
+        recipe and is not already spare (run 20261122-133537: green science came out with gear and circuit ports
+        nothing fed, 49 of 51 machines idle)."""
         from fab import recipes as fr
         self.can_make(kn)
         supplied = set(fr.inputs_needed(item)) | set(split)

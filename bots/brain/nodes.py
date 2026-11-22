@@ -13,7 +13,9 @@ while every planner saw a surplus and asked for another green-science factory, w
 
 from __future__ import annotations
 
-PLATES = ("iron-plate", "copper-plate", "steel-plate", "stone-brick")
+import json
+
+PLATES =("iron-plate", "copper-plate", "steel-plate", "stone-brick")
 SOURCE_KINDS = ("electric_mine", "smelter_column", "burner_mine")
 BACKED_UP = ("waiting_for_space_in_destination", "full_output")
 CONSUMERS = ("factory", "smelter_column", "workshop")
@@ -222,18 +224,50 @@ def _product(kind: str, params: dict) -> str | None:
     return params.get("item")
 
 
+def linkable(crew, site, item: str) -> bool:
+    """Can a link start at this site for `item` (an output chest of it, or its line's tail: Crew.outputs)? A
+    burner mine smelting into stone furnaces has neither: its plates wait in the furnaces for the crew's hands."""
+    try:
+        return any(s is site for _, _, s in crew.outputs(item))
+    except Exception:  # noqa: BLE001 - stub crews: its chests and line decide
+        return any(what == item for *_, what in getattr(site, "chests", [])) or \
+            ((site.params.get("line") or {}).get("item") == item)
+
+
+def _full(site) -> bool:
+    h = getattr(site, "health", None) or {}
+    total = sum(h.values())
+    blocked = h.get("waiting_for_space_in_destination", 0) + h.get("full_output", 0)
+    return bool(total) and blocked / total >= FULL_SHARE
+
+
 def full_producers(crew, item: str) -> list:
-    """Sites that make `item` and stand mostly output-blocked (their last patrol's machine states)."""
-    out = []
-    for s in crew.base.sites:
-        if s.kind not in PRODUCER_KINDS or _product(s.kind, s.params) != item:
-            continue
-        h = getattr(s, "health", None) or {}
-        total = sum(h.values())
-        blocked = h.get("waiting_for_space_in_destination", 0) + h.get("full_output", 0)
-        if total and blocked / total >= FULL_SHARE:
-            out.append(s)
-    return out
+    """Sites that make `item`, stand mostly output-blocked (their last patrol's machine states) and could be
+    linked (linkable): only those mean "connect what you have before building more". A full producer nothing
+    can draw from (unlinkable_full) says nothing about demand. Run 20261122-133537: two burner copper mines into
+    stone furnaces stood full, so six electric copper mines were held back over 10 minutes while red science ran
+    at a fifth of its rate for copper ("connect them", which the link step cannot)."""
+    return [s for s in crew.base.sites if s.kind in PRODUCER_KINDS and _product(s.kind, s.params) == item
+            and _full(s) and linkable(crew, s, item)]
+
+
+def unlinkable_full(crew, item: str) -> list:
+    """Full producers of `item` no link can start from (burner mines into furnaces), oldest first: their output
+    reaches nothing, so they are replaced by electric mines, not connected."""
+    out = [s for s in crew.base.sites if s.kind in PRODUCER_KINDS and _product(s.kind, s.params) == item
+           and _full(s) and not linkable(crew, s, item)]
+    return sorted(out, key=lambda s: getattr(s, "built_minute", 0) or 0)
+
+
+def swap_goal(site) -> dict | None:
+    """The replace that puts electric drills (into furnaces whose plates leave by chest or line) where a burner
+    mine stands full; None for anything but a burner mine on iron, copper or stone."""
+    r = site.params.get("resource")
+    if site.kind != "burner_mine" or r not in ("iron-ore", "copper-ore", "stone"):
+        return None
+    n = max(2, min(10, int(site.params.get("count", 2))))
+    return {"do": "replace", "site": site.id, "force": True,
+            "with": {"do": "build", "module": "electric_mine", "resource": r, "count": n, "into": "furnace"}}
 
 
 REPAIRS = ("relink", "purge", "replace", "upgrade")   # repairs of one site (a bare "link" lays new links)
@@ -263,7 +297,9 @@ def surplus_block(crew, goal: dict) -> str | None:
     """Why a build that adds more of an item must wait: FULL_MIN_SITES producers of it already stand full, with
     nothing taking what they make. Run 20261121-140755: six ore-into-chest mines (12 drills) sat with full chests
     while more were ordered ("build electric_mine iron-ore into chest" four times). A replace is never held, and a
-    build held GATE_ESCAPE_MIN game minutes goes ahead."""
+    build held GATE_ESCAPE_MIN game minutes goes ahead. Full producers no link can start from (burner furnace
+    mines) never hold a build: when they are all there is, the build goes ahead and the swap alert
+    (assess.burner_swap_alerts) replaces them; when they stand beside linkable ones, the hint names their swap."""
     if goal.get("do") != "build" or goal.get("module") not in PRODUCER_KINDS:
         return None
     item = _product(goal["module"], goal)
@@ -282,10 +318,13 @@ def surplus_block(crew, goal: dict) -> str | None:
     if now - first >= GATE_ESCAPE_MIN:
         held.pop(key, None)
         return None
+    dead = [s for s in unlinkable_full(crew, item) if swap_goal(s) is not None]
+    swap = (f". Sites {[s.id for s in dead][:6]} stand full too but no belt can take from them (burner furnaces): "
+            f"replace them, e.g. {json.dumps(swap_goal(dead[0]))}" if dead else "")
     return (f"held back: {len(full)} sites that make {item} already stand full (sites "
             f"{sorted(s.id for s in full)[:8]}): nothing takes what they make, so another one would stand full too. "
-            f"Connect them to what needs {item} first (link, or a factory beside them)"
-            f"; asked again after {GATE_ESCAPE_MIN - (now - first):.0f} more game min it goes ahead")
+            f"Connect them to what needs {item} first (link, or a factory beside them)" + swap
+            + f"; asked again after {GATE_ESCAPE_MIN - (now - first):.0f} more game min it goes ahead")
 
 
 def consumer_block(crew, goal: dict) -> str | None:

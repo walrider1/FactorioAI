@@ -175,6 +175,8 @@ def _full_mine(crew, resource="iron-ore", into="chest", full=True):
     from brain.modules import Site
     s = Site("electric_mine", {"resource": resource, "count": 2, "into": into}, (0, 0))
     s.health = {"waiting_for_space_in_destination": 2} if full else {"working": 2}
+    out = resource if into == "chest" else {"iron-ore": "iron-plate", "copper-ore": "copper-plate"}.get(resource)
+    s.chests = [(0.5, 0.5, out)]                 # its output chest: a link can start here (nodes.linkable)
     return crew.base.add(s)
 
 

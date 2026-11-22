@@ -236,6 +236,7 @@ class Crew:
         budget = self.goal_budget(cur.get("goal") or {})
         if budget is None:
             return None
+        budget += float(cur.get("extra_min") or 0.0)     # feeder factories built first (_intermediates_first)
         mins = (self.w.now_tick() - cur.get("tick", self.w.now_tick())) / 3600
         if mins <= budget:
             return None
@@ -333,7 +334,11 @@ class Crew:
             new = goal.get("with") or {}
             if new.get("do") != "build":
                 raise BuildError("replace needs a build goal in 'with'")
-            built = self.build(new)                          # make before break: the old one runs meanwhile
+            before = {s.id for s in self.base.sites}
+            try:
+                built = self.build(new)                      # make before break: the old one runs meanwhile
+            except BuildError as exc:
+                raise BuildError(self._undo_replacement(new, before, old, exc)) from None
             return built + "; " + self.remove(old.id, force=False)
         if do == "design":
             return self.design(goal)
@@ -584,6 +589,52 @@ class Crew:
                          "more of the same, replace it with a bigger build of the same thing; otherwise build "
                          "elsewhere (force: true only if it really must go)")
 
+    def _undo_replacement(self, new: dict, before: set, old: Site, exc: Exception) -> str:
+        """A replace either completes or leaves the base as it was: the new site a failed build left standing (it
+        was added, then connect or a link raised; or its build stopped half-way as an "unfinished" site) comes
+        down again. Feeders and mines built first for it stay: they are useful to the old site too. Run
+        20261122-133537: "replace site 15" left site 22, a second unpowered red-science factory of 131 buildings,
+        next to site 15; both starved and later links were laid into the dead one. Returns the failure text."""
+        mod = str(new.get("module") or "")
+        keys = ("item", "resource")
+        mine = [s for s in self.base.sites if s.id not in before and s.kind in (mod, f"unfinished {mod}")
+                and all(s.params.get(k) == new.get(k) for k in keys if new.get(k) is not None)]
+        msg = str(exc)[:200]
+        for s in mine:
+            try:
+                self.remove(s.id, force=True)
+                msg += f"; the half-done replacement (site {s.id}) was taken down again, site {old.id} stays"
+            except BuildError as e2:
+                msg += f"; taking the failed replacement site {s.id} down failed too: {str(e2)[:80]}"
+        return msg
+
+    def stale_replace(self, goal: dict) -> str | None:
+        """Why a queued replace that moves a site (the same thing again elsewhere, ordered because its inputs could
+        not reach it or it had no power) is no longer needed, or None. Checked when it is about to start: every
+        port of the old site is fed now, it has power and no link into it is stuck. Upgrades (another module, e.g.
+        burner to electric), forced replaces and rebuilds of depleted mines are never dropped. Run 20261122-133537:
+        "relocate red science" was queued at minute 75 while a relink was running; the relink fed both ports, and
+        the replace still ran four minutes later and left a duplicate factory."""
+        if goal.get("do") != "replace" or goal.get("force") or goal.get("early"):
+            return None
+        site = self.base.get(goal.get("site"))
+        new = goal.get("with") or {}
+        if site is None or new.get("module") != site.kind:
+            return None
+        if any(new.get(k) is not None and new.get(k) != site.params.get(k) for k in ("item", "resource")):
+            return None
+        if _depleted(site) or site.kind.startswith("unfinished"):
+            return None
+        ports = [pt for pt in site.params.get("ports", []) if pt.get("item") or "pack" in pt]
+        if not ports or any(not (pt.get("fed") or pt.get("pack")) for pt in ports):
+            return None
+        if site.electric and (site.powered is False or site.health.get("no_power")):
+            return None
+        if self.inputs_stuck(site.id):
+            return None
+        return (f"site {site.id} no longer needs moving: all {len(ports)} of its input ports are fed and it has "
+                "power (fixed in place since the replace was queued)")
+
     SMALL_NEED_MAX = 20            # an item needed fewer times than this is made by the crew, not by a factory
     SMALL_NEED_DEFAULT = {"pump": 2}   # wanted in handfuls whatever asks: one per 200 tiles of a fluid line
 
@@ -685,6 +736,7 @@ class Crew:
         first = self._coal_first(mod.name, params)
         first += self._power_first(mod.name, params)
         first += self._fuel_first(mod.name, params)
+        first += self._intermediates_first(mod.name, params)     # feeders first: their plate mines count below
         first += self._plates_first(mod.name, params)
         if mod.name == "factory" and not params.get("supply_at"):
             spots = self.supply_spots(params)              # after plates first: its new rows count too
@@ -791,6 +843,59 @@ class Crew:
         return msg
 
     PLATE_ORE = {"iron-plate": "iron-ore", "copper-plate": "copper-ore"}
+    INTERMEDIATE_DEPTH = 2          # feeders of feeders at most (blue science: engines, then their gears)
+    FEEDER_HEADROOM = 1.15
+
+    def _intermediates_first(self, module: str, params: dict) -> str:
+        """A factory whose chain is split (Factory.inputs: over MAX_ASM assemblers) or that is asked to take gears,
+        circuits... through its ports gets the factories that make them first: one per input that has an assembler
+        recipe and is not a plate, sized to what the base does not already have spare. Each feeder is a full build
+        (its own plates and power first, its own feeders down to INTERMEDIATE_DEPTH). A feeder that cannot be built
+        fails this build too, naming the input: a factory with ports nothing can feed is a shell (run
+        20261122-133537: green science, 346 buildings in 26 minutes, 49 of 51 machines waiting on gears and
+        circuits the base made 22 and 0.4 a minute of). Returns a note."""
+        if module != "factory":
+            return ""
+        depth = int(getattr(self, "_intermediate_depth", 0) or 0)
+        if depth >= self.INTERMEDIATE_DEPTH:
+            return ""
+        fac = MODULES["factory"]
+        try:
+            supplied, pl = fac.supplied_for(self.kn, params)
+            from fab import recipes as fr
+            makeable = set(fac.can_make(self.kn))
+        except BuildError:
+            raise
+        except Exception:  # noqa: BLE001 - an estimate only: the design itself will say what is wrong
+            return ""
+        item = params.get("item")
+        todo = []
+        for it in sorted(supplied):
+            if it == item or it in self.PLATE_ORE or it not in fr.RECIPES or it not in makeable:
+                continue                      # plates: _plates_first; steel, plastic...: columns and workshops
+            want = float((getattr(pl, "supplied", None) or {}).get(it, 0))
+            if want <= 0:
+                continue
+            spare = self.spare_rate(it)
+            if want - spare > 0.5:
+                todo.append((it, want, spare))
+        notes = []
+        for it, want, spare in todo:
+            rate = round((want - spare) * self.FEEDER_HEADROOM, 1)
+            self.log(f"[crew] intermediates first: {item} takes {want:.0f} {it}/min, {spare:.0f}/min to spare: "
+                     f"a {rate}/min {it} factory first")
+            if self.current is not None:      # the goal in hand gets the feeder's time on top of its own budget
+                self.current["extra_min"] = float(self.current.get("extra_min") or 0.0) + \
+                    MODULE_BUDGET_MIN.get("factory", GOAL_BUDGET_MIN["build"])
+            self._intermediate_depth = depth + 1
+            try:
+                notes.append(self.build({"do": "build", "module": "factory", "item": it, "per_minute": rate}))
+            except BuildError as exc:
+                raise BuildError(f"not building {item}: its {it} input ({want:.0f}/min) has no supplier, and the "
+                                 f"{rate}/min {it} factory it needs first failed: {str(exc)[:160]}") from None
+            finally:
+                self._intermediate_depth = depth
+        return "".join(f"first {n}; " for n in notes)
 
     def _plates_first(self, module: str, params: dict) -> str:
         """A factory fed plates from outside gets the electric mines that feed it first: one mine chest per plate
@@ -1844,6 +1949,15 @@ class Crew:
         # Every group of the site's poles out of wire reach of the others (two pumpjacks on wells far apart,
         # cells between empty slots) is joined on its own: one bridge powers only the group it starts from.
         net = set(anchors)
+        try:                       # the game's word over our records: poles cut off from the grid are no anchor
+            net -= self._off_grid_anchors(site, anchors)
+        except BuildError:
+            pass
+        except ArenaError as exc:
+            if exc.code in DEAD_RUN:
+                raise
+        if not net:
+            net = set(anchors)
         path: list = []
         for group in sorted(_pole_groups(site.poles), key=lambda g: min(math.dist(a, q) for a in net for q in g)):
             if net & set(group):
@@ -1891,14 +2005,88 @@ class Crew:
             net |= set(group) | set(hop)
         time.sleep(1.0 / self.w.speed)                       # let the game update the machines' status
         site.powered = self.check_power(site) if site.electric or site.kind == "steam_power" else True
+        covered = 0
+        if not site.powered and site.kind != "steam_power":
+            covered = self._cover_unpowered(site)            # machines outside every pole's supply area
+            if covered:
+                time.sleep(1.0 / self.w.speed)
+                site.powered = self.check_power(site)
         if not site.powered:
             if site.kind == "steam_power":
                 raise BuildError(f"site {site.id}: placed {len(path)} pole(s) but the station is still not on the "
                                  "grid (an engine unplugged, or its poles on a network of their own)")
-            raise BuildError(f"site {site.id}: placed {len(path)} pole(s) but its machines still have no power")
+            grid = self.on_grid(site.poles)
+            raise BuildError(f"site {site.id}: placed {len(path)} pole(s)" + (f" and {covered} for uncovered machines"
+                                                                            if covered else "")
+                             + (" but its poles are on a network of their own (the game's network id differs from "
+                                "the grid's): no pole route from it reaches a pole that is on the grid"
+                                if grid is False else
+                                " and its poles are on the grid, but its machines still have no power: the grid "
+                                "itself has none to give (engines, boilers or their coal)" if grid is True else
+                                " but its machines still have no power"))
         extra = (f", plugged in {plugged} engine(s)" if plugged else "") + \
+            (f", {covered} pole(s) for machines no pole reached" if covered else "") + \
             (self.short_note() if site.kind != "steam_power" else "")
         return (f"powered with {len(path)} new pole(s)" if path else "powered over existing poles") + extra
+
+    def _off_grid_anchors(self, site: Site, anchors) -> set:
+        """Anchor poles near the site that the game puts on another network than the grid's first pole: our
+        records call their sites powered, but a pole taken up somewhere cut them off. Sites with such poles are
+        marked unpowered (the foreman's rewire connects them again). Run 20261122-133537: a relink took up a pole
+        that site 19's power ran through; four connects routed to the dead poles next door ("placed 0 pole(s) but
+        its machines still have no power") and the watchdog stalled for 15 minutes. Empty without network ids."""
+        grid = self.base.power_pole
+        if grid is None:
+            return set()
+        main = {n for n in self.pole_networks([grid]).values() if n is not None}
+        if not main:
+            return set()
+        c = site.centre
+        near = [tuple(a) for a in anchors if math.dist((a[0] + 0.5, a[1] + 0.5), c) <= 28]
+        if not near:
+            return set()
+        nets = self.pole_networks(near)
+        off = {a for a, n in nets.items() if n is not None and n not in main}
+        for s in self.base.sites:
+            if s is not site and s.powered and off & {tuple(q) for q in s.poles}:
+                s.powered = False
+                self.foreman.note(f"site {s.id}: its poles are cut off from the grid (another network id)")
+        return off
+
+    def _cover_unpowered(self, site: Site) -> int:
+        """A pole (and its bridge to the grid) for each of the site's machines that reports no power and that no
+        pole's supply area reaches (a pole taken up, a layout with a hole). Returns the poles placed."""
+        names = sorted({e[0] for e in site.entities if e[0] in ELECTRIC})
+        if not names:
+            return 0
+        try:
+            dark = [p for p, st in self.look(site, names).items() if st == "no_power"]
+        except BuildError:
+            return 0
+        placed = 0
+        for x, y in dark[:6]:
+            t = (math.floor(x), math.floor(y))
+            try:
+                plan = self._pole_plan(t)
+            except BuildError as exc:
+                self.foreman.note(f"site {site.id}: no pole for the machine at ({x}, {y}): {str(exc)[:80]}")
+                continue
+            if not plan:
+                continue                          # a pole reaches it: its network is the problem, not coverage
+            kit = Counter(kind for kind, _ in plan)
+            self.unlock_items(list(kit))
+            self.make_for(dict(kit))
+            self.w.recorder = site.entities
+            try:
+                for kind, q in plan:
+                    self.w.place(kind, q[0] + 0.5, q[1] + 0.5, "north", {q})
+                    site.poles.append(q)
+                    placed += 1
+            except BuildError as exc:
+                self.foreman.note(f"site {site.id}: a pole for the machine at ({x}, {y}) failed: {str(exc)[:80]}")
+            finally:
+                self.w.recorder = None
+        return placed
 
     def _line_pole(self, length: float) -> str:
         """Medium poles for a long line once their recipe is in and steel is at hand or made by our automation
@@ -3567,16 +3755,106 @@ class Crew:
                 pass
 
     def _unlink(self, rec: dict) -> None:
-        """Take a link up (its inserter, belts and poles back into the inventory) and forget it."""
+        """Take a link up (its inserter, belts and poles back into the inventory) and forget it. A pole of the link
+        that another site's power runs through stays standing and becomes that site's (run 20261122-133537: a
+        relink of site 15 took up a pole the 75/min iron line of site 19 was wired over; it stood dark for 25
+        game minutes). Sites near the poles that did come up are checked against the game's network after."""
         self._unregister(rec)
+        poles = [e for e in rec["entities"] if e[0] in POLES]
+        try:
+            keep = self._pole_bridges(poles, rec.get("to_site"))
+        except Exception as exc:  # noqa: BLE001 - a bookkeeping check never stops a link step
+            keep, _ = [], self.log(f"[crew] pole check failed: {str(exc)[:100]}")
+        rec["kept_poles"] = keep
         with self.w.step("remove"):
-            self._undo(rec["entities"])
+            self._undo([e for e in rec["entities"] if e not in keep])
+        taken = [e for e in poles if e not in keep]
+        if taken:
+            self._recheck_power_near([(e[1], e[2]) for e in taken])
+
+    WIRE_REACH = 7.5               # a small pole's wire (the shortest kind: a cut is never missed)
+
+    def _pole_bridges(self, poles: list, own_site=None) -> list:
+        """Of a link's poles about to be taken up, those some other site's power runs through: without them a pole
+        of that site loses every wire path (as far as the poles we know go) to the grid's first pole. Returns the
+        poles to leave standing, each added to the nearest site it powers."""
+        grid = self.base.power_pole
+        if grid is None or not poles:
+            return []
+        tile = lambda e: (math.floor(e[1]), math.floor(e[2]))
+        mine = {tile(e): e for e in poles}
+        nodes = set(self.existing_poles()) | {tuple(grid)}
+        owners = {}
+        for s in self.base.sites:
+            if str(s.id) == str(own_site):
+                continue
+            for q in s.poles:
+                owners.setdefault(tuple(q), s)
+        nodes |= set(owners)
+
+        def reached(ns: set) -> set:
+            start = tuple(grid)
+            if start not in ns:
+                return set()
+            seen, stack = {start}, [start]
+            while stack:
+                p = stack.pop()
+                for q in ns:
+                    if q not in seen and abs(q[0] - p[0]) <= self.WIRE_REACH and abs(q[1] - p[1]) <= self.WIRE_REACH \
+                            and math.dist(p, q) <= self.WIRE_REACH:
+                        seen.add(q)
+                        stack.append(q)
+            return seen
+
+        before = reached(nodes)
+        base_ns = nodes - set(mine)
+        lost = lambda ns: {q for q in owners if q in before and q not in reached(ns)}
+        cut = lost(base_ns)
+        if not cut:
+            return []
+        hurt = {id(owners[q]): owners[q] for q in cut}      # the sites whose power runs through these poles
+        keep: list = []
+        ns = set(base_ns)
+        for t in sorted(mine, key=lambda t: min(math.dist(t, q) for q in cut)):
+            ns.add(t)
+            keep.append(mine[t])
+            cut = lost(ns)
+            if not cut:
+                break
+        for e in keep:                            # it is that site's pole now: removals and routes count it
+            t = tile(e)
+            s = min(hurt.values(), key=lambda s: min(math.dist(tuple(q), t) for q in s.poles), default=None)
+            if s is not None:
+                s.poles.append(t)
+                s.entities.append(tuple(e))
+                self.log(f"[crew] the link's pole at {t} stays: site {s.id}'s power runs through it")
+        return keep
+
+    def _recheck_power_near(self, spots: list, radius: float = 10.0) -> None:
+        """After poles came up: sites with poles within `radius` of them that the game now puts off the grid are
+        marked unpowered and get a connect goal (the foreman's rewire does the same within minutes)."""
+        for s in self.base.sites:
+            if not s.powered or not s.poles or s.kind == "poles":
+                continue
+            if not any(math.dist((q[0] + 0.5, q[1] + 0.5), p) <= radius for q in s.poles for p in spots):
+                continue
+            try:
+                og = self.on_grid(s.poles)
+            except BuildError:
+                continue
+            if og is False:
+                s.powered = False
+                self.foreman.note(f"site {s.id}: cut off from the grid after poles were taken up nearby")
+                g = {"do": "connect", "site": s.id, "reflex": "rules: power cut by a pole taken up nearby"}
+                if not any(q.get("do") == "connect" and q.get("site") == s.id for q in self.urgent):
+                    self.urgent.insert(0, g)
 
     def _restore(self, rec: dict) -> None:
         """Put a taken-up link back exactly where it was."""
         from . import belts
         ins, facing, ins_kind = rec["ins"] or (None, None, None)     # a trunk has no inserter
-        poles = [e for e in rec["entities"] if e[0] in POLES]
+        stayed = rec.get("kept_poles") or []           # still standing (another site's power runs through them)
+        poles = [e for e in rec["entities"] if e[0] in POLES and e not in stayed]
         need = belts.count(rec["steps"])
         ents: list = []
         try:
@@ -4493,6 +4771,15 @@ class Crew:
         return [(x, y) for x, y, _ in site.plate_furnaces]
 
 
+def heal_powered(s: Site) -> None:
+    """A site the records call unpowered whose machines the game shows with power (later poles reached them) is
+    powered again: the records and the alerts heal, and the rewire stops connecting it (run 20261122-133537: sites
+    19 and 22 ran again over other builds' poles and still read unpowered, so connect after connect failed)."""
+    h = s.health or {}
+    if s.powered is False and s.electric and s.kind != "steam_power" and sum(h.values()) and not h.get("no_power"):
+        s.powered = True
+
+
 def _pole_groups(poles, reach: float = 7.0) -> list[list[tuple[int, int]]]:
     """A site's poles split into groups that wire to each other (small pole reach 7.5)."""
     left = [tuple(p) for p in dict.fromkeys(tuple(q) for q in poles)]
@@ -4805,6 +5092,8 @@ class Foreman:
             s.census = {n: dict(c) for n, c in census.items()}     # by building: which ones stand still
             if health.get("no_power") and s.powered is not False and health["no_power"] == sum(health.values()):
                 s.powered = False
+            else:
+                heal_powered(s)
             if s.kind == "steam_power" and health.get(UNPLUGGED) and s.powered:
                 s.powered = False                         # an engine powers nothing: _rewire plugs it in
             if _depleted(s):

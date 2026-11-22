@@ -311,6 +311,84 @@ def drop_forbidden(crew, queue: list[dict]) -> list[str]:
     return [_short(g) for g in out]
 
 
+CARRY_TAGS = ("overseer", "fixer", "close-out")    # goals someone asked for on purpose: a new plan keeps them
+
+
+def trigger_cleared(crew, g: dict) -> str | None:
+    """Why a queued goal has nothing left to do, or None: its site is gone, a connect whose site has power, a
+    stock already on hand, a replace whose old site is fine where it stands (Crew.stale_replace)."""
+    do, site_id = g.get("do"), g.get("site")
+    base = getattr(crew, "base", None)
+    site = base.get(site_id) if base is not None and site_id is not None else None
+    if site_id is not None and base is not None and site is None and do in ("remove", "replace", "connect", "relink",
+                                                                            "purge", "upgrade", "repair", "feed"):
+        return f"site {site_id} is gone"
+    if do == "connect" and site is not None and site.powered and not site.health.get("no_power"):
+        return f"site {site_id} has power"
+    if do == "stock" and g.get("item"):
+        try:
+            if crew.w.inventory.get(g["item"], 0) >= int(g.get("count", 1)):
+                return f"{g['item']} already on hand"
+        except Exception:  # noqa: BLE001 - stub crews
+            pass
+    if do == "replace" and hasattr(crew, "stale_replace"):
+        try:
+            return crew.stale_replace(g)
+        except Exception:  # noqa: BLE001
+            return None
+    return None
+
+
+def carry_over(crew, old: list[dict], new: list[dict], where: str,
+               event=lambda kind, **data: None) -> list[str]:
+    """A new plan replaces the plan queue: goals of the old one that the overseer, the fixer or the close-out
+    queued, and that the new plan does not cover (same goal, or the same target), go on at its end (in place,
+    up to PLAN_MAX), unless forbidden now or their trigger cleared. Every other goal of the old queue that is
+    not in the new one gets a "dropped" event with the reason, so a review sees drops directly. Run
+    20261122-133537: "stock small-electric-pole" was asked four times and never ran (two strategist plans
+    replaced the queue under it); the overseer's own plan was gone eight minutes later. Returns what was kept."""
+    covered = {_bare(g) for g in new} | {same_target(g) for g in new}
+    busy = {same_target(g) for g in getattr(crew, "urgent", [])} | (
+        {same_target(crew.current["goal"])} if getattr(crew, "current", None) else set())
+    keep, gone = [], []
+    seen = set()
+    for g in old:
+        if not isinstance(g, dict) or g.get("do") == "wait":
+            continue
+        if _bare(g) in covered or same_target(g) in covered or same_target(g) in busy or _bare(g) in seen:
+            continue                                    # the new plan (or a queued fix) does it: nothing lost
+        seen.add(_bare(g))
+        tagged = str(g.get("reflex", "")).startswith(CARRY_TAGS) or \
+            _bare(g) in (getattr(crew, "carry_keys", None) or set())
+        f = forbidden(crew, g)
+        cleared = trigger_cleared(crew, g)
+        if f is not None:
+            gone.append((g, f"forbidden by the overseer: {f.get('why', '')}"[:120]))
+        elif cleared:
+            gone.append((g, f"nothing left to do: {cleared}"[:160]))
+        elif tagged:
+            keep.append(g)
+        else:
+            gone.append((g, "not in the new plan"))
+    room = max(0, PLAN_MAX - len(new))
+    gone += [(g, "the new plan is full") for g in keep[room:]]
+    keep = keep[:room]
+    new.extend(keep)
+    if getattr(crew, "carry_keys", None):              # remembered only while still queued
+        live = {_bare(g) for g in new}
+        crew.carry_keys = {k for k in crew.carry_keys if k in live}
+    for g, why in gone:
+        event("dropped", goal=_short(g), why=why, where=where)
+    return [_short(g) for g in keep]
+
+
+def note_dropped(goals: list[dict], why: str, where: str, event=lambda kind, **data: None) -> None:
+    """A "dropped" event for every real goal taken out of a queue (waits aside)."""
+    for g in goals:
+        if isinstance(g, dict) and g.get("do") != "wait":
+            event("dropped", goal=_short(g), why=why[:160], where=where)
+
+
 def _closeout_match(crew, match: dict) -> dict | None:
     """The close-out goal a forbid would block (None: none). The close-out is the tier's own supply."""
     for g in getattr(crew, "closeout_queue", []) + ([crew.current["goal"]] if crew.current and str(
@@ -366,10 +444,14 @@ def apply_orders(crew, d: dict, log=print, event=lambda kind, **data: None) -> l
         n = len(crew.urgent) - len(kept)                     # clearing them left two iron rows without coal and
         if n:                                                # the next goal waited 20 minutes for plates)
             changed.append(f"dropped {n} queued fix(es)" + (f", kept {len(kept)} fuel/power fix(es)" if kept else ""))
+        note_dropped([g for g in crew.urgent if not is_rules(g)], f"the overseer cleared the fixes: {note}",
+                     "overseer clear_urgent", event)
         crew.urgent[:] = kept
     taken = drop_forbidden(crew, crew.urgent) + drop_forbidden(crew, crew.plan_queue)
     if taken:
         changed.append(f"forbidden, taken out of the queues: {taken}")
+        for t in taken:
+            event("dropped", goal=t, why="forbidden by the overseer", where="overseer forbid")
     busy = {_bare(g) for g in crew.urgent} | ({_bare(crew.current["goal"])} if crew.current else set())
     orders = []
     for g in (d.get("orders") or []):
@@ -394,10 +476,15 @@ def apply_orders(crew, d: dict, log=print, event=lambda kind, **data: None) -> l
         changed.append("plan kept: no plan_why given")
     elif isinstance(plan, list):
         goals = [g for g in plan if isinstance(g, dict) and g.get("do") in GOAL_DOS][:PLAN_MAX]
+        drop_forbidden(crew, goals)
+        # remembered by key (not tagged: an untagged goal is the plan's own, which pauses and ages as such), so
+        # a strategist plan after this one keeps what it does not cover
+        crew.carry_keys = set(getattr(crew, "carry_keys", None) or set()) | {_bare(g) for g in goals}
+        kept = carry_over(crew, list(crew.plan_queue), goals, "overseer plan", event)
         crew.plan_queue[:] = goals                      # the main loop's own queue (the same list)
-        drop_forbidden(crew, crew.plan_queue)
         crew.overseer_plan_tick = now                   # a strategist plan asked for before this is stale
-        changed.append(f"new plan ({str(d['plan_why'])[:80]}): {[_short(g) for g in goals]}")
+        changed.append(f"new plan ({str(d['plan_why'])[:80]}): {[_short(g) for g in goals]}"
+                       + (f"; kept from the old queue: {kept}" if kept else ""))
     if d.get("priority") is not None and isinstance(d["priority"], list):
         crew.foreman.priority = [str(x) for x in d["priority"]][:8]
         changed.append(f"priority {crew.foreman.priority}")

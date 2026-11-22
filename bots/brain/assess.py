@@ -31,7 +31,7 @@ from typing import Any
 
 FUELS = ("coal", "wood")
 CRITICAL = ("coal", "boiler", "power", "fuel", "pipe", "belt-foreign", "gap-")   # keys the rule floor fixes itself
-SOON = ("rebuild-",)            # keys it queues by itself without pausing the goal in hand (planned, not urgent)
+SOON = ("rebuild-", "swap-")    # keys it queues by itself without pausing the goal in hand (planned, not urgent)
 GOAL_DOS = ("build", "research", "stock", "remove", "replace", "connect", "feed", "priority", "wait",
             "link", "link_science", "scout", "upgrade", "repair", "repipe", "relink", "purge", "trunk")
 LONG_GOAL_MIN = 8.0
@@ -328,6 +328,43 @@ def rebuild_alerts(crew) -> list[dict]:
     return out
 
 
+SWAP_PLATES = ("iron-plate", "copper-plate", "stone-brick")
+
+
+def burner_swap_alerts(crew) -> list[dict]:
+    """A plate the base makes less of than its ports want (or whose ports starve with no source), while burner
+    mines of it stand full: their plates sit in stone furnaces no belt can take from, so the fix is electric
+    drills in their place (nodes.swap_goal), one site per plate at a time, oldest first. Never held by the gate
+    (a replace). Run 20261122-133537: copper at 38/min for red science and circuits, two burner copper mines full
+    for an hour, and the gate held every new copper mine back because of them."""
+    if not electric_coal(crew):
+        return []
+    try:
+        from .nodes import starving, swap_goal, unlinkable_full
+        ports = crew.item_ports()
+        hungry = starving(crew)
+    except Exception:  # noqa: BLE001 - stub crews in tests
+        return []
+    items = (getattr(crew.w, "stats", None) or {}).get("items") or {}
+    out = []
+    for plate in SWAP_PLATES:
+        want = sum(float(pt.get("per_minute") or 0) for _, pt in ports if pt.get("item") == plate)
+        made = float((items.get(plate) or {}).get("made_per_min") or 0)
+        if want <= 0 or (made >= want and plate not in hungry):
+            continue
+        dead = [s for s in unlinkable_full(crew, plate) if swap_goal(s) is not None]
+        if not dead:
+            continue
+        s = dead[0]
+        out.append({"level": "urgent", "key": f"swap-{s.id}",
+                    "what": f"{plate}: made {made:.0f}/min, its ports want {want:.0f}/min"
+                            + (f" ({len(hungry[plate])} port(s) with no source)" if plate in hungry else "")
+                            + f"; burner mine site {s.id} stands full with its plates in stone furnaces no belt can "
+                              "take from: electric drills go in its place (built first), then it comes down",
+                    "fix": swap_goal(s)})
+    return out
+
+
 def _diagnoses(crew) -> list[dict]:
     try:
         from .triage import diagnoses
@@ -417,6 +454,7 @@ def detect(crew) -> list[dict]:
     out += depleted_alerts(crew)
     out += rebuild_soon_alerts(crew)
     out += rebuild_alerts(crew)
+    out += burner_swap_alerts(crew)
     for s in crew.coal_mines():
         dry = s.health.get("no_fuel", 0)
         if dry:

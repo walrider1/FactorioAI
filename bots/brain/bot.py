@@ -33,7 +33,7 @@ from .fixer import RuleFixer, apply as apply_fixes, situation as fix_situation  
 from .knowledge import Knowledge  # noqa: E402
 from .modules import MODULES  # noqa: E402
 from .nodes import consumer_block  # noqa: E402
-from .overseer import drop_forbidden, forbidden, same_target  # noqa: E402
+from .overseer import carry_over, drop_forbidden, forbidden, note_dropped, same_target  # noqa: E402
 from . import persist, upkeep  # noqa: E402
 from .telemetry import Telemetry  # noqa: E402
 from .watchdog import Watchdog  # noqa: E402
@@ -80,6 +80,7 @@ def play(run: Run, client: ArenaClient, task: dict, strategist=None, log=print, 
     pool = ThreadPoolExecutor(max_workers=1)
     pending: Future | None = None
     goals: list[dict] = []
+    parked: list[dict] = []                     # the queue set aside for a replan: carry_over sorts it
     results: list[dict] = []
     seen_milestones: set[str] = set()
     last_plan_tick = -1e9
@@ -145,7 +146,7 @@ def play(run: Run, client: ArenaClient, task: dict, strategist=None, log=print, 
                      "loop": {"goals": goals, "results": results, "notes": notes,
                               "seen_milestones": seen_milestones, "fails_in_row": fails_in_row,
                               "alerted": alerted, "resume": resume, "jams": jams, "skipped": skipped,
-                              "consulted": consulted}}
+                              "consulted": consulted, "parked": parked}}
             summary = {"kind": kind, "minute": round(minute, 1), "milestones": sorted(world.milestones),
                        "sites": len(crew.base.sites), "researched": len(kn.researched),
                        "goal_queue": [_short(g) for g in goals[:6]]}
@@ -163,6 +164,7 @@ def play(run: Run, client: ArenaClient, task: dict, strategist=None, log=print, 
         name, data = got
         loop = persist.restore(data, crew, world, strategist, sup, dog)
         goals, results, notes = loop.get("goals", []), loop.get("results", []), loop.get("notes", [])
+        parked = list(loop.get("parked", []))
         seen_milestones = set(loop.get("seen_milestones", set()))
         alerted, jams = set(loop.get("alerted", set())), dict(loop.get("jams", {}))
         skipped, consulted = dict(loop.get("skipped", {})), set(loop.get("consulted", set()))
@@ -224,9 +226,11 @@ def play(run: Run, client: ArenaClient, task: dict, strategist=None, log=print, 
             return queued
         if action == "refresh":
             crew.refresh_world()
+            note_dropped(queued, f"watchdog {action}: no progress", "watchdog", tel.event)
             return []                                   # drop the stale plan; the replan below sees the stall
         if action == "switch":
             other = book if strategist is not book and not isinstance(strategist, ScriptedStrategist) else None
+            note_dropped(queued, f"watchdog {action}: no progress", "watchdog", tel.event)
             if other is not None:
                 plan = other.plan(safe_report())
                 log(f"[watchdog] the opening book takes over for one plan: {plan.get('note')}")
@@ -306,10 +310,17 @@ def play(run: Run, client: ArenaClient, task: dict, strategist=None, log=print, 
                 if crew.overseer_plan_tick > last_plan_tick:    # asked before the overseer replaced the plan
                     log("[brain] this plan was asked for before the overseer's plan: keeping the overseer's")
                 else:
+                    old_goals = list(goals) + parked
+                    parked = []
                     goals = list(plan.get("goals") or [])
                     banned_now = drop_forbidden(crew, goals)    # never left waiting in the queue: the assessor
                     if banned_now:                              # asked for replan after replan to clear them
                         log(f"[brain] forbidden by the overseer, left out of the plan: {banned_now}")
+                        for t in banned_now:
+                            tel.event("dropped", goal=t, why="forbidden by the overseer", where="strategist plan")
+                    kept = carry_over(crew, old_goals, goals, "strategist plan", tel.event)
+                    if kept:                                    # the overseer's, the fixer's, the close-out's own
+                        log(f"[brain] kept from the old queue (the new plan does not cover them): {kept}")
                     goals = goals or [{"do": "wait", "seconds": 30}]
                 if resume is not None and forbidden(crew, resume) is not None:
                     resume = None                       # forbidden since it was paused: it does not come back
@@ -344,6 +355,15 @@ def play(run: Run, client: ArenaClient, task: dict, strategist=None, log=print, 
             if held is not None:                        # its item's factories already starve: not a failure either
                 results.append({"goal": goal, "ok": False, "game_minutes": 0, "result": held[:400]})
                 tel.event("gate", goal=_short(goal), why=held[:200])
+                continue
+            try:                                        # a move ordered for a cause that is gone by now
+                stale = crew.stale_replace(goal)
+            except Exception as exc:  # noqa: BLE001 - a bug in the check never stops the run
+                stale, _ = None, crew.log(f"[bot] stale-replace check failed: {str(exc)[:120]}")
+            if stale is not None:
+                results.append({"goal": goal, "ok": True, "game_minutes": 0, "result": f"dropped: {stale}"[:300]})
+                tel.event("dropped", goal=_short(goal), why=stale[:200], where="goal start")
+                log(f"[bot] {_short(goal)} dropped: {stale}")
                 continue
             crew.plan_queue = goals
             if goal == resume:
@@ -467,6 +487,9 @@ def play(run: Run, client: ArenaClient, task: dict, strategist=None, log=print, 
                     fixes = upkeep.closeout(crew, why_close)
                     queued = {same_target(g) for g in crew.urgent}     # a job someone already queued is not
                     fixes = [g for g in fixes if same_target(g) not in queued and forbidden(crew, g) is None]
+                    # the last close-out's goals that never ran (fixes and the plan went first) stay, unless this
+                    # one covers them (run 20261122-133537: the minute-61 burner swaps vanished at minute 124)
+                    carry_over(crew, list(crew.closeout_queue), fixes, "close-out", tel.event)
                     crew.closeout_queue = fixes                        # queued twice (run 20261120-092648)
                     log(f"[bot] close-out ({why_close}): {[_short(g) for g in fixes]}")
                     tel.event("closeout", why=why_close, goals=[_short(g) for g in fixes])
@@ -490,7 +513,8 @@ def play(run: Run, client: ArenaClient, task: dict, strategist=None, log=print, 
                       or world.now_tick() - last_plan_tick > replan_minutes * 3600)
             if replan and pending is None:
                 if fails_in_row >= 2:
-                    goals = []                          # the plan went wrong: ask before doing more of it
+                    parked = parked + list(goals)       # the plan went wrong: ask before doing more of it (what
+                    goals = []                          # was asked for on purpose comes back with the new plan)
                 reason = ("two failures in a row" if fails_in_row >= 2 else "milestone reached" if new
                           else f"alert: {fresh[0]['what'][:100]}" if fresh else f"supervisor: {why}" if why
                           else "goals ran out" if not goals else "regular check-in")

@@ -54,9 +54,21 @@ SILO_KIT = {"steel-plate": 1000, "concrete": 1000, "processing-unit": 200, "elec
 CRUDE_PER_PUMPJACK = 300.0                       # a careful guess: fresh wells give 300-600 a minute
 
 
-def pack_rate(crew, pack: str) -> float:
+def planned_rate(crew, pack: str) -> float:
+    """What the factories and cells built for an item were sized for (nominal: they may starve)."""
     fac = sum(float(s.params.get("per_minute", 0)) for s in crew.base.of("factory") if s.params.get("item") == pack)
     return round(fac + crew.cell_rate(pack), 1)
+
+
+def pack_rate(crew, pack: str) -> float:
+    """What the base really makes of an item a minute: the game's production statistics (the same window as the
+    report's rates). Stages and the close-out go by this, so a starving factory is no "done" stage (run
+    20261122-133537: the roadmap said red and green "done, 30/min" at a measured 6.6 and 0, and moved on to oil).
+    Without statistics at all (no game read yet) the planned rate stands in."""
+    items = (getattr(crew.w, "stats", None) or {}).get("items")
+    if not items:
+        return planned_rate(crew, pack)
+    return round(float((items.get(pack) or {}).get("made_per_min") or 0), 1)
 
 
 def plate_supply(crew) -> dict[str, float]:
@@ -107,8 +119,14 @@ def roadmap(crew) -> dict:
             packs[k] = packs.get(k, 0) + v
         secs += kn.research_seconds(t, 1)
     targets = rate_targets(crew)
-    science = {p: {"made_per_min": pack_rate(crew, p), "target": targets[p], "unlocked": PACK_TECH[p] in researched}
+    science = {p: {"made_per_min": pack_rate(crew, p), "planned_per_min": planned_rate(crew, p),
+                   "target": targets[p], "unlocked": PACK_TECH[p] in researched}
                for p in SCIENCE_RATE}
+
+    def made(p: str) -> str:                                # measured, and what was built for it beside it
+        s = science[p]
+        return f"{s['made_per_min']}/min" + (f" of {s['planned_per_min']} planned"
+                                             if abs(s["planned_per_min"] - s["made_per_min"]) >= 0.5 else "")
     slowest = None
     for p, left in packs.items():
         rate = science.get(p, {}).get("made_per_min") or 0
@@ -130,19 +148,19 @@ def roadmap(crew) -> dict:
         st("Power and labs", base.of("steam_power") and base.of("labs"),
            f"{power['stations']} steam stations, {labs} labs"),
         st("Red science automated", science["automation-science-pack"]["made_per_min"] >= auto("automation-science-pack", 5),
-           f"{science['automation-science-pack']['made_per_min']}/min"),
+           made("automation-science-pack")),
         st("Green science automated", science["logistic-science-pack"]["made_per_min"] >= auto("logistic-science-pack", 5),
-           f"{science['logistic-science-pack']['made_per_min']}/min"),
+           made("logistic-science-pack")),
         st("Workshop floor and electric mines", base.of("workshop") and base.of("electric_mine"),
            f"{len(crew.cells())} cells, {len(base.of('electric_mine'))} electric mines"),
         st("Oil: pumpjacks and a refinery", oil and any(c["machine"] == "oil-refinery" for _, c in crew.cells()),
            f"{base.count('pumpjack')} pumpjacks"),
         st("Blue science automated", science["chemical-science-pack"]["made_per_min"] >= auto("chemical-science-pack", 5),
-           f"{science['chemical-science-pack']['made_per_min']}/min"),
+           made("chemical-science-pack")),
         st("Purple science automated", science["production-science-pack"]["made_per_min"] >= auto("production-science-pack", 3),
-           f"{science['production-science-pack']['made_per_min']}/min"),
+           made("production-science-pack")),
         st("Yellow science automated", science["utility-science-pack"]["made_per_min"] >= auto("utility-science-pack", 3),
-           f"{science['utility-science-pack']['made_per_min']}/min"),
+           made("utility-science-pack")),
         st("Rocket silo researched", "rocket-silo" in researched,
            f"{len(path)} technologies left" if path else "researched"),
         st("Silo built", bool(silo), ""),
@@ -274,10 +292,13 @@ def next_step(crew, science: dict, power: dict, path: list[str]) -> dict | None:
         return {"do": "build", "module": "research_station", "count": max(2, min(10, LABS_TARGET - base.count("labs")))}
     # science, then other items with a rate milestone ahead (plastic): each once it is unlocked, at its target
     targets = rate_targets(crew)
-    rated = {**science, **{it: {"made_per_min": pack_rate(crew, it), "target": r, "unlocked": it in kn.unlocked}
+    # what to BUILD goes by what was built (planned): a factory that starves needs its inputs, not a twin (the
+    # stages and the close-out go by the measured rate)
+    rated = {**science, **{it: {"planned_per_min": planned_rate(crew, it), "target": r, "unlocked": it in kn.unlocked}
                            for it, r in targets.items() if it not in science}}
     for pack, info in rated.items():
-        if not info["unlocked"] or info["made_per_min"] >= info["target"] * RATE_DONE:
+        built = info.get("planned_per_min", info.get("made_per_min", 0.0))
+        if not info["unlocked"] or built >= info["target"] * RATE_DONE:
             continue
         if pack in FLUID_ITEMS and not base.of("pumpjack"):
             if getattr(crew.w, "oil_rings", 0) >= getattr(crew.w, "OIL_MAX_RINGS", 99):
@@ -288,7 +309,7 @@ def next_step(crew, science: dict, power: dict, path: list[str]) -> dict | None:
         from .modules import MODULES
         module = "factory" if pack in MODULES["factory"].can_make(crew.kn) else "workshop"
         return {"do": "build", "module": module, "item": pack,
-                "per_minute": round(info["target"] - info["made_per_min"], 1)}
+                "per_minute": round(info["target"] - built, 1)}
     if "rocket-silo" not in researched:
         nxt = next((t for t in path if t not in researched), None)
         return {"do": "research", "tech": "rocket-silo"} if nxt and not (crew.w.research or {}).get("current") else None

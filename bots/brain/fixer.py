@@ -193,6 +193,8 @@ def apply(crew, fixes: list[dict], goals: list[dict], skipped: dict[str, float],
                 done.append(crew.remove(f.get("site"), force=bool(f.get("force"))))
             elif kind == "retry" and isinstance(f.get("goal"), dict) and f["goal"].get("do"):
                 goals.insert(0, f["goal"])
+                from .overseer import _bare            # a new plan keeps it unless it covers it (carry_over)
+                crew.carry_keys = (set(getattr(crew, "carry_keys", None) or set()) | {_bare(f["goal"])})
                 done.append(f"retry queued: {json.dumps(f['goal'])[:120]}")
             elif kind == "skip":
                 skipped[key] = w.now_tick() + float(f.get("minutes", 15)) * 3600
