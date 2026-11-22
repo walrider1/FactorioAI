@@ -58,6 +58,8 @@ GOAL_HELP = """Goals you may give (JSON objects, done in order by the crew):
                                                     most. Only helps a site that waits on its machines
 - {"do": "repair", "site": <id>}                     place the pipes a build could not (the pipe-gap alert names
                                                     them): fluid stops at a gap
+- {"do": "repipe", "site": <id>}                     pipe a workshop machine's right connection (the pipe-ports
+                                                    alert names it): a fluid on the wrong one never flows
 - {"do": "scout", "resource": "<ore>"}                walk out in rings until a patch of the ore nobody works yet
                                                     is known (for an outpost; see ore_outlook). For crude-oil it
                                                     reports the known fields (base_status.oil) and walks only
@@ -596,7 +598,7 @@ class LLMStrategist:
             out = {}
         goals = [g for g in out.get("goals") or [] if isinstance(g, dict) and g.get("do") in
                  ("build", "research", "stock", "remove", "replace", "connect", "design", "wait", "feed",
-                  "priority", "link", "link_science", "relink", "upgrade", "scout", "repair", "purge", "trunk")][:6]
+                  "priority", "link", "link_science", "relink", "upgrade", "scout", "repair", "repipe", "purge", "trunk")][:6]
         if out.get("doctrine"):
             self.doctrine = str(out["doctrine"])[:800]
         plan = {"note": str(out.get("note", ""))[:300], "doctrine": self.doctrine, "goals": goals,

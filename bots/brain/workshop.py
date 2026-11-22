@@ -701,6 +701,46 @@ class Workshop(Module):
         d.pumpjacks_joined = {p for p in d.pumpjacks_joined
                               if any(abs(t[0] + 0.5 - p[0]) <= 3 and abs(t[1] + 0.5 - p[1]) <= 3 for t in crude)}
 
+    def misports(self, w: FreeWorld, site) -> list[dict]:
+        """Ports of a workshop's machines whose fluid is not what the floor was piped for: the floor reserved each
+        port target for the fluid its box was thought to carry; a box the game assigns otherwise (a recipe's
+        fluidbox_index, knowledge.FLUIDBOX_INDEX) leaves the pipe on a connection the fluid never takes."""
+        out = []
+        floors = {f.idx: f for f in (self.floors or [self.district]) if f is not None}
+        for c in getattr(site, "cells", []) or []:
+            d = floors.get(c.get("floor", getattr(self.district, "idx", None)))
+            if d is None or not c.get("recipe"):
+                continue
+            slots = w.kn.fluid_slots(c["machine"], c["recipe"])
+            for pt in w.kn.ports(c["machine"], c["x"], c["y"], "north"):
+                t, fl = tuple(pt["target"]), slots.get(pt["box"], "")
+                if t in d.nets.reserved and d.nets.reserved[t] != fl:
+                    out.append({"floor": d, "target": t, "fluid": fl, "was": d.nets.reserved[t],
+                                "machine": c["machine"]})
+        return out
+
+    def repipe_plan(self, w: FreeWorld, site) -> list[list]:
+        """Pipes that join each mis-piped port to its fluid's net, as pipe gaps for Crew.repair (it places them).
+        The floor's books take the right fluids first; the old pipe stays on the box the recipe leaves unused."""
+        bad = self.misports(w, site)
+        for b in bad:
+            b["floor"].nets.reserved[b["target"]] = b["fluid"]
+        gaps: list[list] = []
+        for b in bad:
+            d, fl, t = b["floor"], b["fluid"], b["target"]
+            if not fl or t in d.nets.tiles(fl):
+                continue
+            if not d.nets.tiles(fl):
+                raise BuildError(f"site {site.id}: no {fl} pipe on its floor to join {t} to")
+            steps = route(d.nets, fl, t, lambda q: w.free({q}), margin=16)
+            if steps is None:
+                raise BuildError(f"site {site.id}: no pipe route from its {b['machine']}'s {fl} connection at {t} to "
+                                 f"the {fl} line (the tiles around it are taken)")
+            d.nets.commit(fl, steps)
+            gaps += [[fl, s[0], list(s[1]), s[2] if len(s) > 2 else "north"] for s in steps]
+        self.designs.clear()
+        return gaps
+
     def _pumpjack_ports(self, w: FreeWorld, base, d: District) -> list[Tile]:
         out = []
         for s in base.of("pumpjack"):

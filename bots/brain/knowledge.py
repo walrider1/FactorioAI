@@ -217,22 +217,34 @@ class Knowledge:
                             "filter": box.get("filter"), "inside": inside, "target": (inside[0] + vx, inside[1] + vy)})
         return out
 
+    # A recipe fluid's fluidbox_index (the n-th input or output box of its machine), which the catalog leaves out.
+    # Read from the stock game's prototypes (2.1.24): basic oil processing takes crude in the refinery's SECOND
+    # input and gives petroleum from its THIRD output, where advanced processing has them. Run 20261121-140755
+    # piped crude into the first input (water's): the refinery never ran and both pumpjacks backed up for hours.
+    FLUIDBOX_INDEX = {"basic-oil-processing": {"crude-oil": 2, "petroleum-gas": 3}}
+
     def fluid_slots(self, entity: str, recipe: str | None) -> dict[int, str]:
-        """Which fluid each fluid box carries: input boxes take the recipe's fluid ingredients in order, output
-        boxes its fluid products in order (the game's rule); fixed filters (boilers, pumps) win."""
+        """Which fluid each fluid box carries: a fluid with a fluidbox_index takes that input/output box (counted
+        among the machine's inputs or outputs from 1), the rest take the remaining boxes in order (the game's
+        rule); fixed filters (boilers, pumps) win."""
         boxes = (self.entities.get(entity) or {}).get("fluid_ports") or []
         out = {b["index"]: b["filter"] for b in boxes if b.get("filter")}
         if recipe and recipe in self.recipes:
             r = self.recipes[recipe]
-            ins = [i["name"] for i in r["ingredients"] if i["type"] == "fluid"]
-            outs = [p["name"] for p in r["products"] if p["type"] == "fluid"]
-            for b in boxes:
-                if b["index"] in out:
-                    continue
-                if b.get("production") == "input" and ins:
-                    out[b["index"]] = ins.pop(0)
-                elif b.get("production") == "output" and outs:
-                    out[b["index"]] = outs.pop(0)
+            fixed = self.FLUIDBOX_INDEX.get(recipe, {})
+            for kind, prod in (("ingredients", "input"), ("products", "output")):
+                fluids = [(x["name"], x.get("fluidbox_index") or fixed.get(x["name"]))
+                          for x in r[kind] if x["type"] == "fluid"]
+                free = [b["index"] for b in sorted(boxes, key=lambda b: b["index"])
+                        if b.get("production") == prod and b["index"] not in out]
+                mine = [b["index"] for b in sorted(boxes, key=lambda b: b["index"]) if b.get("production") == prod]
+                for name, n in fluids:
+                    if n and 0 < n <= len(mine) and mine[n - 1] in free:
+                        out[mine[n - 1]] = name
+                        free.remove(mine[n - 1])
+                for name, n in fluids:
+                    if not (n and name in out.values()) and free:
+                        out[free.pop(0)] = name
         return out
 
     def is_fluid(self, name: str) -> bool:

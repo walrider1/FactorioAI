@@ -62,7 +62,7 @@ PLACE_GRACE_MIN = 8.0
 # failure with the step it was stuck in, so the planners and the overseer see it and decide again. Run
 # 20261119-202811: five goals took 86% of 114 game minutes (a pumpjack 34+, a mine replacement 28, a link pass 18).
 GOAL_BUDGET_MIN = {"build": 25.0, "replace": 30.0, "remove": 8.0, "link": 10.0, "link_science": 10.0, "stock": 8.0,
-                   "feed": 4.0, "connect": 6.0, "upgrade": 20.0, "repair": 8.0, "scout": 10.0, "design": 4.0,
+                   "feed": 4.0, "connect": 6.0, "upgrade": 20.0, "repair": 8.0, "repipe": 8.0, "scout": 10.0, "design": 4.0,
                    "priority": 1.0, "purge": 10.0, "relink": 12.0, "trunk": 30.0}
 MODULE_BUDGET_MIN = {"outpost": 45.0, "workshop": 40.0, "silo": 60.0, "factory": 30.0, "steam_power": 15.0,
                      "research_station": 15.0, "electric_mine": 12.0, "burner_mine": 8.0, "pumpjack": 15.0,
@@ -350,7 +350,22 @@ class Crew:
             return self.upgrade(goal.get("site"))
         if do == "repair":
             return self.repair(goal.get("site"))
+        if do == "repipe":
+            return self.repipe(goal.get("site"))
         raise BuildError(f"unknown goal {do}")
+
+    def repipe(self, site_id) -> str:
+        """A workshop machine piped on the wrong connection (a refinery's crude on its water input): the right
+        connection is piped to the same net, then placed like any pipe gap. Run 20261121-140755: crude stood at
+        the refinery's first input for hours, both pumpjacks full, no plastic and no blue science."""
+        site = self.base.get(site_id)
+        if site is None or site.kind != "workshop":
+            raise BuildError(f"site {site_id} is not a workshop")
+        gaps = MODULES["workshop"].repipe_plan(self.w, site)
+        if not gaps:
+            return f"site {site.id}: every pipe already joins the right connection"
+        site.params["pipe_gaps"] = (site.params.get("pipe_gaps") or []) + gaps
+        return f"site {site.id} piped again: " + self.repair(site.id)
 
     def repair(self, site_id=None) -> str:
         """Place the pipes a workshop's build could not (pipe_gaps): a gap stops the fluid behind it."""
@@ -3979,8 +3994,55 @@ class Crew:
             elif self.cell_rate(item):
                 raise BuildError(f"still {short} {item} short: our cells make {self.cell_rate(item):g}/min and the "
                                  f"chests hold less; wait, or build a workshop for more {item}")
+            elif any(s.params.get("item") == item and s.chests for s in self.base.of("factory")):
+                short -= self.from_factory(item, short)
+                if short > 0:
+                    fac = next(s for s in self.base.of("factory") if s.params.get("item") == item and s.chests)
+                    raise BuildError(f"still {short} {item} short: factory site {fac.id} makes it but too little came "
+                                     f"out ({fac.health or 'no reading'}); its inputs must reach it (relink it)")
             else:
                 raise BuildError(f"no way to get {item}: nothing we built makes it (build a workshop for it)")
+
+    FACTORY_WAIT_MIN = 6.0             # game minutes a kit waits on a factory it just stocked by hand
+
+    def from_factory(self, item: str, want: int) -> int:
+        """`want` of an item one of our factories makes (engine units for pumps): its output chest first; short of
+        that, the inputs its chest ports lack are carried in by hand (only what this batch needs) and the crew
+        waits for the factory. Run 20261121-140755: the engine-unit factory's steel belt carried nothing, 5 engines
+        in 3 hours, and "stock pump" failed with "nothing we built makes it" while 4000 steel sat in a chest."""
+        facs = [s for s in self.base.of("factory") if s.params.get("item") == item and s.chests]
+        got = self._grab(item, want)
+        if got >= want or not facs:
+            return got
+        rec = self.kn.recipes.get(item) or {}
+        per = {i["name"]: float(i["amount"]) / max(1.0, float(sum(p["amount"] for p in rec.get("products", [])
+                                                                 if p["name"] == item) or 1))
+               for i in rec.get("ingredients", []) if i.get("type") != "fluid"}
+        stocked = False
+        for s in facs:
+            for pt in s.params.get("ports") or []:
+                inp, chest = pt.get("item"), pt.get("chest")
+                if not chest or inp not in per:
+                    continue
+                n = math.ceil(per[inp] * (want - got))
+                try:
+                    self.gather(inp, n + self.w.inventory.get(inp, 0))
+                    put = self.w.insert(chest[0] + 0.5, chest[1] + 0.5, inp, min(n, self.w.inventory.get(inp, 0)))
+                except BuildError as exc:
+                    self.foreman.note(f"factory site {s.id}: could not carry {inp} in: {str(exc)[:80]}")
+                    continue
+                stocked = stocked or put > 0
+                self.log(f"[crew] carried {put} {inp} into factory site {s.id} for {want - got} {item}")
+        if not stocked:
+            return got
+        deadline = time.monotonic() + self.FACTORY_WAIT_MIN * 60 / self.w.speed
+        while got < want and time.monotonic() < deadline:
+            self.checkpoint()
+            self.w.doing(f"waiting for {want - got} {item} from our factory")
+            self.foreman.patrol(force=True)
+            time.sleep(max(3.0, min(20.0, 30.0 / self.w.speed)))
+            got += self._grab(item, want - got)
+        return got
 
     def from_mines(self, item: str, want: int) -> int:
         """Take `want` of an item out of our mines' chests. When drills make it, wait for them (the foreman keeps

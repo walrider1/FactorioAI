@@ -33,7 +33,7 @@ FUELS = ("coal", "wood")
 CRITICAL = ("coal", "boiler", "power", "fuel", "pipe", "belt-foreign")   # alert keys the rule floor fixes itself
 SOON = ("rebuild-",)            # keys it queues by itself without pausing the goal in hand (planned, not urgent)
 GOAL_DOS = ("build", "research", "stock", "remove", "replace", "connect", "feed", "priority", "wait",
-            "link", "link_science", "scout", "upgrade", "repair", "relink", "purge", "trunk")
+            "link", "link_science", "scout", "upgrade", "repair", "repipe", "relink", "purge", "trunk")
 LONG_GOAL_MIN = 8.0
 
 
@@ -199,6 +199,20 @@ def pipe_alerts(crew) -> list[dict]:
                         "what": f"site {s.id} ({s.kind}): {len(gaps)} pipe(s) of its {', '.join(fluids)} line were "
                                 f"never placed (first at {tuple(gaps[0][2])}): nothing flows past the gap",
                         "fix": {"do": "repair", "site": s.id}})
+    from .modules import MODULES
+    ws = MODULES.get("workshop")
+    for s in crew.base.of("workshop"):
+        try:
+            bad = [b for b in ws.misports(crew.w, s) if b["fluid"]]
+        except Exception:  # noqa: BLE001 - stub crews and worlds in tests
+            bad = []
+        if bad:
+            b = bad[0]
+            out.append({"level": "urgent", "key": f"pipe-ports-{s.id}",
+                        "what": f"site {s.id} (workshop): {len(bad)} pipe(s) join the wrong connection of their machine "
+                                f"(its {b['machine']} takes {b['fluid']} at {b['target']}, its pipe is on another one): "
+                                f"no {b['fluid']} flows there until it is piped again",
+                        "fix": {"do": "repipe", "site": s.id}})
     for s in crew.base.of("pumpjack"):
         n = sum(s.health.values())
         full = s.health.get("waiting_for_space_in_destination", 0) + s.health.get("full_output", 0)
