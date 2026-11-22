@@ -42,7 +42,8 @@ def crew():
                 "port": {"per_minute": 6.0}, "belts": 20}]
     for k in (0, 4):
         c._link_fails[(50, k)] = {"n": 11, "item": "iron-plate", "site": green.id, "minute": 0.0, "base": None,
-                                  "reason": "no belt route from the source to the port even with a wide detour"}
+                                  "reason": f"no source of iron-plate with any to spare for site {green.id}: "
+                                            "build one first"}
     c.sites = {"mine": mine, "red": red, "green": green}
     return c
 
@@ -95,6 +96,16 @@ def test_new_iron_consumers_wait_while_iron_ports_starve(crew):
     for pt in crew.sites["green"].params["ports"]:
         pt["fed"] = (3.5, -4.5)
     assert consumer_block(crew, gears) is None
+
+
+def test_ports_walled_in_by_routing_hold_no_new_consumer(crew):
+    """Self-upgrade #7: a port blocked for the route is not short of the item (run 20261122-133537: the circuit
+    factory was held 3x for gear factory 30's walled-in iron port, and site 30 was torn down to clear the gate)."""
+    for k in (0, 4):
+        crew._link_fails[(50, k)]["reason"] = "no belt route from the source to the port even with a wide detour"
+    gears = {"do": "build", "module": "factory", "item": "iron-gear-wheel", "per_minute": 30}
+    assert consumer_block(crew, gears) is None
+    assert port_report(crew)["unfed_count"] == 2               # still reported: the gate just does not hold
 
 
 def test_supply_goals_skip_builds_whose_inputs_starve(crew):

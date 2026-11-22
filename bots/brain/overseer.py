@@ -339,6 +339,36 @@ def trigger_cleared(crew, g: dict) -> str | None:
     return None
 
 
+REPAIR_DOS = ("relink", "link", "link_science", "repair", "connect", "trunk")
+
+
+def still_wanted(crew, g: dict) -> bool:
+    """A repair whatever planner queued it (assessor, triage, the strategist's own): its target still has what it
+    is for, an unfed input port (of its item), a site without power, gaps to fill. A new plan keeps it (when
+    trigger_cleared says nothing is left to do it goes anyway). Run 20261122-133537: "relink site 25
+    electronic-circuit", the one fix green science waited on, was dropped as "not in the new plan" at minutes
+    206 and 229."""
+    do = g.get("do")
+    if do not in REPAIR_DOS:
+        return False
+    try:
+        if do in ("link", "link_science"):
+            return bool(crew.unfed_ports()) or bool(crew.unlinked_sources())
+        site = crew.base.get(g.get("site"))
+        if site is None:
+            return False
+        if do == "connect":
+            return site.powered is False or bool(site.health.get("no_power"))
+        if do == "repair":
+            from . import gaps
+            return bool(site.params.get("pipe_gaps") or gaps.pending(site))
+        item = g.get("item")
+        return any(pt.get("item") and not pt.get("fed") and (item is None or pt["item"] == item)
+                   for pt in site.params.get("ports", []))
+    except Exception:  # noqa: BLE001 - stub crews: tags decide
+        return False
+
+
 def carry_over(crew, old: list[dict], new: list[dict], where: str,
                event=lambda kind, **data: None) -> list[str]:
     """A new plan replaces the plan queue: goals of the old one that the overseer, the fixer or the close-out
@@ -359,7 +389,7 @@ def carry_over(crew, old: list[dict], new: list[dict], where: str,
             continue                                    # the new plan (or a queued fix) does it: nothing lost
         seen.add(_bare(g))
         tagged = str(g.get("reflex", "")).startswith(CARRY_TAGS) or \
-            _bare(g) in (getattr(crew, "carry_keys", None) or set())
+            _bare(g) in (getattr(crew, "carry_keys", None) or set()) or still_wanted(crew, g)
         f = forbidden(crew, g)
         cleared = trigger_cleared(crew, g)
         if f is not None:

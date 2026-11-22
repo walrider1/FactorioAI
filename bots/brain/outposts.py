@@ -154,6 +154,24 @@ class Outpost(Module):
                 "out. The patch is set aside: ordinary mines keep off it. The crew builds it all in one goal. "
                 "Scout first if no spare patch is known. args: {resource, count (drills, 4-30, default 16)}")
 
+    # Set by the crew around a build (Crew.outpost_probe): fn(params, head, start, taken, drills) -> (why or
+    # None, the column's spot). The trunk's route into its column is planned BEFORE a drill is placed. Run
+    # 20261122-133537: outpost 32 (9 drills, 30 poles) and column 33 stood dead from minute 163, "no trunk
+    # route from outpost 32 to site 33 (229 tiles)", and the base counted their 270/min as supply.
+    trunk_probe = None
+    column_at = None
+
+    def _probe(self, p: dict, head, start, taken: set, drills) -> str | None:
+        self.column_at = None
+        if self.trunk_probe is None:
+            return None
+        try:
+            why, at = self.trunk_probe(p, tuple(head), tuple(start), set(taken), len(drills))
+        except BuildError as exc:
+            return str(exc)[:160]
+        self.column_at = at
+        return why
+
     @staticmethod
     def _n(p: dict) -> int:
         return max(2, min(30 if p.get("dense", True) else 14, int(p.get("count", FIELD_DRILLS))))
@@ -242,14 +260,25 @@ class Outpost(Module):
     def _build_dense(self, w, base, p, r: str, n: int, cands: list, home) -> Site:
         own = p.get("field_key")
         lay, c, q = None, None, None
+        walled: list[str] = []
         for q in cands[:3]:
             c = (q["centre"]["x"], q["centre"]["y"]) if q.get("centre") else (q["nearest"]["x"], q["nearest"]["y"])
             flow = -1 if home[0] < c[0] else 1         # the collector runs toward the base
             w.survey_area(*c, half=min(48, max(16, int(math.sqrt(q.get("tiles", 100))))), step=32)
             lay = self._dense(w, r, n, flow, q.get("box"), own, home)
             if lay is not None:
-                break
+                head = lay["belt"][-1]
+                taken = set(lay["belt"]) | set(lay["poles"]) | {t for cx, cy, _ in lay["drills"]
+                                                                 for t in self.drill_tiles(cx, cy)}
+                why = self._probe(p, head, (head[0] + flow, head[1]), taken, lay["drills"])
+                if why is None:
+                    break
+                walled.append(f"({c[0]:.0f}, {c[1]:.0f}): {why}")
+                lay = None
         if lay is None:
+            if walled:
+                raise BuildError(f"no {r} outpost whose trunk can reach a smelting column (nothing placed): "
+                                 + "; ".join(walled)[:300])
             raise BuildError(f"no room for a dense band of 2+ drills on the spare {r} patches known")
         d = "east" if flow > 0 else "west"
         site = Site(self.name, {"resource": r, "count": 0, "outpost": True, "dense": True}, c)
@@ -268,7 +297,8 @@ class Outpost(Module):
         box = [min(xs) - 2, lay["y"] - 2, max(xs) + 2, lay["y"] + 6]
         site.params.update({"head": list(head), "head_dir": d, "trunk_to": None, "box": box,
                             "per_minute": DRILL_PER_MIN * site.params["count"],
-                            **({"field": True} if p.get("field") else {})})
+                            **({"field": True} if p.get("field") else {}),
+                            **({"column_at": list(self.column_at)} if self.column_at else {})})
         site.centre = (sum(xs) / len(xs) + 0.5, lay["y"] + 2.5)
         w.keepout |= {start}
         fields = w.__dict__.setdefault("ore_fields", {})
@@ -322,14 +352,27 @@ class Outpost(Module):
         home = base.centre or w.pos
         if p.get("dense", True):
             return self._build_dense(w, base, p, r, n, cands, home)
+        walled: list[str] = []
         for q in cands[:3]:
             c = (q["centre"]["x"], q["centre"]["y"]) if q.get("centre") else (q["nearest"]["x"], q["nearest"]["y"])
             flow = -1 if home[0] < c[0] else 1         # the collector runs toward the base
             w.survey_area(*c, half=min(48, max(16, int(math.sqrt(q.get("tiles", 100))))), step=32)
             units = self._row(w, r, n, flow, q.get("box"))
             if len(units) >= 2:
-                break
+                cy0 = units[0][1]
+                head = (units[-1][0] + 1, cy0 - 2) if flow > 0 else (units[0][0] - 1, cy0 - 2)
+                taken = set()
+                for k, (cx, _) in enumerate(units):
+                    u = self.unit(cx, cy0)
+                    taken |= u["drill"] | set(u["belt"]) | ({u["pole"]} if k % 2 == 0 else set())
+                why = self._probe(p, head, (head[0] + flow, head[1]), taken, units)
+                if why is None:
+                    break
+                walled.append(f"({c[0]:.0f}, {c[1]:.0f}): {why}")
         else:
+            if walled:
+                raise BuildError(f"no {r} outpost whose trunk can reach a smelting column (nothing placed): "
+                                 + "; ".join(walled)[:300])
             raise BuildError(f"no room for a row of 2+ drills on the spare {r} patches known")
         cy = units[0][1]
         site = Site(self.name, {"resource": r, "count": 0, "outpost": True}, c)
@@ -346,13 +389,24 @@ class Outpost(Module):
         head = (units[-1][0] + 1, cy - 2) if flow > 0 else (units[0][0] - 1, cy - 2)
         start = (head[0] + flow, head[1])
         site.params.update({"head": list(head), "head_dir": d, "trunk_to": None,
-                            "per_minute": DRILL_PER_MIN * site.params["count"]})
+                            "per_minute": DRILL_PER_MIN * site.params["count"],
+                            **({"column_at": list(self.column_at)} if self.column_at else {})})
         site.centre = (sum(u[0] for u in units) / len(units) + 0.5, cy + 0.5)
         w.keepout |= {start}
         return site
 
 
 # ------------------------------------------------------------------ the near end
+POLE_SUPPLY = 2                 # a small pole's 5x5 supply area: tiles each side (Crew.POLE_SUPPLY)
+
+
+def uncovered(tiles, poles, reach: int = POLE_SUPPLY) -> list:
+    """The 1-tile electric buildings (inserters) at these tiles that no pole's supply area reaches."""
+    ps = [tuple(p) for p in poles]
+    return [tuple(t) for t in tiles
+            if not any(abs(p[0] - t[0]) <= reach and abs(p[1] - t[1]) <= reach for p in ps)]
+
+
 class SmelterColumn(Module):
     name = "smelter_column"
     describe = ("a column of furnaces fed from one belt, coal from a belt of their own, products into chests. "
@@ -389,11 +443,27 @@ class SmelterColumn(Module):
                "transport-belt": 4 * n + 4, POLE: n + 2}
         if lay == "line":
             out.pop("iron-chest")
-            out["transport-belt"] += 2 * n + 3
+            out["transport-belt"] += 2 * n + 3 + 3 * ((n + 1) // 2)    # its pole rows: trunk, line and coal belt
         return out
 
+    # A line column has no free tile beside its plate and coal inserters (the line belt runs at bx - 5, the coal
+    # belt at bx - 6, the furnaces at bx - 3..bx - 2): a pole at (bx - 1, y + 1) does not reach the bx - 4
+    # inserters, so half its inserters stood dark (run 20261122-133537: column 33, 30 machines no_power, no plate
+    # ever came out). So a line column leaves a free row after the first furnace and then after every second one,
+    # and a pole there at bx - 3 covers both inserter columns of the furnaces above and below it.
+    @staticmethod
+    def furnace_rows(n: int, into: str) -> tuple[list[int], list[int], int]:
+        """(each furnace's first row, the pole rows between them, rows in all) from the column's top row 0."""
+        if into == "chest":
+            return list(range(n)), [], n
+        if into != "line":
+            return [2 * k for k in range(n)], [], 2 * n
+        ys = [2 * k + (k + 1) // 2 for k in range(n)]
+        gaps = [ys[k] + 2 for k in range(0, n, 2)]
+        return ys, gaps, 2 * n + (n + 1) // 2
+
     def tiles(self, bx: int, by: int, n: int, into: str) -> set:
-        rows = n if into == "chest" else 2 * n
+        rows = self.furnace_rows(n, into)[2]
         xs = range(bx - 2, bx + 1) if into == "chest" else range(bx - 6, bx + 1)
         out = {(x, y) for x in xs for y in range(by, by + rows)}
         out |= {(bx, by - 1), (bx, by - 2)}
@@ -403,37 +473,47 @@ class SmelterColumn(Module):
             out |= {(bx - 5, by + rows), (bx - 5, by + rows + 1)}
         return out
 
-    def build(self, w, base, p):
+    def find_spot(self, w, base, p, skip=()) -> tuple[int, int, int] | None:
+        """Where the column goes, without placing anything: (bx, by, furnaces), or None. `skip`: spots (bx, by)
+        a caller already ruled out (no trunk route into them, say)."""
         r, into = p["resource"], self.layout(w, p)
         n = max(1, min(24, int(p.get("count", 8))))
-        if not base.powered_poles():
-            raise BuildError("a smelting column needs power: build steam_power first")
         home = tuple(p.get("near") or base.centre or w.pos)     # where its inputs are, when known
         toward = tuple(p.get("toward") or home)
-        trunk = bool(p.get("trunk", r in ORES))               # fed by an outpost, not by the link step
-        spot = None
+        skip = {tuple(s) for s in skip}
         # never on ore: a column beside a field (or anywhere) would sit on the vein it is meant to serve
         ore = set().union(*[t for k, t in (getattr(w, "resources", {}) or {}).items() if k != "crude-oil"])             if getattr(w, "resources", None) else set()
+        at = p.get("at")                                       # a spot checked before (Crew.outpost_probe)
+        if at is not None:
+            bx, by = int(at[0]), int(at[1])
+            area = self.tiles(bx, by, n, into)
+            if w.free(area) and not (area & ore) and not reserved(w, area):
+                return bx, by, n
         for size in range(n, 0, -1):
             for ring in range(1, 9):
                 rr = 12 * ring
                 cands = [(int(home[0] + dx), int(home[1] + dy)) for dx in range(-rr, rr + 1, 12)
                          for dy in range(-rr, rr + 1, 12) if max(abs(dx), abs(dy)) == rr]
                 for bx, by in sorted(cands, key=lambda q: (math.dist(q, home) * 0.6 + math.dist(q, toward) * 0.4)):
+                    if (bx, by) in skip:
+                        continue
                     area = self.tiles(bx, by, size, into)
                     w.survey_area(bx - 3, by + size, half=max(12, size + 6), step=32)
                     if w.free(area) and not (area & ore) and not reserved(w, area):
-                        spot = (bx, by)
-                        break
-                if spot:
-                    break
-            if spot:
-                n = size
-                break
-        if spot is None:
-            raise BuildError(f"no clear ground near the base for a smelting column of {n}")
-        bx, by = spot
-        rows = n if into == "chest" else 2 * n
+                        return bx, by, size
+        return None
+
+    def build(self, w, base, p):
+        r, into = p["resource"], self.layout(w, p)
+        if not base.powered_poles():
+            raise BuildError("a smelting column needs power: build steam_power first")
+        trunk = bool(p.get("trunk", r in ORES))               # fed by an outpost, not by the link step
+        found = self.find_spot(w, base, p)
+        if found is None:
+            raise BuildError(f"no clear ground near the base for a smelting column of "
+                             f"{max(1, min(24, int(p.get('count', 8))))}")
+        bx, by, n = found
+        fys, gaps, rows = self.furnace_rows(n, into)
         site = Site(self.name, {"resource": r, "count": n, "into": into}, (bx - 2.5, by + rows / 2))
         for t in range(rows):                          # the trunk's last stretch: down the column
             w.place("transport-belt", bx + 0.5, by + t + 0.5, "south", {(bx, by + t)})
@@ -449,7 +529,7 @@ class SmelterColumn(Module):
                     w.place(POLE, bx - 2.5, y + 0.5, "north", {(bx - 3, y)})
                     site.poles.append((bx - 3, y))
                 continue
-            y = by + 2 * k
+            y = by + fys[k]
             ftiles = {(bx - 3, y), (bx - 2, y), (bx - 3, y + 1), (bx - 2, y + 1)}
             w.place(fur, bx - 2.0, y + 1.0, "north", ftiles)
             site.burners.append((bx - 2.0, y + 1.0))
@@ -466,17 +546,41 @@ class SmelterColumn(Module):
             w.place("long-handed-inserter", bx - 3.5, y + 1.5, "west", {(bx - 4, y + 1)})   # coal from 2 west
             for t in ((bx - 6, y), (bx - 6, y + 1)):
                 w.place("transport-belt", t[0] + 0.5, t[1] + 0.5, "south", {t})
-            if k % 2 == 0:
-                for q in ((bx - 1, y + 1),) + (((bx - 5, y + 1),) if into != "line" else ()):
+            if k % 2 == 0 and into != "line":
+                for q in ((bx - 1, y + 1), (bx - 5, y + 1)):
                     if w.free({q}):
                         w.place(POLE, q[0] + 0.5, q[1] + 0.5, "north", {q})
                         site.poles.append(q)
+        for g in gaps:                              # a line column's pole rows: its belts run on through them
+            y = by + g
+            for t in ((bx - 5, y), (bx - 6, y)):
+                w.place("transport-belt", t[0] + 0.5, t[1] + 0.5, "south", {t})
+            q = (bx - 3, y)
+            w.place(POLE, q[0] + 0.5, q[1] + 0.5, "north", {q})
+            site.poles.append(q)
+        if into == "chest":
+            elec = [(bx - 1, by + k) for k in range(n)]
+        else:
+            elec = [(bx - 1, by + y) for y in fys] + [(bx - 4, by + y + dy) for y in fys for dy in (0, 1)]
+        for t in uncovered(elec, site.poles):       # a pole the layout could not place (taken ground): any spot
+            if not uncovered([t], site.poles):
+                continue
+            q = next((q for q in sorted(((t[0] + dx, t[1] + dy) for dx in range(-2, 3) for dy in range(-2, 3)),
+                                        key=lambda q: abs(q[0] - t[0]) + abs(q[1] - t[1]))
+                      if w.free({q})), None)
+            if q is not None:
+                w.place(POLE, q[0] + 0.5, q[1] + 0.5, "north", {q})
+                site.poles.append(q)
+        dark = uncovered(elec, site.poles)
+        if dark:
+            raise BuildError(f"the smelting column's layout leaves {len(dark)} machine(s) outside every pole's "
+                             f"supply area (first at {dark[0]})")
         if into == "line":
-            tiles = [(bx - 5, by + t) for t in range(2 * n)]
-            start = (bx - 5, by + 2 * n)
+            tiles = [(bx - 5, by + t) for t in range(rows)]
+            start = (bx - 5, by + rows)
             lanes = getattr(w, "lanes", None)
             if lanes is not None:
-                lanes |= {(bx - 5, by + 2 * n + k) for k in range(3)}
+                lanes |= {(bx - 5, by + rows + k) for k in range(3)}
             each = (FURNACE_IN.get(fur, 18.75) / 5) if r == "iron-plate" else FURNACE_IN.get(fur, 18.75)
             site.params["line"] = line_record(product, tiles, "south", start, each * n)
         per_in = 0.0 if trunk else round(FURNACE_IN.get(fur, 18.75) * n, 1)
@@ -554,13 +658,13 @@ def lay_trunk(crew, outpost: Site, column: Site) -> dict:
     crew.w.recorder = ents
     try:
         with belts.job_for(crew.w, [port.get("item") or outpost.params.get("resource")], belts.tiles_of(steps),
-                           belts.link_joins(steps, from_belt=True)):     # it runs on from the outpost's head
+                           belts.link_joins(steps, from_belt=True, tail=head)):   # it runs on from the head
             belts.lay_belt(crew.w, steps)
     except BuildError as exc:
         crew.w.recorder = None
         bad = getattr(exc, "tile", None)
         if bad is not None:
-            crew._bad_belt.add(tuple(bad))
+            (getattr(crew, "ban_tile", None) or (lambda t: crew._bad_belt.add(tuple(t))))(bad)
         crew._undo(ents)
         raise
     finally:

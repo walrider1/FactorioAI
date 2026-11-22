@@ -336,7 +336,7 @@ def headroom_goals(crew) -> list[dict]:
     and every other item made over used, each with headroom."""
     goals = []
     p = crew.power_status()
-    if p["demand_kw"] * POWER_HEADROOM > p["capacity_kw"]:
+    if max(p["demand_kw"], p.get("expected_kw", 0)) * POWER_HEADROOM > p["capacity_kw"]:
         goals.append({"do": "build", "module": "steam_power", "engines": 2})
     try:
         b = crew.coal_budget()

@@ -353,6 +353,10 @@ def burner_swap_alerts(crew) -> list[dict]:
         if want <= 0 or (made >= want and plate not in hungry):
             continue
         dead = [s for s in unlinkable_full(crew, plate) if swap_goal(s) is not None]
+        # a swap whose electric drills found no room near the base lately is not asked for again (run
+        # 20261122-133537: "replace site 8" queued twice, failed twice on patches 321+ tiles out, forbidden twice)
+        full = getattr(crew, "patch_full", None)
+        dead = [s for s in dead if not (callable(full) and full(s.params.get("resource")))]
         if not dead:
             continue
         s = dead[0]
@@ -421,6 +425,27 @@ def depleted_alerts(crew) -> list[dict]:
     return out
 
 
+def orphan_alerts(crew) -> list[dict]:
+    """Factories whose only consumer was removed (Crew._note_orphans): link them to another consumer of their
+    item, or remove them, so their machines and the belt they tap serve something."""
+    try:
+        orphans = crew.orphan_sites()
+        ports = crew.item_ports()
+    except Exception:  # noqa: BLE001 - stub crews in tests
+        return []
+    out = []
+    for s, o in orphans:
+        item = o.get("item")
+        want = sorted({q.id for q, pt in ports if pt.get("item") == item and not pt.get("fed") and q is not s})
+        out.append({"level": "warn", "key": f"orphan-{s.id}",
+                    "what": f"site {s.id} ({s.kind} {s.params.get('item') or item}) lost its only consumer, site "
+                            f"{o.get('lost')} (removed at minute {o.get('minute', 0):.0f}): nothing takes its {item}"
+                            + (f"; sites {want[:6]} have unfed {item} ports: link it there" if want else
+                               "; no other site wants it: remove it (its machines and its input belt are spare)"),
+                    "fix": {"do": "link"} if want else {"do": "remove", "site": s.id}})
+    return out
+
+
 def detect(crew) -> list[dict]:
     """Alerts: {level: urgent|warn, key, what, fix}. 'urgent' means the base stops working soon."""
     out: list[dict] = []
@@ -452,6 +477,7 @@ def detect(crew) -> list[dict]:
                                    "swap: use less (no new boilers or furnace rows) until electric furnaces"),
                         "fix": fix})
     out += depleted_alerts(crew)
+    out += orphan_alerts(crew)
     out += rebuild_soon_alerts(crew)
     out += rebuild_alerts(crew)
     out += burner_swap_alerts(crew)
@@ -486,11 +512,15 @@ def detect(crew) -> list[dict]:
         ps = crew.power_status()
     except Exception:  # noqa: BLE001 - stub crews in tests
         ps = {"capacity_kw": 0, "demand_kw": 0}
-    over = ps["capacity_kw"] and ps["demand_kw"] > 0.95 * ps["capacity_kw"]
+    # what the network draws, or what its fed sites will draw once they run (expected_kw): whichever is more
+    load = max(ps["demand_kw"], ps.get("expected_kw", 0))
+    over = ps["capacity_kw"] and load > 0.95 * ps["capacity_kw"]
     if (low and low >= max(2, elec // 4)) or over:
         out.append({"level": "urgent", "key": "power-capacity",
                     "what": (f"{low}/{elec} electric machines run on low power; " if low else "")
-                            + f"the network carries {ps['demand_kw']} kW of {ps['capacity_kw']} kW: more steam power",
+                            + f"the network carries {ps['demand_kw']} kW of {ps['capacity_kw']} kW"
+                            + (f" and its fed sites will draw ~{ps['expected_kw']} kW once they run"
+                               if ps.get("expected_kw", 0) > ps["demand_kw"] else "") + ": more steam power",
                     "fix": {"do": "build", "module": "steam_power", "engines": 2}})
 
     # smelters out of fuel. A furnace with no fuel fills up with ore and its drill stops behind it

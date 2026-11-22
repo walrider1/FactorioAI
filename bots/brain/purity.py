@@ -205,7 +205,8 @@ def purge(crew, site_id, item: str | None = None) -> str:
                          f"{src}: the link was taken up (with what was on it) and that source is not used again; "
                          "the link step lays it from a clean one")
             continue
-        joins = {tuple(t) for t in link_joins(steps, from_belt=ln.get("ins") is None)}
+        tail = crew.link_tail(ln) if ln.get("ins") is None and hasattr(crew, "link_tail") else None
+        joins = {tuple(t) for t in link_joins(steps, from_belt=ln.get("ins") is None, tail=tail)}
         seen = look_belts(crew, [s[1] for s in steps])
         leaks = sorted({_tile(p) for t in own for p in (seen.get(t) or {}).get("fed_by") or []} - own - joins)
         done = [_stop_leak(crew, q, own) for q in leaks]

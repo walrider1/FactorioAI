@@ -246,7 +246,7 @@ def test_a_background_design_whose_ground_got_built_on_is_not_used():
 
 def test_the_crew_starts_the_next_queued_factory_design_but_not_the_current_goal(monkeypatch):
     started = []
-    monkeypatch.setattr(F, "prefetch", lambda w, base, p: started.append(p["item"]) or True)
+    monkeypatch.setattr(F, "prefetch", lambda w, base, p, probe=None: started.append(p["item"]) or True)
     current = {"do": "build", "module": "factory", "item": "iron-gear-wheel", "per_minute": 6}
     crew = SimpleNamespace(urgent=[current], log=lambda *a: None, w=None, base=None,
                            plan_queue=[{"do": "feed", "site": 2},

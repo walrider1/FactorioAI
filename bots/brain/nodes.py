@@ -198,12 +198,27 @@ def goal_inputs(crew, goal: dict) -> set[str]:
     return out
 
 
+ROUTING = ("no belt route", "no route", "walled", "a link reaches", "belt routes from", "trunk", "no free side",
+           "straight stretch")
+
+
+def routing_fail(why: str | None) -> bool:
+    """Did a link fail for the way (no belt route, walled in, too far for a link) rather than for supply? The
+    item exists with some to spare; a new consumer of it would not take anything from that port."""
+    w = str(why or "").lower()
+    return any(k in w for k in ROUTING)
+
+
 def starving(crew) -> dict[str, list[dict]]:
-    """Items whose factories already wait on a belt that will not come by itself: blocked ports, or ports with no
-    source to spare (pending ones get their link at the next link step)."""
+    """Items whose factories already wait on a belt that will not come by itself because there is too little of
+    the item: ports with no source to spare, or blocked ports whose link failed for supply. A port blocked for
+    routing (no belt route, walled in) is not short of the item, and holding its next consumer only pushed the
+    planners into tearing sites down (run 20261122-133537: the circuit factory was held 3x for gear factory 30's
+    walled-in iron port, so gear factory 30 was removed to clear the gate). Pending ones get their link at the next
+    link step."""
     out: dict[str, list[dict]] = {}
     for p in unfed_ports(crew):
-        if p["state"] in ("blocked", "no_source"):
+        if p["state"] == "no_source" or (p["state"] == "blocked" and not routing_fail(p.get("why"))):
             out.setdefault(p["item"], []).append(p)
     return {k: v for k, v in out.items() if len(v) >= GATE_MIN_PORTS}
 
@@ -247,8 +262,25 @@ def full_producers(crew, item: str) -> list:
     can draw from (unlinkable_full) says nothing about demand. Run 20261122-133537: two burner copper mines into
     stone furnaces stood full, so six electric copper mines were held back over 10 minutes while red science ran
     at a fifth of its rate for copper ("connect them", which the link step cannot)."""
-    return [s for s in crew.base.sites if s.kind in PRODUCER_KINDS and _product(s.kind, s.params) == item
-            and _full(s) and linkable(crew, s, item)]
+    out = [s for s in crew.base.sites if s.kind in PRODUCER_KINDS and _product(s.kind, s.params) == item
+           and _full(s) and linkable(crew, s, item)]
+    if out and _spare_unroutable(crew, item):
+        # the last "extra ... into the chain" for this item found no belt route from a spare source: full sources
+        # nothing draws from are walled off from the belts that want them, which says nothing about demand (run
+        # 20261122-133537: copper mines 31, 36 and 38 stood full beside starving ports, and held a copper mine)
+        used = {tuple(ln["source"]) for ln in getattr(crew, "links", []) or []}
+        out = [s for s in out if any((x, y) in used for x, y, what in s.chests if what == item)
+               or (s.params.get("line") and tuple(s.params["line"]["source"]) in used)]
+    return out
+
+
+def _spare_unroutable(crew, item: str) -> bool:
+    """Did the last try to feed a spare source of `item` into a short chain fail for the route?"""
+    for key, f in (getattr(crew, "_link_fails", None) or {}).items():
+        if isinstance(key, tuple) and key and key[0] == "boost" and f.get("item") == item \
+                and routing_fail(f.get("reason")):
+            return True
+    return False
 
 
 def unlinkable_full(crew, item: str) -> list:
@@ -293,6 +325,95 @@ def repeat_block(crew, goal: dict) -> str | None:
             "short belt, rebuild the site where its inputs are, take up what feeds a belt the wrong items)")
 
 
+FUTILE_FAILS = 2               # the same goal target failing with the same error this often...
+FUTILE_WINDOW_MIN = 30.0       # ...within these game minutes is structural: held, whoever asks again
+
+
+def fail_signature(msg: str) -> str:
+    """An error with its numbers taken out: the same fault at the same place reads the same."""
+    import re
+    return re.sub(r"-?\d+(\.\d+)?", "#", str(msg or ""))[:90]
+
+
+def note_failure(crew, goal: dict, msg: str) -> None:
+    """Remember a failed goal (its target, its error, the base it failed on) for futile_block."""
+    from .overseer import same_target
+    try:
+        sig = crew._base_sig()
+    except Exception:  # noqa: BLE001 - stub crews
+        sig = None
+    crew.fail_log = (list(getattr(crew, "fail_log", None) or [])
+                     + [(repr(same_target(goal)), round(_minute(crew), 1), fail_signature(msg), sig)])[-120:]
+
+
+def futile_block(crew, goal: dict) -> str | None:
+    """Why a goal must not run again: its target failed FUTILE_FAILS times with the same error in the last
+    FUTILE_WINDOW_MIN game minutes, whichever planner tagged it. A site built or removed since lets it try once
+    more (like a failed link); a third failure holds it for the window. Run 20261122-133537: "trunk site 33" was
+    ordered 6x by the assessor and the overseer ("no unfed input port for iron-ore" each time), "link" failed ~20x
+    with one text, and each failure fed a replan."""
+    if goal.get("do") in ("wait", "feed", None):    # fuel by hand changes from minute to minute: never held
+        return None
+    from .overseer import same_target
+    key = repr(same_target(goal))
+    now = _minute(crew)
+    fails = [(m, s, b) for k, m, s, b in getattr(crew, "fail_log", None) or []
+             if k == key and now - m <= FUTILE_WINDOW_MIN]
+    if len(fails) < FUTILE_FAILS:
+        return None
+    last = fails[-1][1]
+    same = [f for f in fails if f[1] == last]
+    if len(same) < FUTILE_FAILS:
+        return None
+    try:
+        base = crew._base_sig()
+    except Exception:  # noqa: BLE001
+        base = None
+    if len(same) < FUTILE_FAILS + 1 and base is not None and same[-1][2] != base:
+        return None                                # the base changed since: one more try
+    left = FUTILE_WINDOW_MIN - (now - same[-1][0])
+    return (f"held back: this goal failed {len(same)}x in the last {FUTILE_WINDOW_MIN:.0f} game min with the same "
+            f"error ({last[:120]}), so asking again changes nothing; fix the cause or ask for something else "
+            f"(it may run again in {max(1.0, left):.0f} game min, or once a site is built or removed)")
+
+
+def _size(g: dict) -> float | None:
+    w = g.get("with") if isinstance(g.get("with"), dict) else g
+    for k in ("per_minute", "count", "engines"):
+        if w.get(k) is not None:
+            try:
+                return float(w[k])
+            except (TypeError, ValueError):
+                return None
+    if w.get("per_second") is not None:
+        try:
+            return float(w["per_second"]) * 60
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def drop_done_copies(done: dict, queue: list) -> list[dict]:
+    """Take the copies of a goal that just finished out of a queue (in place): the same target (overseer.same_target)
+    and a size within half to double of it. Returns what was taken out. Run 20261122-133537: the reflex copy of
+    "build factory iron-gear-wheel 65" finished as site 28 and the plan's aged copy started that same minute,
+    building duplicate site 30 (8.6 game min, then removed)."""
+    if not isinstance(done, dict) or done.get("do") in ("wait", None) or not queue:
+        return []
+    from .overseer import same_target
+    t, a = same_target(done), _size(done)
+
+    def close(g) -> bool:
+        b = _size(g)
+        if a is None or b is None or a <= 0 or b <= 0:
+            return a is None and b is None
+        return 0.5 <= b / a <= 2.0
+    out = [g for g in queue if isinstance(g, dict) and g is not done and same_target(g) == t and close(g)]
+    if out:
+        queue[:] = [g for g in queue if not any(g is o for o in out)]
+    return out
+
+
 def surplus_block(crew, goal: dict) -> str | None:
     """Why a build that adds more of an item must wait: FULL_MIN_SITES producers of it already stand full, with
     nothing taking what they make. Run 20261121-140755: six ore-into-chest mines (12 drills) sat with full chests
@@ -331,7 +452,7 @@ def consumer_block(crew, goal: dict) -> str | None:
     """Why this build must wait, or None: its output already piles up unused (surplus_block), or what it eats
     already starves elsewhere. A replace that moves a starving consumer (its old site has unfed ports of that
     item) is the fix, never held. A build held for GATE_ESCAPE_MIN game minutes goes ahead."""
-    for check in (repeat_block, surplus_block):
+    for check in (futile_block, repeat_block, surplus_block):
         why = check(crew, goal)
         if why is not None:
             return why

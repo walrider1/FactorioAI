@@ -32,7 +32,7 @@ from .crew import DEAD_RUN, Crew  # noqa: E402
 from .fixer import RuleFixer, apply as apply_fixes, situation as fix_situation  # noqa: E402
 from .knowledge import Knowledge  # noqa: E402
 from .modules import MODULES  # noqa: E402
-from .nodes import consumer_block  # noqa: E402
+from .nodes import consumer_block, drop_done_copies, note_failure  # noqa: E402
 from .overseer import carry_over, drop_forbidden, forbidden, note_dropped, same_target  # noqa: E402
 from . import persist, upkeep  # noqa: E402
 from .telemetry import Telemetry  # noqa: E402
@@ -419,6 +419,14 @@ def play(run: Run, client: ArenaClient, task: dict, strategist=None, log=print, 
             from .overseer import same_target       # repairs that keep coming back are held (nodes.repeat_block)
             crew.fix_log = (list(getattr(crew, "fix_log", None) or [])
                             + [(repr(same_target(goal)), round(world.now_tick() / 3600, 1), bool(ok and not paused))])[-80:]
+            if not ok:                                  # structural failures are held whoever asks (futile_block)
+                note_failure(crew, goal, msg)
+            elif not paused:                            # done: its copies waiting in the queues go (one job)
+                for where, q in (("plan", goals), ("urgent", crew.urgent), ("close-out", crew.closeout_queue)):
+                    for g in drop_done_copies(goal, q):
+                        tel.event("dropped", goal=_short(g), why=f"the same job just finished: {_short(goal)}"[:160],
+                                  where=where)
+                        log(f"[bot] {_short(g)} dropped: the same job just finished")
             tel.set(current_goal=None, results=[{**r, "goal": _short(r["goal"])} for r in results[-40:]])
             tel.event("goal_end", goal=_short(goal), ok=ok, result=msg, game_minutes=minutes)
             log(f"[crew] {_short(goal)}: {'PAUSED' if paused else 'ok' if ok else 'FAILED'} - {msg} ({minutes} min)")

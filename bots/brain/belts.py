@@ -150,17 +150,25 @@ def tiles_of(steps: list[tuple]) -> list[Tile]:
     return [s[1] for s in steps]
 
 
-def link_joins(steps: list[tuple], from_belt: bool) -> list[Tile]:
+def link_joins(steps: list[tuple], from_belt: bool, tail: Tile | None = None) -> list[Tile]:
     """Where a link may join other belts: the tile ahead of its last belt (the port's belt it feeds, the chain it
     side-loads, the strip it continues), and, when it runs on from a line's tail (no inserter lifts its items),
-    the tile behind its first. Any other join is an accident (world.belt_job refuses it)."""
+    that tail. Any other join is an accident (world.belt_job refuses it).
+
+    `tail`: the belt the items come from. The tile behind the first belt is that tail only when the link runs
+    straight on; a link that turns on its first tile is fed from the side. Run 20261122-133537: every link that
+    turned there was refused (would_merge with the line's own tail), its start tile was banned for good, and 7 of
+    11 plate lines could never be belted anywhere while their furnaces stood full beside starving factories."""
     if not steps:
         return []
     (lx, ly), (dx, dy) = steps[-1][1], VEC[steps[-1][2]]
     out = [(lx + dx, ly + dy)]
     if from_belt:
-        (fx, fy), (dx, dy) = steps[0][1], VEC[steps[0][2]]
-        out.append((fx - dx, fy - dy))
+        if tail is not None:
+            out.append((int(tail[0]), int(tail[1])))
+        else:
+            (fx, fy), (dx, dy) = steps[0][1], VEC[steps[0][2]]
+            out.append((fx - dx, fy - dy))
     return out
 
 

@@ -61,6 +61,7 @@ PLACE_GRACE_MIN = 8.0
 # Game minutes a goal may take before it is stopped (at a moment nothing is half-placed) and recorded as a
 # failure with the step it was stuck in, so the planners and the overseer see it and decide again. Run
 # 20261119-202811: five goals took 86% of 114 game minutes (a pumpjack 34+, a mine replacement 28, a link pass 18).
+EXPECTED_LOAD = 0.7     # share of their full load the sites with every input fed draw once they run (power_status)
 GOAL_BUDGET_MIN = {"build": 25.0, "replace": 30.0, "remove": 8.0, "link": 10.0, "link_science": 10.0, "stock": 8.0,
                    "feed": 4.0, "connect": 6.0, "upgrade": 20.0, "repair": 8.0, "repipe": 8.0, "scout": 10.0, "design": 4.0,
                    "priority": 1.0, "purge": 10.0, "relink": 12.0, "trunk": 30.0}
@@ -335,6 +336,7 @@ class Crew:
             if new.get("do") != "build":
                 raise BuildError("replace needs a build goal in 'with'")
             before = {s.id for s in self.base.sites}
+            self._note_bad_place(old)                    # walled in where it stands: not the same spot again
             try:
                 built = self.build(new)                      # make before break: the old one runs meanwhile
             except BuildError as exc:
@@ -528,6 +530,8 @@ class Crew:
                         "toward": site.params["head"]}
             if beside and r != "coal":
                 col_goal["near"] = list(site.params["head"])
+            if site.params.get("column_at"):           # the spot its trunk route was checked into (outpost_probe)
+                col_goal["at"] = list(site.params["column_at"])
             try:
                 self.build(col_goal)
             except BuildError as exc:
@@ -549,6 +553,74 @@ class Crew:
         except BuildError as exc:
             return f"column site {col.id} stands; the trunk failed for now ({str(exc)[:140]}); the link step retries"
         return f"column site {col.id} and a {rec['belts']}-belt trunk from the outpost"
+
+    def _outpost_trunk(self, col: Site, port: dict) -> str:
+        """A trunk goal into a column's ore port: from its outpost's head (outposts.lay_trunk, routed by plan_trunk
+        with undergrounds once they are in)."""
+        from . import outposts
+        out = self.base.get(col.params.get("outpost"))
+        if out is None or out.kind != "outpost":
+            res = col.params.get("resource")
+            cands = [s for s in self.base.of("outpost") if s.params.get("resource") == res
+                     and s.params.get("trunk_to") in (None, col.id)]
+            out = min(cands, key=lambda s: math.dist(s.centre, col.centre)) if cands else None
+        if out is None:
+            raise BuildError(f"site {col.id}'s {port['item']} port is fed by an outpost's trunk, and no outpost of "
+                             f"{port['item']} is left to feed it: remove the column or build an outpost")
+        try:
+            with self.w.step("build"):
+                rec = outposts.lay_trunk(self, out, col)
+        except BuildError as exc:
+            self._note_link_fail(tuple(port["end"]), port["item"], col, "trunk: " + str(exc)[:200])
+            raise BuildError(f"no trunk from outpost {out.id} into site {col.id}: {str(exc)[:200]}. The outpost "
+                             "and its column stand where no belt joins them: remove both (an outpost build "
+                             "plans its trunk before placing anything now)") from None
+        self._link_fails.pop(tuple(port["end"]), None)
+        return f"a {rec['belts']}-belt trunk carries {port['item']} from outpost {out.id} into site {col.id}"
+
+    def outpost_probe(self, p: dict, head: tuple, start: tuple, taken: set, drills: int):
+        """Before an outpost places anything (outposts.Outpost.trunk_probe): where its smelting column would go
+        and whether a trunk route joins its head to the column's ore port. Returns (why not or None, the
+        column's spot (bx, by) or None)."""
+        from . import outposts
+        r = p["resource"]
+        col = MODULES["smelter_column"]
+        per = outposts.DRILL_PER_MIN * max(1, drills)
+        into = "chest" if r == "coal" else "furnace"
+        rate = 45.0 if into == "chest" else (37.5 if "steel-furnace" in self.kn.unlocked else 18.75)
+        if r == "stone":
+            rate *= 2
+        n = max(1, min(24, math.ceil(per / rate)))
+        home = self.base.centre or self.w.pos
+        cp = {"resource": r, "count": n, "toward": list(head)}
+        if (p.get("field") or math.dist(head, home) <= outposts.FIELD_SMELT_MAX) and r != "coal":
+            cp["near"] = list(head)
+        skip: list = []
+        for _ in range(3):
+            found = col.find_spot(self.w, self.base, cp, skip=skip)
+            if found is None:
+                return (f"no clear ground for its {n}-furnace smelting column", None)
+            bx, by, size = found
+            area = col.tiles(bx, by, size, col.layout(self.w, cp))
+            port = {"item": r, "end": [bx, by - 1], "approach": [bx, by - 2]}
+            appr = (bx, by - 2)
+            k = max(1, int(math.dist(start, appr) // 40))
+            self.w.doing(f"checking a trunk route from the {r} patch to its column")
+            for i in range(k + 1):
+                try:
+                    self.w.look(start[0] + (appr[0] - start[0]) * i / k, start[1] + (appr[1] - start[1]) * i / k,
+                                radius=32)
+                except BuildError:
+                    pass
+            steps = outposts.plan_trunk(self, tuple(start), port,
+                                        block=(set(taken) | set(area)) - {(bx, by - 1), appr})
+            if steps:
+                self.log(f"[crew] outpost probe: a {len(steps)}-step trunk from {list(start)} reaches a column "
+                         f"at ({bx}, {by})")
+                return None, (bx, by)
+            skip.append((bx, by))
+        return (f"no trunk route from its head at {list(start)} to any of {len(skip)} column spots "
+                f"({round(math.dist(start, home))} tiles from the base)", None)
 
     def _new_column(self, before: set) -> Site | None:
         """The smelter column a build just added (None: it added none)."""
@@ -700,7 +772,11 @@ class Crew:
             except Exception:  # noqa: BLE001
                 pass
             try:
-                if mod.prefetch(self.w, self.base, p):
+                try:
+                    probe = self.route_probe(p)
+                except Exception:  # noqa: BLE001 - a head start only
+                    probe = None
+                if mod.prefetch(self.w, self.base, p, probe=probe):
                     return p["item"]
             except Exception as exc:  # noqa: BLE001 - a head start only
                 self.log(f"[crew] background design of {p.get('item')} not started: {str(exc)[:100]}")
@@ -750,6 +826,7 @@ class Crew:
         self.w.blocking = bool(blk and blk.get("module") == mod.name and blk.get("resource") == params.get("resource")
                                and (mod.name != "factory" or blk.get("item") == params.get("item")))
         self.foreman.busy = mod.name          # the build comes first: the foreman only does what is urgent
+        probes = self._set_probes(mod, params)
         try:
             pre = getattr(mod, "needs", None)            # what the design itself depends on (underground belts):
             if pre is not None:                           # researched and waited for BEFORE designing
@@ -785,7 +862,8 @@ class Crew:
                 if mod.name == "smelter_column" and params.get("resource") == "iron-plate" \
                         and isinstance(exc, BuildError):
                     self.failed_suppliers["steel-plate"] = self._minute()
-                if mod.name == "electric_mine" and isinstance(exc, BuildError) and "no room" in str(exc):
+                if mod.name == "electric_mine" and isinstance(exc, BuildError) and \
+                        ("no room" in str(exc) or "patches with room are" in str(exc)):
                     self._patch_full[params.get("resource")] = (self._minute(), self._base_sig())
                 if rec:                              # what did get built stays known, so it can be removed
                     left = self.base.add(Site(f"unfinished {mod.name}", params, _centre(rec), entities=rec,
@@ -800,6 +878,8 @@ class Crew:
         finally:
             if not paused:                    # a paused goal comes back to the same design (Factory._design checks it)
                 getattr(mod, "designs", {}).clear()
+            for attr, old in probes.items():
+                setattr(mod, attr, old)
             self.w.blocking, self.foreman.busy = outer
             self.kit_hold = {}
         site.entities, site.built_minute = rec, self._minute()
@@ -943,7 +1023,11 @@ class Crew:
         want = {p: r for p, r in want.items() if r > 0}
         if not want:
             return []
-        for plate in sorted(want, key=lambda q: -want[q]):    # the plate it needs most that has a source
+        # every plate it takes, not only the one it needs most: a circuit factory placed beside copper had its
+        # iron walled off behind the base core, four times (run 20261122-133537). And the port that waits for
+        # its product. Each spot is (x, y, what), what groups them (Factory._supply_places)
+        out: list[tuple] = []
+        for plate in sorted(want, key=lambda q: -want[q]):
             budget = self._budget(plate)
             spots: list[tuple[float, tuple[float, float]]] = []
             for site, ln in self.lines(plate):
@@ -953,9 +1037,161 @@ class Crew:
             for x, y, s in self._free_outputs(plate, None):
                 if self.line_at((x, y)) is None:
                     spots.append((0.0, (x, y)))
-            if spots:
-                return [p for _, p in sorted(spots)[:4]]
-        return []
+            out += [(p[0], p[1], plate) for _, p in sorted(spots)[:(4 if not out else 2)]]
+        if out:
+            item = params.get("item")
+            waits = [tuple(pt["approach"]) for _, pt in self.item_ports() if pt.get("item") == item
+                     and not pt.get("fed")]
+            out += [(t[0], t[1], "out") for t in waits[:2]]
+        if len({s[2] for s in out}) == 1:            # one plate and nothing waiting: plain spots, as before
+            return [(s[0], s[1]) for s in out]
+        return out
+
+    # ------------------------------------------------------------- where a factory may stand (route probe)
+    BAD_PLACE_TILES = 20.0         # a replace is refused this close to where the same factory failed
+    BAD_PLACE_MIN = 180.0          # ...for this many game minutes
+
+    def _set_probes(self, mod, params: dict) -> dict:
+        """Give a build its dry route checks for this goal (reset after it): a factory its route probe and the
+        spots where the same factory already failed, an outpost its trunk probe. Returns the old values."""
+        if mod.name == "factory":
+            old = {"probe": getattr(mod, "probe", None), "avoid": getattr(mod, "avoid", ())}
+            try:
+                mod.probe = self.route_probe(params)
+            except Exception as exc:  # noqa: BLE001 - no probe is the old behaviour, never a failed build
+                self.log(f"[crew] route probe not set up for {params.get('item')}: {str(exc)[:120]}")
+                mod.probe = None
+            mod.avoid = self.bad_places(params.get("item"))
+            return old
+        if mod.name == "outpost":
+            old = {"trunk_probe": getattr(mod, "trunk_probe", None)}
+            mod.trunk_probe = self.outpost_probe
+            return old
+        return {}
+
+    def route_probe(self, params: dict):
+        """fn(grid, design) -> [why an input or the output cannot be belted]: before a factory design is built,
+        a dry route (belts.route_belt, undergrounds once unlocked, a link's reach and length) on the same ground
+        snapshot, the design's own tiles blocked: from the spare sources of every input it takes through a port
+        (chests, line tails, belts that carry it) into each port, and from its output chests to a port that waits
+        for its item. Run 20261122-133537: the circuit factory for green science was built 4x (~700 buildings
+        placed and taken up) beside copper with its iron walled off behind the base core."""
+        from . import belts
+        from fab import recipes as fr  # noqa: F401 - catalogue loaded by supplied_for
+        item = params.get("item")
+        supplied, _ = MODULES["factory"].supplied_for(self.kn, params)
+        ug = "underground-belt" in self.kn.unlocked
+        sources: dict[str, list[tuple[str, tuple]]] = {}
+        for it in sorted(set(supplied) - {item}):
+            cands: list[tuple[str, tuple]] = []
+            for x, y, _s in self._free_outputs(it, None, 0.0):
+                ln = self.line_at((x, y))
+                cands.append(("line", tuple(ln["start"])) if ln is not None
+                             else ("side", (math.floor(x), math.floor(y))))
+            for t, _owner in self._belt_taps(it, None, 0.0)[:60]:
+                cands.append(("side", tuple(t)))
+            if cands:
+                sources[it] = cands
+        consumers = [(tuple(pt["end"]), tuple(pt["approach"])) for s, pt in self.item_ports()
+                     if pt.get("item") == item and not pt.get("fed")]
+        others = {tuple(t) for _, pt in self.all_ports() for t in (pt["end"], pt["approach"])}
+        blocked = set(self.w.keepout) | set(self._bad_belt) | self._strip_tiles()
+        ug_block = self.ug_cover() if ug else None
+        log = self.log
+
+        def reach(free, cands, end, appr, avoid) -> str | None:
+            near = [c for c in cands if self._manhattan(c[1], end) <= belts.LINK_REACH]
+            if not near:
+                gap = min(self._manhattan(c[1], end) for c in cands)
+                return f"its nearest spare source is {gap:.0f} tiles away (a link reaches {belts.LINK_REACH})"
+            starts: dict = {}
+            for kind, c in sorted(near, key=lambda q: self._manhattan(q[1], end))[:12]:
+                if kind == "line":
+                    if free(c) and c not in avoid:
+                        starts[c] = 0.0
+                    continue
+                for dx, dy in belts.VEC.values():
+                    ins, st = (c[0] + dx, c[1] + dy), (c[0] + 2 * dx, c[1] + 2 * dy)
+                    if free(ins) and free(st) and not {ins, st} & avoid:
+                        starts.setdefault(st, 0.0)
+            if not starts:
+                return "no free side at any spare source for an inserter and a belt"
+            steps = belts.route_belt(free, starts, appr, end, avoid=avoid, underground=ug, margin=40,
+                                     limit=150_000, ug_block=ug_block)
+            if not steps:
+                return "no belt route" + ("" if ug else " (no underground belts yet)")
+            if belts.route_len(steps) > belts.LINK_ROUTE_MAX:
+                return f"the only belt route runs {belts.route_len(steps)} tiles (a link lays {belts.LINK_ROUTE_MAX})"
+            return None
+
+        def probe(grid, d) -> list[str]:
+            ports = d.ports()
+            taken = set(d.tiles())
+            for pt in ports:
+                taken |= {tuple(pt[k]) for k in ("chest", "inserter") if pt.get(k) is not None}
+            mine = {tuple(pt[k]) for pt in ports for k in ("end", "approach")}
+
+            def ground(t) -> bool:
+                return (t in grid.seen and t not in grid.water and t not in grid.cliffs and t not in grid.used
+                        and t not in blocked and t not in taken)
+            out = []
+            for pt in ports:
+                it = pt.get("item")
+                if it not in sources:
+                    continue                          # nothing of it to spare yet: supply, not the route
+                end, appr = tuple(pt["end"]), tuple(pt["approach"])
+                why = reach(lambda t, e=end, a=appr: t in (e, a) or ground(t), sources[it], end, appr,
+                            (others | mine) - {end, appr})
+                if why is not None:
+                    out.append(f"{it} into its port at {list(appr)}: {why}")
+            chests = [tuple(c) for r in d.routes for c in r.chests]
+            if consumers and chests:
+                errs = []
+                for end, appr in sorted(consumers, key=lambda q: min(self._manhattan(c, q[0]) for c in chests))[:3]:
+                    why = reach(lambda t, e=end, a=appr: t in (e, a) or ground(t), [("side", c) for c in chests],
+                                end, appr, (others | mine) - {end, appr})
+                    if why is None:
+                        errs = []
+                        break
+                    errs.append(why)
+                if errs:
+                    out.append(f"its {item} out to the port waiting for it: {errs[0]}")
+            if out:
+                log(f"[fab] route probe for {item} at ({d.box[0]}, {d.box[1]}): {out[0]}")
+            return out
+        return probe
+
+    def bad_places(self, item: str | None) -> list:
+        """Where a factory of this item stood with an input no belt could reach (recently): [(centre, input)]."""
+        now = self._minute()
+        return [(tuple(c), inp) for c, inp, m in (getattr(self, "_bad_places", None) or {}).get(item, [])
+                if now - m <= self.BAD_PLACE_MIN]
+
+    def _note_bad_place(self, site: Site) -> None:
+        """A factory taken down (replaced or removed) while an input port of it never got a belt for the route
+        (not for supply): its spot is remembered, so the same factory is not placed there again (bad_places)."""
+        if site is None or site.kind != "factory":
+            return
+        from .nodes import routing_fail
+        walled = []
+        for pt in site.params.get("ports", []):
+            if not pt.get("item") or pt.get("fed"):
+                continue
+            f = self._link_fails.get(tuple(pt["end"])) or {}
+            if routing_fail(f.get("reason")):
+                walled.append(pt["item"])
+        if not walled:
+            return
+        if not isinstance(getattr(self, "_bad_places", None), dict):
+            self._bad_places = {}
+        item = site.params.get("item")
+        if any(math.dist(c, site.centre) < 1.0 for c, _, _ in self._bad_places.get(item, [])):
+            return                                    # a replace notes it, then its remove: once is enough
+        self._bad_places.setdefault(item, []).append((list(site.centre), sorted(set(walled))[0], self._minute()))
+        self._bad_places[item] = self._bad_places[item][-6:]
+        self.log(f"[crew] site {site.id} ({item}) goes with its {sorted(set(walled))} input walled in: no {item} "
+                 f"factory within {self.BAD_PLACE_TILES:.0f} tiles of ({site.centre[0]:.0f}, {site.centre[1]:.0f}) "
+                 "unless its route probe passes")
 
     def spare_rate(self, item: str) -> float:
         """What the free sources of an item could still give a minute: an unused chest or line all it gets, a
@@ -1511,20 +1747,28 @@ class Crew:
         # only engines that feed the grid: a station not wired in, or an engine no pole reaches, adds nothing
         cap = 900.0 * sum(max(0, int(s.params.get("engines", 1)) - int(s.health.get(UNPLUGGED, 0)))
                           for s in self.base.of("steam_power") if s.powered is not False)
-        full = est = 0.0
+        full = est = ready = 0.0
         for s in self.base.sites:
             n = sum(s.health.values())
             util = (s.health.get("working", 0) + s.health.get("low_power", 0)) / n if n else 1.0
             util = max(self.UTIL_FLOOR, util)
+            mine = 0.0
             for e in s.entities:
-                full += self._draw_kw(e[0], 1.0) if not e[0].endswith("inserter") else \
+                mine += self._draw_kw(e[0], 1.0) if not e[0].endswith("inserter") else \
                     float((self.kn.entities.get(e[0]) or {}).get("max_energy_usage") or 0) * 60 / 1000
                 est += self._draw_kw(e[0], util)
+            full += mine
+            ins = [pt for pt in s.params.get("ports", []) if (pt.get("item") or "pack" in pt) and not pt.get("fuel")]
+            if ins and all(pt.get("fed") or pt.get("pack") for pt in ins):
+                ready += mine                         # a consumer with every input belted: it will run
         meas = self.measured_power(cap)
         demand = meas["consumption_kw"] if meas else est
+        # what the base draws once its fed sites run (run 20261122-133537: 1.48 MW measured on 4.5 MW with almost
+        # everything idle for lack of circuits; green, red, circuits and gears at work want more than 4.5 MW)
+        expected = EXPECTED_LOAD * ready
         return {"capacity_kw": round(cap), "demand_kw": round(demand), "demand_source": "measured" if meas else
-                "estimated", "full_load_kw": round(full), "stations": len(self.base.of("steam_power")),
-                "headroom_kw": round(cap - demand)}
+                "estimated", "full_load_kw": round(full), "expected_kw": round(expected),
+                "stations": len(self.base.of("steam_power")), "headroom_kw": round(cap - max(demand, expected))}
 
     def courier(self, force: bool = False) -> str | None:
         """One round of the workshop: empty the output chests of everything some cell needs, then top up every
@@ -1943,6 +2187,21 @@ class Crew:
             site.powered = self.check_power(site)
             return "powered" if site.powered else "has no poles to connect"
         if site.powered and self.check_power(site):
+            if getattr(self, "_power_by_grid", False) and site.kind != "steam_power":
+                # "powered" only because its poles are on the grid while more than a tenth of its machines say
+                # no_power: machines outside every pole's supply area are covered first. Run 20261122-133537:
+                # "connect site 33" answered "already powered" 7x while 30 of its inserters stood dark
+                covered = self._cover_unpowered(site)
+                left = getattr(self, "_cover_left", 0)
+                if covered:
+                    time.sleep(1.0 / self.w.speed)
+                    site.powered = self.check_power(site)
+                    return (f"{covered} pole(s) placed for machines no pole reached"
+                            + (f"; {left} still out of reach" if left else "") + self.short_note())
+                if left:
+                    raise BuildError(f"site {site.id}: {left} machine(s) say no_power and no free tile for a pole "
+                                     "reaches them (the layout leaves none): connecting again changes nothing; the "
+                                     "site has to be rebuilt or removed")
             return (f"plugged in {plugged} engine(s) with a pole each" if plugged else "already powered") + \
                 (self.short_note() if site.kind != "steam_power" else "")
         self.w.doing(f"routing power to site {site.id}")
@@ -2057,6 +2316,7 @@ class Crew:
     def _cover_unpowered(self, site: Site) -> int:
         """A pole (and its bridge to the grid) for each of the site's machines that reports no power and that no
         pole's supply area reaches (a pole taken up, a layout with a hole). Returns the poles placed."""
+        self._cover_left = 0                      # dark machines no pole could be placed for (see _connect)
         names = sorted({e[0] for e in site.entities if e[0] in ELECTRIC})
         if not names:
             return 0
@@ -2065,12 +2325,14 @@ class Crew:
         except BuildError:
             return 0
         placed = 0
+        left = max(0, len(dark) - 6)
         for x, y in dark[:6]:
             t = (math.floor(x), math.floor(y))
             try:
                 plan = self._pole_plan(t)
             except BuildError as exc:
                 self.foreman.note(f"site {site.id}: no pole for the machine at ({x}, {y}): {str(exc)[:80]}")
+                left += 1
                 continue
             if not plan:
                 continue                          # a pole reaches it: its network is the problem, not coverage
@@ -2085,8 +2347,10 @@ class Crew:
                     placed += 1
             except BuildError as exc:
                 self.foreman.note(f"site {site.id}: a pole for the machine at ({x}, {y}) failed: {str(exc)[:80]}")
+                left += 1
             finally:
                 self.w.recorder = None
+        self._cover_left = left
         return placed
 
     def _line_pole(self, length: float) -> str:
@@ -2101,6 +2365,7 @@ class Crew:
         return POLE
 
     def check_power(self, site: Site) -> bool:
+        self._power_by_grid = False           # True: said powered only because its poles are on the grid
         if site.kind == "steam_power":
             return self.station_on_grid(site)
         names = sorted({e[0] for e in site.entities if e[0] in ELECTRIC})
@@ -2111,6 +2376,7 @@ class Crew:
         # powered when (nearly) all of them are: a few machines cut off is a broken line, not a powered site
         if bool(mine) and sum(st == "no_power" for st in mine) <= len(mine) // 10:
             return True
+        self._power_by_grid = bool(mine)
         # Idle machines on poles that are on the grid's network are wired in: the grid is short (too little
         # power, boilers out of coal), which more poles cannot fix (run 20261119-011655: "connect site 59" five
         # times, 0 poles placed each time, at 2.7 MW for 12 MW of machines)
@@ -2271,6 +2537,8 @@ class Crew:
         why = self.removal_blocker(site)
         if why and not force:
             raise BuildError(f"not removing site {site.id} ({site.kind}): {why}. Replace it, or pass force: true")
+        self._note_bad_place(site)
+        feeders = self._feeders_of(site)
         detached = self._detach(site)
         cut = bool(detached) and "get linked again" in detached
         self._release_margin(site)
@@ -2322,8 +2590,54 @@ class Crew:
                 detached += "; relinked: " + self.link()[:200]
             except BuildError as exc:
                 detached += f"; relinking failed for now (the link step retries): {str(exc)[:160]}"
+        orphaned = self._note_orphans(feeders, site)
         return (f"removed site {site.id} ({site.kind}): {done} buildings back in the inventory"
-                + (f"; {detached}" if detached else ""))
+                + (f"; {detached}" if detached else "") + (f"; {orphaned}" if orphaned else ""))
+
+    def _feeders_of(self, site: Site) -> dict[int, str]:
+        """{producer site id: item} of every site whose output a belt carries into this one."""
+        out: dict[int, str] = {}
+        for ln in self.links:
+            if ln.get("to_site") != site.id or ln.get("kind") == "science":
+                continue
+            src = self._source_site(tuple(ln["source"]), ln.get("item"))
+            if src is not None and src is not site:
+                out[src.id] = ln.get("item")
+        return out
+
+    def _note_orphans(self, feeders: dict, gone: Site) -> str:
+        """Producers whose only consumer was just removed: nothing draws from them any more. Kept as orphans
+        (assess.orphan_alerts) until linked to another consumer or removed. Run 20261122-133537: cable factory 43
+        (143/min) lost circuit factory 46 and stood 12 of 13 machines idle, still tapping a copper belt."""
+        if not isinstance(getattr(self, "orphans", None), dict):
+            self.orphans = {}
+        out = []
+        for sid, item in feeders.items():
+            s = self.base.get(sid)
+            if s is None or s.kind not in ("factory", "workshop") or self._draws_from(s):
+                continue
+            self.orphans[sid] = {"item": item, "lost": gone.id, "minute": self._minute()}
+            out.append(f"site {sid} ({item}) lost its only consumer")
+        return "; ".join(out)
+
+    def _draws_from(self, site: Site) -> bool:
+        """Does any link take from this site's outputs (its chests or its line's tail)?"""
+        srcs = {(round(x, 2), round(y, 2)) for x, y, _ in site.chests}
+        if site.params.get("line"):
+            srcs.add(tuple(round(v, 2) for v in site.params["line"]["source"]))
+        return any((round(ln["source"][0], 2), round(ln["source"][1], 2)) in srcs for ln in self.links)
+
+    def orphan_sites(self) -> list[tuple[Site, dict]]:
+        """Orphans still standing that nothing draws from (a link laid since clears one)."""
+        orphans = getattr(self, "orphans", None) or {}
+        out = []
+        for sid, o in list(orphans.items()):
+            s = self.base.get(sid)
+            if s is None or self._draws_from(s):
+                orphans.pop(sid, None)
+                continue
+            out.append((s, o))
+        return out
 
     # A margin of one tile around each site (and along each trunk) stays free of buildings, so belts can always
     # reach a site's edge and pass between neighbours. Run 20261119-154451: three research stations built in the
@@ -2629,6 +2943,11 @@ class Crew:
             return float(ln.get("rate") or 0.0)
         if _depleted(site):
             return 0.0
+        if site.kind == "smelter_column" and any(pt.get("item") and not pt.get("fuel") and not pt.get("fed")
+                                                 for pt in site.params.get("ports", [])):
+            # no ore comes in (its trunk never joined): it carries nothing. Run 20261122-133537: column 33's
+            # 281/min counted as spare iron and was offered as the circuit factory's iron source
+            return 0.0
         furnaces = [e[0] for e in site.entities if e[0] in self.LINE_FURNACE]
         if not furnaces:
             return float(ln.get("rate") or 0.0)
@@ -2909,9 +3228,13 @@ class Crew:
             targets = self._sideload_ports(chain, item)
             near = lambda q: min(math.dist(q[0]["end"], (x, y)) for x, y, _ in spare)
             rec = None
-            for port, ln in sorted(targets, key=near)[:self.BOOST_TRIES]:
+            # the nearest side-joins first; then the three nearest again with a wide detour (run 20261122-133537:
+            # "no belt route from a spare ... source to the side of its belts" on every build, mines standing full)
+            order = [(t, 40) for t in sorted(targets, key=near)[:self.BOOST_TRIES]] + \
+                [(t, 70) for t in sorted(targets, key=near)[:3]]
+            for (port, ln), margin in order:
                 srcs = sorted(spare, key=lambda q: math.dist(q[:2], port["end"]))[:3]
-                plan = self._plan_link(port, srcs, [], 40, False)
+                plan = self._plan_link(port, srcs, [], margin, False)
                 if plan is None:
                     continue
                 try:
@@ -3003,7 +3326,10 @@ class Crew:
         if skipped:                                   # left out above without a word before (run 20261120-092648)
             parts.append(f"not tried ({len(skipped)}, no source with spare): " + ", ".join(
                 f"{pt['item']} into site {s.id}" for s, pt in skipped[:8]) + (" ..." if len(skipped) > 8 else ""))
-        stuck = self.stuck_links()
+        # ok or not by the consumer ports: a science output with no free station port is said above, not a
+        # failed link step (run 20261122-133537: "link" failed ~20x on one science text)
+        packs_at = {(x, y) for x, y, _ in self.science_sources()}
+        stuck = [q for q in self.stuck_links() if tuple(q["at"]) not in packs_at]
         if not done and not science_done and (failed or stuck):
             if not failed:
                 parts.append("nothing new to try: " + "; ".join(
@@ -3087,11 +3413,15 @@ class Crew:
         site = self.base.get(site_id)
         if site is None:
             raise BuildError(f"there is no site {site_id}")
-        ports = [pt for pt in site.params.get("ports", []) if pt.get("item") and not pt.get("trunk")
+        ports = [pt for pt in site.params.get("ports", []) if pt.get("item")
                  and not pt.get("fed") and (item is None or pt["item"] == item)]
         if not ports:
             raise BuildError(f"site {site.id} has no unfed input port" + (f" for {item}" if item else ""))
         port = ports[0]
+        if port.get("trunk"):
+            # a column's ore port is what a trunk is for: its source is the outpost's head. Run 20261122-133537:
+            # "trunk site 33" was ordered 6x and each answered "no unfed input port for iron-ore"
+            return self._outpost_trunk(site, port)
         it = port["item"]
         srcs = sorted(self._free_outputs(it, site, self._need(port)),
                       key=lambda q: self._manhattan(q[:2], port["end"]))
@@ -3120,7 +3450,7 @@ class Crew:
                 starts = []
                 for dx, dy in belts.VEC.values():
                     ins, start = (c[0] + dx, c[1] + dy), (c[0] + 2 * dx, c[1] + 2 * dy)
-                    if not all(self._belt_free(t) for t in (ins, start)) or {ins, start} & (others | self._bad_belt):
+                    if not all(self._belt_free(t) for t in (ins, start)) or {ins, start} & (others | self.bad_tiles()):
                         continue
                     facing = next(k for k, v in belts.VEC.items() if v == (-dx, -dy))
                     starts.append((start, ins, facing))
@@ -3228,8 +3558,9 @@ class Crew:
 
     LINK_ADVICE = ("A failed link is retried by itself once a site is built or removed; asking for link again "
                    "before that changes nothing. To unblock it: remove the site named as walling it in (if it is "
-                   "not needed), build the consumer again on open ground nearer its source, or build a new source "
-                   "of the item next to the consumer.")
+                   "not needed), build a new source of the item next to the consumer, or replace the consumer: a "
+                   "replace is placed only where a route probe finds a belt route for every input, and is refused "
+                   "near a spot where the same factory already failed.")
 
     def link_science(self) -> str:
         """Belt every science output that has none to a free port of a research station: an inserter lifts the
@@ -3250,7 +3581,9 @@ class Crew:
             raise BuildError(f"{len(waiting)} science output(s) reach no research station: " + "; ".join(
                 f"{p} at ({x:.0f}, {y:.0f}) failed {(self._link_fails.get((x, y)) or {}).get('n', 0)}x"
                 for x, y, p in waiting[:3]) + " (each retries after its back-off)")
-        done, failed = [], []
+        done, failed, spare_now = [], [], []
+        if not isinstance(getattr(self, "_spare_science", None), dict):
+            self._spare_science = {}
         with self.w.step("build"):
             for x, y, pack in sorted(todo, key=lambda q: min(math.dist(q[:2], s.centre) for s in stations)):
                 # a station runs only with every colour the research needs: fill the one that lacks this
@@ -3263,6 +3596,13 @@ class Crew:
                                key=lambda q: q[:3])
                 ports = [(q[2], q[3], q[4]) for q in ports]
                 if not ports:
+                    if self._pack_everywhere(pack, stations):
+                        # every station already gets this colour from another output: this one is spare, not a
+                        # failed link (run 20261122-133537: "link" failed ~20x on "every port is taken", which fed
+                        # replans and a fixer's guess, research station 47 that only ever got green)
+                        spare_now.append(f"{pack} at ({x:.0f}, {y:.0f})")
+                        self._spare_science[(x, y)] = pack
+                        continue
                     failed.append(f"{pack} at ({x:.0f}, {y:.0f}): every port is taken (build another station)")
                     continue
                 rec, err = None, None
@@ -3282,15 +3622,31 @@ class Crew:
         if moved:
             failed.append(moved)
         msg = (f"linked {len(done)}: " + "; ".join(done)) if done else "linked nothing"
+        said = self.__dict__.setdefault("_spare_said", set())
+        new_spare = [s for s in spare_now if s not in said]
+        if new_spare:                                  # said once: it is no failure and needs nothing
+            said.update(new_spare)
+            msg += (f". Spare ({len(new_spare)}): " + ", ".join(new_spare[:4])
+                    + " (every station already gets that colour by belt from another output)")
         if failed:
             msg += f". Not linked ({len(failed)}): " + "; ".join(failed[:3])
             if not done:
                 raise BuildError(msg)
         return msg
 
+    @staticmethod
+    def _pack_everywhere(pack: str, stations: list) -> bool:
+        """Does every research station already get this colour by belt?"""
+        return bool(stations) and all(any(pt.get("pack") == pack for pt in s.params.get("ports", []))
+                                      for s in stations)
+
     def unreached_science(self) -> list[tuple[float, float, str]]:
-        """Science outputs no station port takes by belt, whether or not their next retry is due yet."""
-        return [(x, y, p) for x, y, p in self.science_sources() if (x, y) not in self.science_links]
+        """Science outputs no station port takes by belt, whether or not their next retry is due yet. A spare
+        output (link_science: every station already gets its colour) is not waiting for anything."""
+        stations = [s for s in self.base.of("labs") if s.params.get("station")]
+        spare = getattr(self, "_spare_science", None) or {}
+        return [(x, y, p) for x, y, p in self.science_sources() if (x, y) not in self.science_links
+                and not ((x, y) in spare and self._pack_everywhere(p, stations))]
 
     LAB_MOVE_FAILS = 3             # failures of one science link before the labs come to the science instead
     LAB_MOVE_GAP_MIN = 60.0
@@ -3459,7 +3815,7 @@ class Crew:
         xs, ys = [c[0][0] for c in cands] + [appr[0]], [c[0][1] for c in cands] + [appr[1]]
         half = min(80, int(max(max(xs) - min(xs), max(ys) - min(ys)) / 2) + 10)
         self.w.survey_area((min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2, half=half, step=32)
-        bad = self._bad_belt
+        bad = self.bad_tiles()
         resting = self._resting_starts()               # starts whose links kept rolling back (_note_rollback)
         starts: dict = {}
         for c, key, label, cost, owner in cands:
@@ -3607,6 +3963,41 @@ class Crew:
         now = self._minute()
         return {t for t, m in rested.items() if now - m < self.ROLLBACK_REST_MIN}
 
+    def link_tail(self, plan: dict) -> tuple[int, int] | None:
+        """The belt a link with no inserter runs on from: its line's tail, or an outpost's head for a trunk
+        (None: neither)."""
+        if plan.get("kind") == "trunk" and plan.get("source") is not None:
+            return tuple(int(v) for v in plan["source"])
+        ln = self.line_at(plan.get("source") or ())
+        return tuple(ln["tail"]) if ln is not None and ln.get("tail") is not None else None
+
+    # A tile the game refused a link's belt on is avoided, but not for good. Run 20261122-133537: refusals caused
+    # by the bot itself (a wrongly declared join) and passing ones (cannot_place twice on an open tile) banned the
+    # start of 7 plate lines and both ends of the circuit factory's iron port for the rest of the run, so no link
+    # could ever be laid into it. A banned tile is tried again after BAD_BELT_REST_MIN.
+    BAD_BELT_REST_MIN = 30.0
+
+    def ban_tile(self, t) -> None:
+        t = (int(t[0]), int(t[1]))
+        self._bad_belt.add(t)
+        at = getattr(self, "_bad_belt_at", None)
+        if not isinstance(at, dict):
+            at = self._bad_belt_at = {}
+        at[t] = self._minute()
+
+    def bad_tiles(self) -> set:
+        """Tiles a link's belt keeps off now: refused within the last BAD_BELT_REST_MIN. A ban with no time yet
+        (an older save, or code that adds to the set directly) rests from the first time it is seen here."""
+        at = getattr(self, "_bad_belt_at", None)
+        if not isinstance(at, dict):
+            at = self._bad_belt_at = {}
+        now = self._minute()
+        for t in list(self._bad_belt):
+            if now - at.setdefault(t, now) >= self.BAD_BELT_REST_MIN:
+                self._bad_belt.discard(t)
+                at.pop(t, None)
+        return self._bad_belt
+
     def _build_link(self, plan: dict, port: dict, site: Site, kind: str, pack: str | None,
                     extra: dict | None = None) -> dict:
         from . import belts
@@ -3628,7 +4019,8 @@ class Crew:
             if ins is not None:
                 self.w.place(ins_kind, ins[0] + 0.5, ins[1] + 0.5, facing, {ins})
             with belts.job_for(self.w, [pack or port["item"]], belts.tiles_of(steps),
-                               belts.link_joins(steps, from_belt=ins is None)):
+                               belts.link_joins(steps, from_belt=ins is None,
+                                                tail=self.link_tail(plan) if ins is None else None)):
                 belts.lay_belt(self.w, steps)
             if ins is not None:
                 self._power_tile(ins, avoid=others | set(belts.tiles_of(steps)), plan=power)
@@ -3636,7 +4028,7 @@ class Crew:
             self.w.recorder = None
             bad = getattr(exc, "tile", None)
             if bad is not None:
-                self._bad_belt.add(tuple(bad))
+                self.ban_tile(bad)
             self._undo(ents)
             if ents and bad is None:
                 self._note_rollback(plan, port, exc)
@@ -3866,7 +4258,8 @@ class Crew:
                 if ins is not None:
                     self.w.place(ins_kind, ins[0] + 0.5, ins[1] + 0.5, facing, {ins})
                 with belts.job_for(self.w, [rec["item"]], belts.tiles_of(rec["steps"]),
-                                   belts.link_joins(rec["steps"], from_belt=ins is None)):
+                                   belts.link_joins(rec["steps"], from_belt=ins is None,
+                                                    tail=self.link_tail(rec) if ins is None else None)):
                     belts.lay_belt(self.w, rec["steps"])
                 for name, x, y, d in poles:
                     self.w.place(name, x, y, d, self.w.footprint(name, x, y, d))

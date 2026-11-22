@@ -71,10 +71,23 @@ def pack_rate(crew, pack: str) -> float:
     return round(float((items.get(pack) or {}).get("made_per_min") or 0), 1)
 
 
+def supplying(site) -> bool:
+    """Can this site make plates at all: its ore input belted (a column's trunk, a port) and its machines on power?
+    Run 20261122-133537: column 33 (no trunk, 30 inserters without power) counted 281/min of iron the base never
+    saw; plates.supply_per_min said 622 iron against 194 measured."""
+    for pt in site.params.get("ports", []) or []:
+        if pt.get("item") and not pt.get("fuel") and not pt.get("fed"):
+            return False                              # (coal: the foreman feeds a row by hand until its belt)
+    n = sum((site.health or {}).values())
+    return not (n and (site.health or {}).get("no_power", 0) > n // 10)
+
+
 def plate_supply(crew) -> dict[str, float]:
     """Plates a minute our mines can make (burner furnaces 15, electric units 18; workshop cells excluded)."""
     out: dict[str, float] = {}
     for s in crew.base.sites:
+        if not supplying(s):
+            continue
         steel = any(e[0] == "steel-furnace" for e in s.entities)       # upgraded rows smelt twice as fast
         if s.kind == "burner_mine":
             per = 15.0

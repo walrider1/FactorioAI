@@ -868,6 +868,11 @@ class Factory(Module):
 
     MAX_ASM = 12                             # bigger chains are split into factories that feed each other
     FEEDS = True                             # plates come in on one belt each (a feed), once lines exist
+    # Set by the crew around one build (Crew._set_probes): probe(grid, design) -> [why an input or the output
+    # cannot be belted there]; avoid: [(centre, input)] where this item's factory already stood walled in
+    probe = None
+    avoid: tuple = ()
+    AVOID_TILES = 20.0
 
     def feeds_for(self, w, supplied) -> frozenset:
         """Supplied items that come in on a belt straight onto the factory's own (docs/logistics-plan.md, phase
@@ -1008,7 +1013,7 @@ class Factory(Module):
         raise BuildError(f"no {item} factory fits. " + " | ".join(failures))
 
     # ------------------------------------------------------------ background designs
-    def prefetch(self, w: FreeWorld, base: Base, p: dict) -> bool:
+    def prefetch(self, w: FreeWorld, base: Base, p: dict, probe=None) -> bool:
         """Start designing a factory goal that is still in the queue, on a thread of its own, from a snapshot of
         the ground seen so far (no walking to look), so the design is ready when the goal comes up instead of
         the crew waiting minutes for it then. One at a time. Returns whether one was started."""
@@ -1050,6 +1055,8 @@ class Factory(Module):
                                        max_ug_pairs=ug * 2, anchors=anchors, margin=24,
                                        max_attempts=3 if placer == "llm" else None, supplied=supplied,
                                        feeds=feeds, feed_side=sides[focus])
+                    if d.ok and probe is not None and probe(grid, d):
+                        break                            # an input walled off here: the next place
                     if d.ok:
                         return (d, grid, focus, frozenset(supplied))
             return None
@@ -1088,6 +1095,12 @@ class Factory(Module):
         if taken:
             w.log(f"[fab] the background {key[0]} design lost {len(taken)} tiles to other builds: designing again")
             return None
+        if self.probe is not None:               # its inputs checked on today's ground, not the snapshot's
+            bad = w.think(f"checking the belt routes into the background {key[0]} design", self.probe,
+                          Grid.from_world(w), d)
+            if bad:
+                w.log(f"[fab] the background {key[0]} design fails the route probe ({bad[0][:100]}): designing again")
+                return None
         w.log(f"[fab] using the {key[0]} factory designed in the background ({d.placer}, at "
               f"({focus[0]:.0f}, {focus[1]:.0f}))")
         self._save_case(grid, key[0], key[1], focus, f"{d.placer}: ok (background)")
@@ -1113,11 +1126,16 @@ class Factory(Module):
         tried: list[str] = []
         causes: dict[str, int] = {}
         first = None
+        probe = self.probe
+        walled: dict[tuple, str] = {}            # places whose design left an input (or the output) unroutable
+        fallback = None                          # the best design the probe refused: built only as a last resort
         t_start = time.monotonic()
         for r, margin, pairs, spots in ladder:
             for focus in spots:
                 if time.monotonic() - t_start > budget:          # never freeze the crew designing for long
                     break
+                if tuple(focus) in walled:                       # the place walls an input off at any rate
+                    continue
                 self._survey(w, focus)
                 grid = Grid.from_world(w)
                 if off_ore:                                       # leave every ore tile for drills
@@ -1126,6 +1144,16 @@ class Factory(Module):
                                     supplied=supplied)
                 if first is None:
                     first = (grid, focus, r)
+                if d.ok and probe is not None:
+                    bad = w.think(f"checking the belt routes into a {item} factory at ({focus[0]:.0f}, "
+                                  f"{focus[1]:.0f})", probe, grid, d)
+                    if bad:
+                        walled[tuple(focus)] = bad[0]
+                        causes["walled-in input"] = causes.get("walled-in input", 0) + 1
+                        tried.append(f"{r}/min at ({focus[0]:.0f}, {focus[1]:.0f}) [probe: {bad[0][:90]}]")
+                        if fallback is None:
+                            fallback = (d, grid, focus, r, bad)
+                        continue
                 if d.ok:
                     d.notes.append(f"asked {rate}/min, designed {r}/min" if r < rate else "")
                     if off_ore:
@@ -1140,6 +1168,26 @@ class Factory(Module):
                             else "other")
                     causes[kind] = causes.get(kind, 0) + 1
                 tried.append(f"{r}/min at ({focus[0]:.0f}, {focus[1]:.0f})")
+        if fallback is not None:
+            # no place passed the route probe. The best design still goes up (a factory that runs beats none)
+            # with a warning, unless it stands where this factory already failed walled in: then nothing is
+            # placed and the error names the input (run 20261122-133537: four circuit factories, ~700 buildings)
+            d, grid, focus, r, bad = fallback
+            near = [(c, inp) for c, inp in (self.avoid or ()) if math.dist(c, focus) <= self.AVOID_TILES]
+            if near:
+                return (f"no place lets every input reach it by belt: {bad[0]}. The best one, ({focus[0]:.0f}, "
+                        f"{focus[1]:.0f}), is within {self.AVOID_TILES:.0f} tiles of where a {item} factory stood "
+                        f"with its {near[0][1]} walled in, so it is not built there again (nothing placed). Tried: "
+                        f"{', '.join(tried[:4])}. A source of the walled-in input next to the consumer, or room "
+                        "cleared between it and its sources, lets the next try pass")
+            w.log(f"[fab] WARNING: no place for the {item} factory passes the route probe; building the best one "
+                  f"at ({focus[0]:.0f}, {focus[1]:.0f}) anyway: {'; '.join(bad[:2])}")
+            d.notes.append(f"route probe failed: {bad[0][:120]}")
+            if r < rate:
+                d.notes.append(f"asked {rate}/min, designed {r}/min")
+            self.designs[key] = (d, grid, focus)
+            self._save_case(grid, item, r, focus, f"{d.placer}: ok, route probe failed")
+            return self.designs[key]
         if first is not None:                    # the terrain it failed on: a case for the chiplet bench
             self._save_case(first[0], item, first[2], first[1], f"failed: {'; '.join(tried[:3])}"
                             + (" (plate-fed)" if off_ore else ""))
@@ -1150,7 +1198,9 @@ class Factory(Module):
                   "no belt route": "the ground is too crowded to route belts: research logistics for undergrounds, "
                                    "or remove what crowds the spot",
                   "no room for assemblers": "not enough free land: clear ground, or split the chain (inputs)",
-                  "power": "the poles could not be planned: check the power network"}.get(main, "")
+                  "power": "the poles could not be planned: check the power network",
+                  "walled-in input": "every place leaves an input or the output with no belt route: a source of "
+                                     "it next to the consumer, or room cleared between them"}.get(main, "")
         return (f"tried {len(tried)} designs ({', '.join(tried[:6])}). Main cause: {main} ({causes}). {advice}")
 
     @staticmethod
@@ -1170,6 +1220,12 @@ class Factory(Module):
         if not spots:
             return []
         ore = set().union(*(set(v) for v in w.resources.values())) if w.resources else set()
+        groups: dict[str, list[tuple[float, float]]] = {}
+        for s in spots:                          # (x, y, what): one group per plate, "out" for its consumer
+            groups.setdefault(str(s[2]) if len(s) > 2 else "", []).append((float(s[0]), float(s[1])))
+        if len(groups) > 1:
+            return self._between(w, groups, ore)
+        spots = [(float(s[0]), float(s[1])) for s in spots]
         out: list[tuple[float, float]] = []
         for k, (sx, sy) in enumerate(spots[:3]):
             cands = []
@@ -1183,6 +1239,31 @@ class Factory(Module):
             for _, _, c in sorted(cands)[:2]:
                 if all(math.dist(c, q) >= 12 for q in out):
                     out.append(c)
+        return out
+
+    def _between(self, w, groups: dict, ore: set, n: int = 4) -> list[tuple[float, float]]:
+        """Open ground scored by the summed distance to every group of spots (each plate's sources, the
+        consumer's port): a factory with iron on one side of the base and copper on the other goes between them,
+        not beside the one it needs most with the other walled off (run 20261122-133537, circuits)."""
+        firsts = [pts[0] for pts in groups.values()]
+        mid = (sum(p[0] for p in firsts) / len(firsts), sum(p[1] for p in firsts) / len(firsts))
+        centres = [mid] + [p for pts in groups.values() for p in pts[:2]]
+        cands: dict[tuple, float] = {}
+        for cx, cy in centres:
+            for r in ((0, 12, 24) if (cx, cy) == mid else (16, 24)):
+                for a in (range(8) if r else range(1)):
+                    x = cx + r * math.cos(math.pi * a / 4)
+                    y = cy + r * math.sin(math.pi * a / 4)
+                    score = self._openness(w, x, y, ore)
+                    if score >= 0.6:
+                        cands[(round(x, 1), round(y, 1))] = score
+        cost = lambda c: sum(min(math.dist(c, q) for q in pts) for pts in groups.values())   # noqa: E731
+        out: list[tuple[float, float]] = []
+        for c in sorted(cands, key=lambda c: (round(cost(c) / 8), -cands[c])):
+            if all(math.dist(c, q) >= 12 for q in out):
+                out.append(c)
+            if len(out) >= n:
+                break
         return out
 
     def _fed_places(self, w, base, p: dict, n: int = 6) -> list[tuple[float, float]]:
