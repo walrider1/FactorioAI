@@ -251,3 +251,31 @@ def test_a_gap_that_stays_blocked_gives_up_and_asks_for_a_rebuild():
     al = gaps.alerts(crew)
     assert al[0]["key"] == "gap-stuck-28" and al[0]["fix"]["do"] == "replace"
     assert "missing_buildings" in site.brief() and "gaps" not in site.brief_params()
+
+
+def test_a_dead_end_is_never_bridged_into_an_unfed_port_line():
+    """Green science waits for its circuit link: the belt behind that port is unfed by design, and a gear line
+    that ends two tiles away must not be run into it."""
+    ents = [("transport-belt", 10.5, 10.5, "north"),           # behind the unfed circuit port at (10, 11)
+            ("transport-belt", 10.5, 9.5, "north"),
+            ("transport-belt", 13.5, 9.5, "east"),             # orphan of a gear line's start
+            ("transport-belt", 12.5, 11.5, "north"),           # a gear line's dead end, (12, 10) free ahead
+            ("inserter", 12.5, 12.5, "south")]                 # ... fed by an assembler's output inserter
+    site = Site("factory", {"item": "logistic-science-pack", "per_minute": 30.0,
+                            "ports": [{"item": "electronic-circuit", "end": (10, 11), "approach": (10, 12),
+                                       "feed": True, "fed": None}]}, (11, 10), entities=ents, id=25)
+    site.health = {"waiting_for_source_items": 40, "working": 2}
+    game = TinyGame(entities=[{"name": n, "x": x, "y": y, "direction": d} for n, x, y, d in ents])
+    found = gaps.holes(_world(game), site, game._described())
+    assert all("(10, 10)" not in g["why"] for g in found)
+    assert found and all(g["why"].endswith("(13, 9)") for g in found)   # the gear line gets its own orphan
+
+
+def test_a_line_is_never_closed_into_a_loop():
+    """A U-shaped line whose start is unfed (its feed broke upstream): its end is two tiles from its own start."""
+    ents = [("transport-belt", 0.5, 0.5, "east"), ("transport-belt", 1.5, 0.5, "east"),
+            ("transport-belt", 2.5, 0.5, "south"), ("transport-belt", 2.5, 1.5, "south"),
+            ("transport-belt", 2.5, 2.5, "west"), ("transport-belt", 1.5, 2.5, "west")]   # ends facing (0, 2)
+    site = Site("factory", {"item": "iron-gear-wheel"}, (1, 1), entities=ents, id=7)
+    game = TinyGame(entities=[{"name": n, "x": x, "y": y, "direction": d} for n, x, y, d in ents])
+    assert gaps.holes(_world(game), site, game._described()) == []

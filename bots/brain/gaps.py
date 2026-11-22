@@ -140,6 +140,16 @@ def holes(w, site, entities: list[dict]) -> list[dict]:
             orphans[t] = e.get("direction", "north")
     if not ends or not orphans:
         return []
+    # a port's tiles are where its link arrives: no bridge runs over them, and the belt right behind a port (which
+    # waits for that link when the port is not fed yet) is joined only by the link's own last belt. Otherwise a
+    # dead end nearby would run its items into another input (gears onto a factory's circuit line)
+    ports = [(tuple(pt["end"]), tuple(pt["approach"])) for pt in site.params.get("ports", [])
+             if pt.get("end") and pt.get("approach")]
+    reserved = {t for p in ports for t in p}
+
+    def port_of(t: Tile):
+        return next((e for e, _ in ports if abs(e[0] - t[0]) + abs(e[1] - t[1]) == 1), None)
+
     # a free tile another belt already points into would take that belt's items too: never part of a bridge
     into: dict[Tile, set[Tile]] = {}
     for t, e in belts.items():
@@ -148,7 +158,7 @@ def holes(w, site, entities: list[dict]) -> list[dict]:
 
     def bridge(end: Tile, first: Tile):
         """Shortest way from the dead end's next tile to a tile beside an orphan, entering it legally."""
-        if into.get(first, set()) - {end}:
+        if into.get(first, set()) - {end} or first in reserved:
             return None
         q = deque([(first, [first])])
         seen = {first}
@@ -156,21 +166,40 @@ def holes(w, site, entities: list[dict]) -> list[dict]:
             t, path = q.popleft()
             for d, (dx, dy) in VEC.items():
                 n = (t[0] + dx, t[1] + dy)
-                if n in orphans and n != end and ahead(n, orphans[n]) != t:   # not into its front
+                if n in orphans and n != end and ahead(n, orphans[n]) != t \
+                        and port_of(n) in (None, end):             # not into its front, not another port's
                     return n, path
             if len(path) >= MAX_BRIDGE:
                 continue
             for dx, dy in VEC.values():
                 n = (t[0] + dx, t[1] + dy)
-                if n in seen or n in occupied or n in blocked or n in pointed:
+                if n in seen or n in occupied or n in blocked or n in pointed or n in reserved:
                     continue
                 seen.add(n)
                 q.append((n, path + [n]))
         return None
 
+    unders = {_tile((e["x"], e["y"])): e for e in entities if e["name"] == "underground-belt"}
+
+    def downstream(start: Tile, limit: int = 600) -> set[Tile]:
+        """Every belt tile items from `start` pass (through undergrounds too)."""
+        out, t = set(), start
+        while t not in out and len(out) < limit:
+            out.add(t)
+            e = belts.get(t) or unders.get(t)
+            if e is None:
+                break
+            if e["name"] == "underground-belt" and e.get("belt_type") == "input" and e.get("pairs_with"):
+                t = _tile(e["pairs_with"])
+                continue
+            t = ahead(t, e.get("direction", "north"))
+        return out
+
     found = []
     for end, first in ends:
         b = bridge(end, first)
+        if b is not None and end in downstream(b[0]):
+            continue                     # its own start: closing it would make a loop, not a line
         if b is not None:
             found.append((len(b[1]), end, b[0], b[1]))
     out, used_ends, used_orphans, used_tiles = [], set(), set(), set()
@@ -202,12 +231,12 @@ def audit(crew, force: bool = False) -> list[str]:
             continue
         if not force and now - seen_at.get(site.id, -1e9) < SITE_EVERY_MIN:
             continue
-        seen_at[site.id] = now
         tiles = [t for t, _ in _site_belts(site)] + _feed_ends(site)
         try:
             found = holes(crew.w, site, _look(crew, tiles))
-        except Exception:  # noqa: BLE001 - out of observe range, a stub world: no verdict this time
+        except Exception:  # noqa: BLE001 - out of observe range, a stub world: no verdict, again next audit
             continue
+        seen_at[site.id] = now
         n = record(site, found)
         if n:
             notes.append(f"site {site.id}: {n} belt(s) missing in its belt lines (first at "
