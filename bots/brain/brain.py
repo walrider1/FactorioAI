@@ -37,6 +37,9 @@ GOAL_HELP = """Goals you may give (JSON objects, done in order by the crew):
                                                     preview a chiplet without building: whether it fits the ground,
                                                     its size, kit, plate cost and what must be researched first
 - {"do": "wait", "seconds": n}                       let the base run (fuel, plates and labs are still tended)
+- {"do": "feed", "site": <labs id>, "item": "<pack>"}   take science packs to the labs now (from the factories'
+                                                    chests, else by hand); the rule floor does it by itself
+                                                    when labs wait for packs that exist
 - {"do": "feed", "site": <id>, "item": "coal", "count": n}   put fuel into a site now (a power station's boiler
                                                     chest, or a mine's drills)
 - {"do": "link"}                                     belt outputs to the input ports that want them: science to the
@@ -59,6 +62,12 @@ GOAL_HELP = """Goals you may give (JSON objects, done in order by the crew):
 - {"do": "repair", "site": <id>}                     place the pipes and buildings a build could not, and close
                                                     holes in a site's belt lines (the pipe-gap and gap alerts
                                                     name them): fluid and items stop at a gap
+- {"do": "act", "steps": [{"op": ...}, ...]}         ANY direct action, done exactly as said, step by step:
+                                                    insert {site|at, item, count}, take {site|at, item, count},
+                                                    craft {item, count}, go {at}, place {entity, at, dir},
+                                                    pickup {at}, mine {item, count}, wait {seconds}. For anything
+                                                    no other goal does (hand-feed a machine, carry packs to labs,
+                                                    clear a tile, move the character)
 - {"do": "modules", "site": <id>}                    productivity modules into a site's machines (the silo first,
                                                     then science and rocket intermediates); the crew does this
                                                     by itself once modules can be had
@@ -603,7 +612,7 @@ class LLMStrategist:
         goals = [g for g in out.get("goals") or [] if isinstance(g, dict) and g.get("do") in
                  ("build", "research", "stock", "remove", "replace", "connect", "design", "wait", "feed",
                   "priority", "link", "link_science", "relink", "upgrade", "scout", "repair", "repipe", "purge", "trunk",
-                  "modules")][:6]
+                  "modules", "act")][:6]
         if out.get("doctrine"):
             self.doctrine = str(out["doctrine"])[:800]
         plan = {"note": str(out.get("note", ""))[:300], "doctrine": self.doctrine, "goals": goals,

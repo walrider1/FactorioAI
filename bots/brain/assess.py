@@ -32,12 +32,13 @@ from typing import Any
 from .belts import LINK_REACH
 
 FUELS = ("coal", "wood")
-CRITICAL = ("coal", "boiler", "power", "fuel", "pipe", "belt-foreign", "gap-")   # keys the rule floor fixes itself
+CRITICAL = ("coal", "boiler", "power", "fuel", "pipe", "belt-foreign", "gap-", "labs-feed")   # keys the rule floor fixes itself
 SOON = ("rebuild-", "swap-", "ore-soon-", "trunk-", "modules-")  # keys it queues by itself without pausing the goal in hand (planned)
 FAR_LINK = "a link reaches"     # in a link failure: only the distance stopped it (Crew._link_port), a trunk fixes it
 TRUNK_AUTO_MAX = 600            # Manhattan tiles: a farther source is better made next to the site than belted over
 GOAL_DOS = ("build", "research", "stock", "remove", "replace", "connect", "feed", "priority", "wait",
-            "link", "link_science", "scout", "upgrade", "repair", "repipe", "relink", "purge", "trunk", "modules")
+            "link", "link_science", "scout", "upgrade", "repair", "repipe", "relink", "purge", "trunk", "modules",
+            "act")
 LONG_GOAL_MIN = 8.0
 
 
@@ -766,6 +767,17 @@ def detect(crew) -> list[dict]:
     stall = crew.research_stall()
     if stall:
         out.append({"level": "warn", "key": "research-stalled", "what": stall, "fix": None})
+    try:
+        starving = crew.foreman._labs_starving()
+    except Exception:  # noqa: BLE001 - stub crews in tests
+        starving = False
+    if starving:
+        # labs out of packs while packs are on hand or in chests: research is what everything waits on, so the
+        # rule floor feeds them at once (the crew's lab round), ahead of the goal in hand
+        lab = next((s for s in base.of("labs") if s.health.get("missing_science_packs", 0)), None)
+        out.append({"level": "urgent", "key": f"labs-feed-{lab.id if lab else 0}",
+                    "what": "labs wait for science packs that are on hand or in chests: taken to them now",
+                    "fix": {"do": "feed", "site": lab.id if lab else None, "item": "automation-science-pack"}})
     if base.of("labs") and not (w.research or {}).get("current"):
         out.append({"level": "warn", "key": "labs-idle", "what": "the labs have nothing to research", "fix": None})
     cur = crew.current

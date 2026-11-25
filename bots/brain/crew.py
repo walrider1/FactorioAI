@@ -67,6 +67,7 @@ PLACE_GRACE_MIN = 8.0
 # 20261119-202811: five goals took 86% of 114 game minutes (a pumpjack 34+, a mine replacement 28, a link pass 18).
 EXPECTED_LOAD = 0.7     # share of their full load the sites with every input fed draw once they run (power_status)
 GOAL_BUDGET_MIN = {"build": 25.0, "replace": 30.0, "remove": 8.0, "link": 10.0, "link_science": 10.0, "stock": 8.0,
+                   "act": 15.0,
                    "modules": 15.0,
                    "feed": 4.0, "connect": 6.0, "upgrade": 20.0, "repair": 8.0, "repipe": 8.0, "scout": 10.0, "design": 4.0,
                    "priority": 1.0, "purge": 10.0, "relink": 12.0, "trunk": 40.0}
@@ -327,6 +328,8 @@ class Crew:
                 raise BuildError(f"unknown technology {tech}")
             # research() decides: automate the packs it lacks, or (only when that is cheap or impossible) hand-feed
             return self.research(tech, wait=False)
+        if do == "act":
+            return self.act(goal.get("steps") or [goal])
         if do == "stock":
             item, n = goal["item"], int(goal.get("count", 1))
             with self.w.step("unlock"):
@@ -415,6 +418,112 @@ class Crew:
                 again = f"putting it back failed too: {str(exc2)[:120]}"
             raise BuildError(f"cleared site {old.id} for a dense {r} field, which did not fit "
                              f"({str(exc)[:160]}); {again}") from None
+
+    ACT_OPS = ("insert", "take", "craft", "go", "place", "pickup", "mine", "wait")
+    ACT_MAX_STEPS = 40
+
+    def act(self, steps: list) -> str:
+        """Do exactly what the overseer or a supervisor says, step by step: any of ACT_OPS, nothing judged. The
+        planners may order anything (walk in circles, stop everything, hand-feed a machine); each step is a plain
+        game action. A step that fails says why and the rest stop.
+
+            {"op": "insert", "site": id | "at": [x, y], "item": i, "count": n}   into a site's machines and chests
+                                                                               (spread over them) or one building
+            {"op": "take", "site": id | "at": [x, y], "item": i, "count": n}     out of them
+            {"op": "craft", "item": i, "count": n}                             by hand (ingredients made as needed)
+            {"op": "go", "at": [x, y]}                                         walk there
+            {"op": "place", "entity": e, "at": [x, y], "dir": d}              one building (recorded as a "manual"
+                                                                               site, so it can be removed later)
+            {"op": "pickup", "at": [x, y]}                                     take a building of ours back
+            {"op": "mine", "item": resource, "count": n}                       by hand, at the nearest patch
+            {"op": "wait", "seconds": s}                                       let the base run"""
+        done: list[str] = []
+        for k, st in enumerate(list(steps)[:self.ACT_MAX_STEPS]):
+            op = (st or {}).get("op")
+            if op not in self.ACT_OPS:
+                raise BuildError(f"step {k + 1}: unknown op {op!r} (one of {', '.join(self.ACT_OPS)})"
+                                 + (f"; done before it: {'; '.join(done)}" if done else ""))
+            try:
+                done.append(self._act_step(op, st))
+            except BuildError as exc:
+                raise BuildError(f"step {k + 1} ({op}) failed: {str(exc)[:200]}"
+                                 + (f"; done before it: {'; '.join(done)[:300]}" if done else "")) from None
+        return "; ".join(done)[:600] or "nothing to do"
+
+    def _act_targets(self, st: dict) -> list[tuple[str, float, float]]:
+        """The buildings a step means: one at "at", or every machine and chest of a site."""
+        if st.get("at") is not None:
+            x, y = float(st["at"][0]), float(st["at"][1])
+            e = (getattr(self.w, "entities", None) or {}).get((x, y))
+            return [((e or {}).get("name", "?"), x, y)]
+        site = self.base.get(st.get("site"))
+        if site is None:
+            raise BuildError(f"there is no site {st.get('site')}")
+        out = [(name, x, y) for name, x, y, _ in site.entities if name not in POLES
+               and not name.endswith(("transport-belt", "underground-belt", "splitter", "pipe", "pipe-to-ground"))]
+        if not out:
+            raise BuildError(f"site {site.id} has no buildings to act on")
+        return out
+
+    def _act_step(self, op: str, st: dict) -> str:
+        item, n = st.get("item"), max(1, int(st.get("count") or 1))
+        if op == "wait":
+            return self.wait(min(600.0, max(1.0, float(st.get("seconds") or 10))))
+        if op == "go":
+            x, y = st["at"]
+            self.w.go(float(x), float(y))
+            return f"walked to ({float(x):.0f}, {float(y):.0f})"
+        if op == "craft":
+            self.unlock_items([item])
+            self.make({item: n}, extra=True)
+            return f"crafted {n} {item}"
+        if op == "mine":
+            got = self.w.mine(item, n)
+            return f"mined {got} {item} by hand"
+        if op == "insert":
+            if self.w.inventory.get(item, 0) < n:
+                self.gather(item, n)
+            targets = self._act_targets(st)
+            per, put = max(1, n // len(targets)), 0
+            for _, x, y in targets:
+                put += self.w.insert(x, y, item, min(per, self.w.inventory.get(item, 0)))
+            return f"put {put} {item} in"
+        if op == "take":
+            got = 0
+            for _, x, y in self._act_targets(st):
+                if got >= n:
+                    break
+                got += self.w.extract(x, y, item, n - got)
+            return f"took {got} {item}"
+        if op == "place":
+            ent, (x, y) = st["entity"], st["at"]
+            self.unlock_items([ent])
+            if self.w.inventory.get(ent, 0) < 1:
+                self.make({ent: 1}, extra=True)
+            d = st.get("dir") or "north"
+            tiles = self.w.footprint(ent, float(x), float(y), d)
+            rec: list = []
+            self.w.recorder = rec
+            try:
+                self.w.place(ent, float(x), float(y), d, tiles)
+            finally:
+                self.w.recorder = None
+            self.base.add(Site("manual", {"entity": ent}, (float(x), float(y)), entities=rec,
+                               built_minute=self._minute()))
+            return f"placed {ent} at ({float(x)}, {float(y)})"
+        if op == "pickup":
+            x, y = float(st["at"][0]), float(st["at"][1])
+            for s in self.base.sites:
+                hit = next((e for e in s.entities if abs(e[1] - x) < 0.6 and abs(e[2] - y) < 0.6), None)
+                if hit is not None:
+                    if self.w.pickup(*hit):
+                        s.entities.remove(hit)
+                        if not s.entities:
+                            self.base.remove(s)
+                        return f"picked up the {hit[0]} at ({x}, {y})"
+                    raise BuildError(f"the {hit[0]} at ({x}, {y}) could not be picked up")
+            raise BuildError(f"no building of ours at ({x}, {y})")
+        raise BuildError(f"unknown op {op}")
 
     def fit_modules(self, site_id=None) -> str:
         """Productivity modules into a site's machines (modfit.py): the silo first, then science and rocket
@@ -1927,6 +2036,15 @@ class Crew:
         site = self.base.get(site_id)
         if site is None:
             raise BuildError(f"there is no site {site_id}")
+        if site.kind == "labs" or str(item).endswith("science-pack"):
+            # labs: the foreman's lab round, now (packs from the factories' chests first, feeders and labs filled).
+            # Before this "feed" only fuelled: the overseer could not get packs into idle labs (run 20261125-184025:
+            # red packs backed up in their factory while every lab waited, research stalled for an hour)
+            before = self.foreman.hand_packs
+            self.foreman._labs(True)
+            held = {k: v for k, v in self.w.inventory.items() if k.endswith("science-pack") and v}
+            return (f"lab round done: packs taken to the labs ({self.foreman.hand_packs - before} crafted by hand)"
+                    + (f"; still carrying {held}" if held else ""))
         count = max(1, min(400, int(count)))
         self.gather(item, max(count, self.w.inventory.get(item, 0)))
         targets = [(x, y) for x, y, what in site.chests if what == "coal-in"] or list(site.burners)
