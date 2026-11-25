@@ -4357,6 +4357,14 @@ class Crew:
         ever: a research station is queued beside the science factories (build places it at their centre), and
         the old labs stay until the new ones are fed. Run 20261121-140755: red and green into site 53 failed 14x,
         retried every hour, and research stood still. Returns a note when it queued one."""
+        if "underground-belt" in (getattr(self.kn, "unlocked", None) or set()):
+            # failures from before belts could cross count for nothing now: those links are laid again with
+            # undergrounds. Run 20261125-184025: three pre-logistics failures of red science's links built a third
+            # research station (6 labs) beside two that stood already
+            for x, y, p in waiting:
+                f = self._link_fails.get((x, y)) or {}
+                if "research logistics" in str(f.get("reason") or ""):
+                    self._link_fails.pop((x, y), None)
         stuck = [(x, y, p) for x, y, p in waiting
                  if (self._link_fails.get((x, y)) or {}).get("n", 0) >= self.LAB_MOVE_FAILS]
         if not stuck or self._minute() - getattr(self, "_labs_moved_at", -1e9) < self.LAB_MOVE_GAP_MIN:

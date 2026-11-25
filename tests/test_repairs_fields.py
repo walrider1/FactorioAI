@@ -486,3 +486,18 @@ def test_a_link_that_failed_before_logistics_is_laid_again_with_undergrounds_not
     assert assess.failed_before_logistics(crew, q)                  # now: lay it again before any move
     q["why"] = "no belt route from the source to the port even with a wide detour"
     assert not assess.failed_before_logistics(crew, q)              # it failed with undergrounds too
+
+
+def test_science_links_that_failed_before_logistics_never_build_another_research_station():
+    crew, w, _ = _crew()
+    crew.urgent, crew.plan_queue = [], []
+    crew.log = lambda *a: None
+    key = (2.5, -68.5)
+    crew._link_fails = {key: {"n": 3, "item": "automation-science-pack", "site": 1, "minute": 20.0,
+                              "reason": "no belt route (...; underground belts would help: research logistics)"}}
+    waiting = [(key[0], key[1], "automation-science-pack")]
+    crew.kn.unlocked = set(crew.kn.unlocked) | {"underground-belt"}
+    assert crew._move_labs(waiting) == "" and crew.urgent == [] and key not in crew._link_fails   # retried instead
+    crew._link_fails = {key: {"n": 3, "item": "automation-science-pack", "site": 1, "minute": 25.0,
+                              "reason": "no belt route even with a wide detour"}}          # failed with undergrounds
+    assert "queued" in crew._move_labs(waiting) and crew.urgent[0]["module"] == "research_station"
