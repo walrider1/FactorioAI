@@ -5504,8 +5504,16 @@ class Crew:
         chests = [(x, y) for s in self.base.sites for x, y, what in s.chests if what == item]
         if not chests or want <= 0:
             return 0
-        drills = sum(int(s.params.get("count", 0)) for s in self.base.of("burner_mine")
+        # burner drills out of fuel deliver nothing: never waited for. Run 20261125-184025: two coal burners stood
+        # dry, the crew had no coal, and the coal wait (whose patrol fetched coal through this wait again) held the
+        # bot from game minute 36 to 122 with no goal running
+        drills = sum(max(0, int(s.params.get("count", 0)) - int((s.health or {}).get("no_fuel", 0)))
+                     for s in self.base.of("burner_mine")
                      if s.params.get("resource") == item and not _depleted(s))
+        if getattr(self, "_mine_wait", False):        # inside a wait already (its patrol came back here): no
+            drills, nested = 0, True                  # second wait, take what the chests hold
+        else:
+            nested = False
         per_min = 15.0 * drills - (2.25 * drills if item == "coal" else 0)   # coal drills burn some of their own
         per_min += 30.0 * sum(int(s.params.get("count", 0)) for s in self.base.of("electric_mine")
                               if s.params.get("resource") == item and s.params.get("into") == "chest")
@@ -5517,6 +5525,8 @@ class Crew:
         got = 0
         if self.no_room(item):
             return 0
+        if nested:
+            per_min = 0.0                             # one pass over the chests, no waiting
         deadline = time.monotonic() + (wait_min * 60 / self.w.speed if per_min > 0 else 0)
         while True:
             for x, y in sorted(chests, key=lambda q: math.dist(q, self.w.pos)):
@@ -5530,7 +5540,11 @@ class Crew:
                 return got                            # refused for room just now, and no room could be made
             self.checkpoint()
             self.w.doing(f"waiting for {left} {item} from our {drills} drill(s)")
-            self.foreman.patrol(force=True)
+            self._mine_wait = True
+            try:
+                self.foreman.patrol(force=True)
+            finally:
+                self._mine_wait = False
             time.sleep(max(3.0, min(20.0, left / per_min * 60 / self.w.speed / 3)))
 
     def plates(self, plate: str, total: int) -> None:
