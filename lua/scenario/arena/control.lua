@@ -1849,11 +1849,22 @@ local function set_gui(pl, visible)
   try(function() pl.game_view_settings = v end)
 end
 
+-- Alt view (the game's "show details": recipes on machines, belt and inserter arrows) is on for every spectator
+-- who joins, so the stream shows what each machine makes from the first frame, after a fresh start or a restart
+-- alike. Display only: it changes what the spectator sees, nothing the bot can read or do. Alt still toggles it.
+local function set_alt_view(pl, on)
+  local v = try(function() return pl.game_view_settings end)
+  if not v then return end
+  try(function() v.show_entity_info = on end)
+  try(function() pl.game_view_settings = v end)
+end
+
 script.on_event(defines.events.on_player_joined_game, function(event)
   local player = game.get_player(event.player_index)
   send_to_bot(player)
   if player and auto_cam then try(function() auto_cam(player) end) end
   if player then try(function() set_gui(player, false) end) end
+  if player then try(function() set_alt_view(player, true) end) end
   if player then player.print("Factorio AI Arena: you are a spectator, following the AI (/cam off to fly freely, /bot to jump back, /gui on for the game's panels).") end
 end)
 

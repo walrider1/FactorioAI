@@ -410,7 +410,7 @@ STATS = WATCH / "stats.json"        # the show's counters, read by arena/monitor
 
 
 def stats(**changes) -> dict:
-    """runs/watch/stats.json: {"since": run-id-style UTC stamp, "upgrades": n, "upgrading": bool}."""
+    """runs/watch/stats.json: {"since": run-id-style UTC stamp, "upgrades": n, "upgrading": bool, "first_run": n}."""
     with LOCK:
         s = _json(STATS) or {}
         s.setdefault("since", datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S"))
@@ -1171,7 +1171,7 @@ class Watchdog:
         game = ""
         reset = reset or bool(stream_cfg().get("reset_next"))
         if reset:                                   # the show starts over: run #1, 0 upgrades, a new map
-            stats(since=datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S"), upgrades=0, upgrading=False)
+            stats(since=datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S"), upgrades=0, upgrading=False, first_run=1)
             stream_cfg(reset_next=False)
             log("reset: counters back to run #1 and 0 upgrades; a new game starts")
         if stream_cfg().get("game_with_stream", True) and not self.a.no_game:
@@ -1446,7 +1446,7 @@ def main() -> None:
         vet_seeds(a.vet_seeds)
         return
     if a.reset_counters:
-        print(stats(since=datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S"), upgrades=0, upgrading=False))
+        print(stats(since=datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S"), upgrades=0, upgrading=False, first_run=1))
         return
     if a.token:
         print(token())

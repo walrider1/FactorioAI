@@ -127,6 +127,16 @@ def diagnose(crew, site_id, item: str | None = None, depth: int = 0) -> dict:
             roots.append(tuple(root))
     for root in dict.fromkeys(roots):
         src = crew._source_site(root, item) if hasattr(crew, "_source_site") else None
+        gone = crew.gone_roots() if hasattr(crew, "gone_roots") else {}
+        if src is None and root in gone:
+            # its source came down but its belt was kept: a new source fed into its side (spliced) is judged by
+            # what it gets (below); before that, the link step feeds one in. No relink: that unplugs its taps.
+            if crew.spliced(root):
+                continue
+            out.update(cause="source-gone",
+                       why=f"its {item} belt's source at {list(root)} came down; the belt stays and the link step "
+                           "feeds a new source into its side", fix={"do": "link"})
+            return out
         if src is None:
             out.update(cause="source-gone", avoid=[root],
                        why=f"its {item} belt starts at {list(root)}, where no source stands any more (rebuilt or "

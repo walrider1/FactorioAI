@@ -4,6 +4,26 @@ Status: phases 0–5 built 2026-11-20 (unit-tested, checked against the minute-3
 game). The splitter bus in phase 3 is deferred; see below.
 Written 2026-11-20 after run `20261120-092648-dead3d` stalled.
 
+## Built 2026-11-24: belts stay, sources change (less upkeep)
+
+In the five long runs, 60–100% of goal time after game minute 120 went into replacing mines and factories and
+relinking. Belts were tied to both their ends, so every mined-out 2-drill mine pulled up its belts, and every
+relink pulled up the belts other factories tapped. Now:
+
+- **Removing a source keeps its outgoing belts** (`crew._detach` → `_keep_outbound`). The source key goes into
+  `crew.gone_roots()` and counts as giving 0/min. `boost_links` then feeds a new source into the belt's side
+  (a splice). A `replace` holds its new source back for this (`crew._replacing`), so the replacement mine feeds
+  the old belts and no consumer is touched. If no source can be spliced in within `SPLICE_WAIT_MIN` (10), the
+  belts come up as before (`expire_gone`).
+- **A relink never takes up a belt that others tap or feed into.** It feeds more into it instead (`boost_links`).
+- **Triage:** a starving input on a kept belt is fixed with `link` (splice), never with a relink. Once spliced,
+  it is judged by what the belt gets.
+- **Fewer, bigger mines:** iron, copper and coal rows are at least 6 units (4 into chests; `supply.MIN_UNITS`).
+  Rebuilds of mined-out rows are at least that big. A row is rebuilt once a third of its drills stand dry (not
+  the first end drill) or its ore runway is under 45 minutes.
+- **Not built:** placing factories along a line with inserter taps. The splice removes the main reason a factory
+  needed a new route (its source moving), so this waits until runs show walled-in factories are still common.
+
 ## What was built (phases 0–2)
 
 - **Phase 0**:
@@ -249,3 +269,85 @@ cd freeplay && .venv/Scripts/arena local-run --backend factorio --task freeplay-
 Phase 2's bench runs offline with `arena chiplet-bench` on the saved terrain cases.
 
 Resuming the minute-334 save of `20261120-092648-dead3d` is the before/after case for phases 0–1.
+
+## Built 2026-11-24 (second patch): no bans on short supply, real outposts, oil always found
+
+From run 20261124-015025 (13 of 21 milestones; stalled on iron and oil):
+
+- **The overseer cannot ban a shortage fix.** A goal that adds supply of an item made under 90% of what its ports
+  want (or with ports that have no source, or coal burned faster than mined), or that replaces a mine running dry,
+  runs whatever is forbidden (`overseer.relieves`); such a forbid is refused when given, and the overseer sees
+  `short_supply` in its report. The run had iron banned three times while it made 38/min against 207 wanted.
+- **No hand-fed burners after electric drills** (`supply.mining_options`); every electric row of iron, copper or
+  coal is at least 6 drills (4 into chests) whoever asks (`ElectricMine._count`).
+- **Outposts are big and go out with their whole kit.** Iron and copper outposts are 16+ drills, big patches
+  first, a band under 10 drills only when nothing bigger is known. The smelting column, the trunk home and the
+  pole line are made before the walk (`Crew._outpost_extra`, held in `outpost_hold`). Iron or copper with under
+  150 game minutes of ore left (or a full patch while short) queues the outpost by the rule floor at once
+  (`ore-soon-*` alerts).
+- **Oil is always found.** A pumpjack goal searches farther out when every known well is taken
+  (`world.oil_wells(more=True)`), so does a crude scout; a workshop that finds no crude for it builds its
+  pumpjacks inside the same goal (`Crew._crude_first`), and an oil workshop shares a floor that already has a
+  crude line instead of failing on "every pumpjack already feeds another floor".
+- **Splices:** kept belts are joined head-on where their inserter stood, and belts are only kept when a source to
+  feed in exists (else relinked at once, not after 10 starved minutes).
+- **Small:** mine and column chests no longer count as boiler chests (the "feed site None" loop); research goals
+  have a 25-minute budget (the labs go on regardless).
+
+## Built 2026-11-24 (third patch, mid-run in 20261124-120854): labs fed, copper read right, no long waits
+
+- **A lab block short of a colour taps a belt that carries it** (`Crew._tap_short_stations`). Station 41 got red only;
+  the one free green chest was boxed in by other belts, and the science linker never offered the router the three
+  green belts into site 26, so 41's labs sat idle. Every station now takes each colour the base makes, from a free
+  chest if one routes, else from a tap on another station's belt of it.
+- **"No room on the patch" is keyed on that ore's own mines** (`Crew._patch_sig`). It was keyed on every site, so the
+  next unrelated build cleared it, the ore outlook said "room for more" and copper's next patch never came up.
+- **Stranded ore is not sent to a far patch** (`assess._stranded`). When 30%+ of an ore's drills have nowhere to put
+  their output, the plate is short for want of belts: the ore-soon outpost rule stays out of it.
+- **A goal steps aside when its research is far off** (`Crew._research_eta`, `RESEARCH_DEFER_MIN` = 8). A pumpjack goal
+  waited 16 game minutes on oil-gathering creeping to 53%. Research that moves but needs more than 8 more minutes at
+  the pace seen keeps running; the goal fails with the time it needs and comes back later. Packs made by hand still
+  keep the crew there.
+- Stream: the world map under the thoughts (ore patches, oil wells, sites, the character; far patches as arrows on
+  the edge with their distance), from `world` in the overlay data (`oil_wells` added to bot_live.json). Alt view (the
+  game's "show details") is on for every spectator who joins (scenario `on_player_joined_game`, display only).
+
+## Built 2026-11-24 (fourth patch, mid-run in 20261124-120854): blue science not thrown away
+
+- **A science output goes to a station a belt reaches** (`Crew.link_science`). Ports were ranked by "has the most
+  other colours" before distance, with no reach check: blue from workshop 64 was handled first, while station 65
+  (60 tiles off) had no colour yet, so all three tries went to station 50's ports 233+ tiles away, failed, and the
+  back-off kept blue from station 65 for good. Ports beyond `belts.LINK_REACH` now come last.
+- **Furnaces get no set_recipe** (`Workshop.build`, `gaps.repair`). The game takes set_recipe on assemblers only (a
+  furnace answers `no_entity`), so workshop 64's two steel furnaces counted as never placed and every repair
+  retried the same refused call.
+- **Courier-fed workshop ports are not "starving"** (`nodes.starving`). Workshop 64's 23 ports have no belt by
+  design (the courier carries), yet they held the engine, circuit and blue factories back, and the overseer had the
+  workshop torn down "to unblock construction".
+- **The only working maker of an item is replaced, not removed** (`Crew.removal_blocker`, sole maker). The overseer
+  removed workshop 64 (26 machines working, its first blue packs out at minute 400, research at 35% from hand-carried
+  packs) on "blue science is still zero". A plain remove of the last factory/workshop making an item, with machines
+  working, is refused with "replace it instead" (make before break); a replace whose new site stands may remove it.
+
+## Built 2026-11-24 (fifth patch, mid-run in 20261124-120854): far sources get their trunk by themselves
+
+- **Link reach raised to 220 tiles (routes up to 300 belts)** (`belts.LINK_REACH`, `LINK_ROUTE_MAX`), from 150/200.
+  Links still run inside other goals, so the cap stays: the 460-tile walks of run 20261121-140755 stay out.
+- **A link stopped by distance alone queues its trunk** (`assess.far_link_fix`, alert key `trunk-…`, queued by the
+  rule floor without pausing the goal in hand). Before, the failure only said "needs a trunk goal" and waited for a
+  planner to read it. A failed trunk records its own reason, so it is not queued again until the link step has
+  failed on reach once more (its back-off); sources over 600 tiles off get no automatic trunk (make it there).
+- **A trunk can run into a research station** (`Crew._station_trunk_target`): any free port takes the colour. Before,
+  "trunk site 50 chemical-science-pack" answered "no unfed input port" and the far blue workshop never reached a lab.
+  A science link that fails is kept against the nearest station with a free port, so the trunk goes there.
+- Trunk goal budget 30 → 40 game minutes (longer belts now come this way).
+
+## Built 2026-11-24 (sixth patch, end of 20261124-120854): a factory too big for one block is split
+
+- **A belt factory that fits nowhere as one block splits off its biggest intermediate** (`Crew.build`,
+  `Crew._split_candidate`, at most `SPLIT_MAX` = 2 times). Advanced circuits from plates (4 circuit and 6
+  advanced-circuit assemblers plus three input belts) found no belt route in 8 designs at 4 places, and blue science
+  failed after 26 minutes. Now the circuits get a factory of their own first (`_intermediates_first`) and the
+  advanced-circuit factory takes them by belt. Only a failure naming this item's own layout splits it.
+- **A science link failure whose source chest is gone is dropped** (`Crew._prune_link_fails`): removed workshop 64's
+  blue chest kept a stuck link, and the far-link alert sent a trunk for packs nothing made any more.

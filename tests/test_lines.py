@@ -46,10 +46,10 @@ def _base():
 
 def test_a_plate_row_once_belts_can_cross_is_one_line_toward_the_base():
     w, base = MineWorld(), _base()
-    site = ElectricMine().build(w, base, {"resource": "iron-ore", "count": 4, "into": "furnace"})
+    site = ElectricMine().build(w, base, {"resource": "iron-ore", "count": 6, "into": "furnace"})
     ln = site.params["line"]
     assert site.params["into"] == "line" and site.chests == []           # no chest per unit
-    assert ln["item"] == "iron-plate" and ln["rate"] == 4 * 18.75
+    assert ln["item"] == "iron-plate" and ln["rate"] == 6 * 18.75
     belts = [(n, x, y, d) for n, x, y, d in w.placed if n == "transport-belt" and (x - 0.5, y - 0.5) in
              {tuple(t) for t in ln["tiles"]}]
     assert len(belts) == len(ln["tiles"]) and {d for *_, d in belts} == {"west"}   # the base is west
@@ -63,8 +63,8 @@ def test_a_plate_row_once_belts_can_cross_is_one_line_toward_the_base():
 
 def test_without_underground_belts_or_when_asked_rows_keep_their_chests():
     w = MineWorld(unlocked={"electric-mining-drill"})
-    site = ElectricMine().build(w, _base(), {"resource": "iron-ore", "count": 3})
-    assert site.params["into"] == "furnace" and len(site.chests) == 3 and "line" not in site.params
+    site = ElectricMine().build(w, _base(), {"resource": "iron-ore", "count": 3})      # a bulk row: 6 at least
+    assert site.params["into"] == "furnace" and len(site.chests) == 6 and "line" not in site.params
     site = ElectricMine().build(MineWorld(), _base(), {"resource": "iron-ore", "count": 3, "line": False})
     assert "line" not in site.params
 

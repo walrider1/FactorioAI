@@ -110,7 +110,12 @@ class SupplyCrew:
         self.log = lambda *a: None
         self.foreman = SimpleNamespace(note=lambda *a: None)
 
+    no_field = False
+
     def build(self, goal):
+        if goal["module"] == "outpost" and self.no_field:
+            from brain.world import BuildError
+            raise BuildError("no room for a dense field")
         self.built.append(goal)
         return f"built {goal['module']} {goal['resource']}"
 
@@ -121,8 +126,19 @@ def test_plates_first_builds_the_mines_a_plate_fed_factory_lacks():
     crew = SupplyCrew(kn, chests=3, links=1)                     # 3 iron chests, 1 already belted somewhere
     note = crew._plates_first("factory", {"item": "logistic-science-pack", "per_minute": 15})
     iron = next(g for g in crew.built if g["resource"] == "iron-ore")
-    assert iron["count"] == max(2, pl.machines["iron-plate"] - 2) and iron["into"] == "furnace"
+    assert iron["module"] == "electric_mine"                       # no long-handed inserters yet: a row
+    crew.built.clear()
+    kn.unlocked = set(kn.unlocked) | {"long-handed-inserter"}     # automation in: a dense field near the base
+    note = crew._plates_first("factory", {"item": "logistic-science-pack", "per_minute": 15})
+    iron = next(g for g in crew.built if g["resource"] == "iron-ore")
+    assert iron["module"] == "outpost" and iron["near_base"]
     assert any(g["resource"] == "copper-ore" for g in crew.built) and note.startswith("first ")
+    crew.built.clear()
+    crew.no_field = True                                          # no field fits: a mine row as before
+    crew._plates_first("factory", {"item": "logistic-science-pack", "per_minute": 15})
+    iron = next(g for g in crew.built if g["resource"] == "iron-ore")
+    assert iron["count"] == max(2, pl.machines["iron-plate"] - 2) and iron["into"] == "furnace"
+    crew.no_field = False
     crew.built.clear()
     crew._plates_first("factory", {"item": "logistic-science-pack", "per_minute": 15, "plates": "mine"})
     assert crew.built == []                                       # its own mines: nothing to feed

@@ -191,7 +191,9 @@ def rebuild_due(crew, site) -> str | None:
     runway = mine_runway(crew, site)
     if runway is not None and runway < REBUILD_AHEAD_MIN:
         return f"about {runway:.0f} game minutes of ore left under its drills"
-    if dry and drills >= 2:
+    if dry and drills >= 2 and dry >= max(1, math.ceil(drills / 3)):
+        # a third of a big row on bare ground, not its first drill: the end drills of a row on a patch edge run
+        # dry early while the rest mine for hours (the ore runway above catches the row as a whole)
         return f"{dry} of its {drills} drills already on mined-out ground"
     return None
 
@@ -253,7 +255,11 @@ def depleted_fix(crew, site) -> dict:
     n = max(2, int(site.params.get("count", 2)))
     if kn is not None and "electric-mining-drill" in (kn.researched or set()) and poles:
         into = site.params.get("into") or ("chest" if r in ("coal", "stone") else "furnace")
-        new = {"do": "build", "module": "electric_mine", "resource": r, "count": min(10, n), "into": into}
+        from .supply import least_units
+        least = least_units("electric_mine", r, into)
+        # its rebuild is a bigger row: it lasts longer, and its plates feed the old belts (spliced in)
+        new = {"do": "build", "module": "electric_mine", "resource": r, "count": min(12, max(n, least)),
+               "into": "furnace" if into == "line" else into}
     else:
         new = {"do": "build", "module": "burner_mine", "resource": r, "count": min(10, n)}
     return {"do": "replace", "site": site.id, "with": new, "force": True}
@@ -433,8 +439,8 @@ def field_goals(crew) -> list[dict]:
     except Exception:  # noqa: BLE001
         return []
     for r in FIELD_ORES:
-        if any(s.kind == "outpost" and s.params.get("field") and s.params.get("resource") == r
-               for s in crew.base.sites):
+        if any(s.kind == "outpost" and s.params.get("field") and not s.params.get("near_base")
+               and s.params.get("resource") == r for s in crew.base.sites):
             continue
         try:
             g = plan_field(crew, r)
@@ -499,6 +505,7 @@ def closeout_due(crew) -> str | None:
 
 def is_frontier(goal: dict | None) -> bool:
     return bool(goal) and goal.get("do") == "build" and goal.get("module") in FRONTIER_MODULES \
+        and not goal.get("near_base") \
         and not str(goal.get("reflex", "")).startswith(("rules:", "assessor:", "close-out:"))
 
 

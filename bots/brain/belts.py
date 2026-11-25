@@ -26,8 +26,10 @@ AXIS = {"north": "ns", "south": "ns", "east": "ew", "west": "ew"}
 # A link (inserter, belt, port) is a repair-sized job: its source within LINK_REACH tiles (Manhattan) of the port
 # and its route at most LINK_ROUTE_MAX belt tiles. Farther is a trunk, a goal of its own. Run 20261121-140755: a
 # copper link inside a pump build walked ~460 tiles each way three times for a belt from x=391 to x=-88.
-LINK_REACH = 150
-LINK_ROUTE_MAX = 200
+# Raised from 150/200 in run 20261124-120854 (sources 150-230 tiles off stayed unlinked); a link that fails on
+# reach alone now gets its trunk goal queued by itself (assess: far-link alerts), with no length cap of its own.
+LINK_REACH = 220
+LINK_ROUTE_MAX = 300
 
 
 def route_len(steps: list[tuple]) -> int:

@@ -89,3 +89,18 @@ def test_the_overlay_races_the_best_earlier_run():
     assert pb["run"] == "c" and pb["runs"] == 3                     # furthest, then fastest there
     assert pb["best"] == {"Power and labs": 12.0, "Red science automated": 60.0}
     assert personal_best([("x", {})]) is None
+
+
+def test_a_science_split_is_the_games_automated_milestone_never_hand_crafting():
+    from arena.monitor import stage_splits
+    from brain.telemetry import stamp_stages
+    # run 20261124-165213: stamped red at 27.4 from statistics that count hand-crafting; the milestone came at 50.5
+    old = {"stage_minutes": {"Power and labs": 15.0, "Red science automated": 27.4},
+           "milestones": {"red-auto": 3600 * 50.5}}
+    assert stage_splits(old)["Red science automated"] == 50.5
+    early = {"stage_minutes": {"Red science automated": 34.7},           # no milestone yet, stage not done now
+             "roadmap": {"stages": [{"name": "Red science automated", "done": False}]}}
+    assert "Red science automated" not in stage_splits(early)
+    seen = {"Red science automated": 34.7}                                # a resumed run's old stamp goes too
+    stamp_stages([{"name": "Red science automated", "done": False, "milestone": "red-auto"}], seen, 40.0, True)
+    assert seen == {}

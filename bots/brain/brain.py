@@ -45,8 +45,8 @@ GOAL_HELP = """Goals you may give (JSON objects, done in order by the crew):
 - {"do": "relink", "site": <id>, "item"?: "<item>"}  take up the belts into one site's input ports and lay them
                                                     again (from a plate line built since, or around what walled
                                                     them in): rework one input, not the whole site. A link reaches
-                                                    at most 150 tiles: a farther source needs a trunk
-- {"do": "trunk", "site": <id>, "item": "<item>"}  one long belt (more than 150 tiles) from the nearest spare source
+                                                    at most 220 tiles: a farther source needs a trunk
+- {"do": "trunk", "site": <id>, "item": "<item>"}  one long belt (more than 220 tiles) from the nearest spare source
                                                     of the item into the site's unfed port, as a goal of its own.
                                                     Only for a far source: a nearer mine or a factory next to its
                                                     source is usually the better fix

@@ -240,6 +240,10 @@ def successor_ok(old, goal: dict | None) -> bool:
     mod = goal.get("module")
     if old.kind == "burner_mine" and mod == "electric_mine":
         return goal.get("resource") == old.params.get("resource")
+    if old.kind in ("burner_mine", "electric_mine") and mod == "outpost" and goal.get("near_base"):
+        # a dense field near the base in place of a small mine of the same ore: more of the same from that ground
+        return goal.get("resource") == old.params.get("resource") and \
+            int(goal.get("count") or 0) > int(old.params.get("count") or 0)
     if mod != old.kind and not (old.kind == "labs" and mod == "research_station"):
         return False
     key = PRODUCT.get(old.kind)

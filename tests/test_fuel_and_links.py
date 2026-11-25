@@ -34,9 +34,11 @@ def test_a_fuel_unit_lifts_coal_from_its_belt_into_its_furnace_and_fits_beside_t
 def test_coal_belts_wait_for_logistics_as_players_do():
     em = ElectricMine()
     w = SimpleNamespace(kn=SimpleNamespace(unlocked={"long-handed-inserter", "underground-belt"}))
-    kit = em.kit(w, None, {"resource": "iron-ore", "count": 4, "line": False})
+    kit = em.kit(w, None, {"resource": "stone", "count": 4, "line": False})
     assert kit["long-handed-inserter"] == 4 and kit["transport-belt"] == 12
-    line = em.kit(w, None, {"resource": "iron-ore", "count": 4})     # a plate line: its belt, no chests
+    # a bulk ore row is never under its minimum, whoever asks for it (6 drills into furnaces)
+    assert em.kit(w, None, {"resource": "iron-ore", "count": 2, "line": False})["electric-mining-drill"] == 6
+    line = em.kit(w, None, {"resource": "stone", "count": 4})        # a plate line: its belt, no chests
     assert line["transport-belt"] == 12 + 14 and "iron-chest" not in line
     w.kn.unlocked = {"long-handed-inserter"}                   # automation, but no underground belts yet
     assert "long-handed-inserter" not in em.kit(w, None, {"resource": "iron-ore", "count": 4})
@@ -98,7 +100,8 @@ def test_smelters_out_of_fuel_raise_the_alert_that_fixes_the_cause():
     crew = FuelCrew([unlinked, empty, by_hand], links=[{"port": port, "minute": 10.0}])
     alerts = {a["key"]: a for a in fuel_alerts(crew)}
     assert alerts["fuel-belt-18"]["fix"] == {"do": "link"}
-    assert alerts["fuel-dry-19"]["fix"]["module"] == "electric_mine" and alerts["fuel-dry-19"]["fix"]["into"] == "chest"
+    dry = alerts["fuel-dry-19"]["fix"]                              # more coal: a dense coal field near the base
+    assert dry["module"] == "outpost" and dry["resource"] == "coal" and dry["near_base"]
     assert alerts["fuel-site-22"]["fix"]["do"] == "feed"
     assert all(a["level"] == "urgent" and "not a belt one" in a["what"] for a in alerts.values())
 
@@ -342,13 +345,18 @@ def test_short_coal_belts_raise_the_alert_with_the_fix_for_the_cause():
     [a] = coal_chain_alerts(crew)
     assert a["fix"] == {"do": "link"} and a["key"].startswith("coal") and "60" in a["what"]
     mine.chests.pop()                                                # no spare chest: more drills
-    assert coal_chain_alerts(crew)[0]["fix"]["module"] == "electric_mine"
+    assert coal_chain_alerts(crew)[0]["fix"]["module"] == "outpost"     # a dense coal field near the base
     burner = crew.base.add(Site("burner_mine", {"resource": "coal", "count": 2, "into": "chest"}, (-5, 0)))
-    crew._patch_full["coal"] = (30.0, crew._base_sig())              # and no room for them on the patch
+    crew._patch_full["coal"] = (30.0, crew._patch_sig("coal"))              # and no room for them on the patch
     assert coal_fix(crew, 30) == {"do": "replace", "site": burner.id, "with": {
-        "do": "build", "module": "electric_mine", "resource": "coal", "count": 2, "into": "chest"}}
+        "do": "build", "module": "electric_mine", "resource": "coal", "count": 4, "into": "chest"}}
     crew.base.remove(burner)
-    crew._patch_full["coal"] = (30.0, crew._base_sig())
+    crew._patch_full["coal"] = (30.0, crew._patch_sig("coal"))
+    # the 2-drill coal row on the full patch comes down for a dense field (break before make)
+    clear = coal_fix(crew, 30)
+    assert clear["do"] == "replace" and clear["site"] == mine.id and clear["clear_first"]
+    assert clear["with"]["module"] == "outpost" and clear["with"]["near_base"]
+    mine.params["count"] = 10                                        # a big row stays: nothing left to do
     assert coal_fix(crew, 30) is None and coal_chain_alerts(crew)[0]["fix"] is None
 
 

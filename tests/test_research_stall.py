@@ -52,4 +52,15 @@ def test_research_that_moves_is_waited_for_until_it_is_done(monkeypatch):
     monkeypatch.setattr("brain.crew.time.sleep", lambda s: None)
     seq = [0.36 + 0.01 * k for k in range(40)]                     # slow but moving: never called stalled
     crew, _ = _crew(seq, researched_at=30)
-    assert crew._wait_research("fluid-handling", ["fluid-handling"]) == "researched fluid-handling"
+    # packs by hand (defer=False): the crew must stay and feed the labs, so it waits to the end
+    assert crew._wait_research("fluid-handling", ["fluid-handling"], defer=False) == "researched fluid-handling"
+
+
+def test_research_that_moves_but_is_far_off_lets_the_crew_go(monkeypatch):
+    """Run 20261124-120854: a pumpjack goal waited 16 game minutes on oil-gathering creeping to 53%."""
+    monkeypatch.setattr("brain.crew.time.sleep", lambda s: None)
+    seq = [0.36 + 0.01 * k for k in range(40)]
+    crew, clock = _crew(seq, researched_at=30)
+    with pytest.raises(BuildError) as e:
+        crew._wait_research("fluid-handling", ["fluid-handling"])
+    assert "more game minutes" in str(e.value) and clock["m"] - 100.0 < 5

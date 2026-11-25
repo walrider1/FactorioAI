@@ -236,6 +236,20 @@ class Workshop(Module):
             k = max(1, math.ceil(plan.fluids["crude-oil"] / 300))
             raise BuildError(f"{item} needs {plan.fluids['crude-oil']:.0f} crude oil a minute: build pumpjacks "
                              f"first ({{\"do\": \"build\", \"module\": \"pumpjack\", \"count\": {k}}})")
+        if "crude-oil" in plan.fluids and not self._crude_free(w, base, d):
+            # every pumpjack feeds another floor: a floor that has crude already shares it (its cells and these
+            # draw on one net; more pumpjacks join that net). Run 20261124-015025: chemical science failed five
+            # times on "every pumpjack already feeds another floor" while the plastic floor had a crude line.
+            oil = next((f for f in self.floors if f is not d and f.nets.tiles("crude-oil")
+                        and self._fits(w, base, f, n)), None)
+            if oil is None:
+                raise BuildError("every pumpjack already feeds another floor: build more "
+                                 '({"do": "build", "module": "pumpjack", "count": 2})')
+            w.log(f"[workshop] {item} goes on floor {oil.idx}, which has a crude line already (every pumpjack "
+                  "feeds a floor)")
+            d = oil
+            plan = plan_for(d)
+            n = sum(c.count for c in plan.cells)
         # the crude line's pumps, counted like the water line's: one per PUMP_EVERY tiles (a detour adds one)
         far = self._crude_gap(base, d, home=base.centre or w.pos) if "crude-oil" in plan.fluids else 0.0
         crude_pumps = int(far // PUMP_EVERY) + 1
@@ -741,11 +755,24 @@ class Workshop(Module):
         self.designs.clear()
         return gaps
 
+    def _crude_free(self, w: FreeWorld, base, d: District | None) -> bool:
+        """Crude this floor can get: a crude line of its own, or a pumpjack whose output no other floor's pipe
+        takes yet (with no floor yet: a pumpjack no floor has joined)."""
+        if getattr(getattr(w, "kn", None), "ports", None) is None:
+            return True                                # no catalog to read ports from (stub worlds): as before
+        if d is not None:
+            return bool(d.nets.tiles("crude-oil")) or bool(self._pumpjack_ports(w, base, d))
+        joined = set().union(*[f.pumpjacks_joined for f in self.floors]) if self.floors else set()
+        return bool(self._jack_ports(w, base, joined))
+
     def _pumpjack_ports(self, w: FreeWorld, base, d: District) -> list[Tile]:
+        return self._jack_ports(w, base, d.pumpjacks_joined)
+
+    def _jack_ports(self, w: FreeWorld, base, joined: set) -> list[Tile]:
         out = []
         for s in base.of("pumpjack"):
             for name, x, y, dd in s.entities:
-                if name != "pumpjack" or (x, y) in d.pumpjacks_joined:
+                if name != "pumpjack" or (x, y) in joined:
                     continue
                 for pt in w.kn.ports("pumpjack", x, y, dd):
                     if not w.blocked(pt["target"]):
@@ -772,7 +799,11 @@ class Workshop(Module):
         refused = []                                  # buildings the game did not take: gaps a repair places
         for c in design["cells"]:
             for n, x, y, dd in c["entities"]:
-                recipe = c["recipe"] if n == c["machine"] and c.get("recipe") and n != "rocket-silo" else None
+                # a furnace picks its recipe from what goes in: the game takes set_recipe on assemblers only (a
+                # furnace answers no_entity). Run 20261124-120854: workshop 64's two steel furnaces were placed,
+                # yet counted as never placed, and every repair retried the same refused call
+                recipe = (c["recipe"] if n == c["machine"] and c.get("recipe") and n != "rocket-silo"
+                          and not n.endswith("furnace") else None)
                 try:
                     w.place(n, x, y, dd, footprint(kn, n, x, y, dd))
                 except BuildError as exc:

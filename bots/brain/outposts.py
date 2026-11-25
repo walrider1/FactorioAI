@@ -39,6 +39,19 @@ POLE = "small-electric-pole"
 FIELD_SMELT_MAX = 130.0
 FIELD_ORE_MIN = 8               # ore tiles of its 5x5 mining area a drill of a dense field needs
 FIELD_DRILLS = 16               # a dense field's drills by default: ~480 ore a minute, one belt's worth and change
+# An outpost is a long trip, a pole line and a trunk: worth it only for real output. Run 20261124-015025: iron
+# outposts of 8 drills took 20 and 33 game minutes each and still left iron at 38/min against 207 wanted. A bulk
+# ore outpost is at least this many drills (fewer only where the patch holds no more), on the biggest band found.
+OUTPOST_MIN = {"iron-ore": 16, "copper-ore": 16, "coal": 10, "stone": 8}
+OUTPOST_FLOOR = 10              # a band of fewer drills than this is passed over while another patch may hold more
+BIG_PATCH_TILES = 150           # patches this big are tried first for a bulk outpost (nearest first among them)
+# Dense fields near the base. Once electric drills run, iron, copper and coal are mined the way players do it: a
+# dense field (drills on both sides of one belt) on the patch near the base, smelted in a column beside it, not
+# rows of a few drills each dropping into its own furnace with its own coal belt. Run 20261124-120854: copper
+# came from four mines of 1-5 drills (47 ore/min off a 356-tile patch next to the base), coal from three chest
+# mines (139/min), and an iron outpost went up 360 tiles out while the iron patch at home still had room.
+NEAR_FIELD_MAX = 200.0          # tiles from the base to a patch's nearest tile: a "near" patch
+NEAR_FIELD_MIN = 4              # a near field of fewer drills than this is no better than a row: "no room"
 
 
 # ------------------------------------------------------------------ the patches we work, and the next ones
@@ -58,6 +71,26 @@ def spare_patches(w, base, resource: str, min_tiles: int = 40) -> list[dict]:
     out = [p for p in w.patches if p["name"] == resource and p.get("tiles", 0) >= min_tiles and not worked(base, p)]
     return sorted(out, key=lambda p: math.dist((p["centre"]["x"], p["centre"]["y"]) if p.get("centre")
                                                else (p["nearest"]["x"], p["nearest"]["y"]), home))
+
+
+def column_into(p: dict) -> str:
+    """How an outpost's ore ends at its column: "chest" (depot chests: coal, and any ore wanted raw, into: chest)
+    or "furnace" (smelted)."""
+    return "chest" if p.get("resource") == "coal" or p.get("into") == "chest" else "furnace"
+
+
+def _patch_dist(p: dict, home) -> float:
+    pts = [(p[k]["x"], p[k]["y"]) for k in ("nearest", "centre") if p.get(k)]
+    return min((math.dist(q, home) for q in pts), default=1e9)
+
+
+def near_patches(w, base, resource: str, min_tiles: int = 40) -> list[dict]:
+    """Patches of the ore near the base, worked or not (a dense field goes on the free part of a worked one),
+    nearest first."""
+    home = base.centre or w.pos
+    out = [p for p in w.patches if p["name"] == resource and p.get("tiles", 0) >= min_tiles
+           and _patch_dist(p, home) <= NEAR_FIELD_MAX]
+    return sorted(out, key=lambda p: _patch_dist(p, home))
 
 
 def outlook(crew) -> dict:
@@ -82,7 +115,7 @@ def outlook(crew) -> dict:
         short = full or (left is not None and left < RUNWAY_MIN)
         fix = None
         if short:
-            fix = {"do": "build", "module": "outpost", "resource": r, "count": 8} if spare \
+            fix = {"do": "build", "module": "outpost", "resource": r, "count": OUTPOST_MIN.get(r, 8)} if spare \
                 else {"do": "scout", "resource": r}
         out[r] = {"worked_patches": len(mine), "amount_left": amount, "mined_per_min": round(rate, 1),
                   "minutes_left": round(left) if left is not None else None, "room_for_more": not full,
@@ -152,7 +185,11 @@ class Outpost(Module):
                 "every tile of the band mined), a pole line home, the ore smelted in a furnace column right beside "
                 "the field when it is near the base (else at the base end of a trunk belt), its plates on one line "
                 "out. The patch is set aside: ordinary mines keep off it. The crew builds it all in one goal. "
-                "Scout first if no spare patch is known. args: {resource, count (drills, 4-30, default 16)}")
+                "Scout first if no spare patch is known. With near_base: true it is a dense field on the "
+                "patches near the base instead (worked or not, on their free ground), smelted beside it: the "
+                "way iron and copper plates and coal are mined once electric drills run; the near patches are "
+                "always tried first while they have room. args: {resource, count (drills, 4-30, default 16), "
+                "near_base}")
 
     # Set by the crew around a build (Crew.outpost_probe): fn(params, head, start, taken, drills) -> (why or
     # None, the column's spot). The trunk's route into its column is planned BEFORE a drill is placed. Run
@@ -174,7 +211,10 @@ class Outpost(Module):
 
     @staticmethod
     def _n(p: dict) -> int:
-        return max(2, min(30 if p.get("dense", True) else 14, int(p.get("count", FIELD_DRILLS))))
+        top = 30 if p.get("dense", True) else 14
+        # near the base no long trip has to pay off: sized to the gap like a mine row
+        lo = NEAR_FIELD_MIN if p.get("near_base") else min(top, OUTPOST_MIN.get(p.get("resource"), 2))
+        return max(lo, min(top, int(p.get("count") or FIELD_DRILLS)))
 
     def kit(self, w, base, p):
         n = self._n(p)
@@ -261,7 +301,10 @@ class Outpost(Module):
         own = p.get("field_key")
         lay, c, q = None, None, None
         walled: list[str] = []
-        for q in cands[:3]:
+        floor = min(n, OUTPOST_FLOOR) if r in OUTPOST_MIN else 2
+        least = NEAR_FIELD_MIN if p.get("near_base") else 2   # near the base: a band that beats a mine row
+        small = None                                   # the best band under the floor: taken only if none is bigger
+        for q in cands[:4]:
             c = (q["centre"]["x"], q["centre"]["y"]) if q.get("centre") else (q["nearest"]["x"], q["nearest"]["y"])
             flow = -1 if home[0] < c[0] else 1         # the collector runs toward the base
             w.survey_area(*c, half=min(48, max(16, int(math.sqrt(q.get("tiles", 100))))), step=32)
@@ -272,16 +315,28 @@ class Outpost(Module):
                                                                  for t in self.drill_tiles(cx, cy)}
                 why = self._probe(p, head, (head[0] + flow, head[1]), taken, lay["drills"])
                 if why is None:
-                    break
-                walled.append(f"({c[0]:.0f}, {c[1]:.0f}): {why}")
+                    if len(lay["drills"]) >= floor:
+                        break
+                    if len(lay["drills"]) >= least and (small is None or len(lay["drills"]) > len(small[0]["drills"])):
+                        small = (lay, c, q, flow, self.column_at)
+                    walled.append(f"({c[0]:.0f}, {c[1]:.0f}): only {len(lay['drills'])} drills fit")
+                else:
+                    walled.append(f"({c[0]:.0f}, {c[1]:.0f}): {why}")
                 lay = None
+        if lay is None and small is not None:          # nothing bigger anywhere known: the best small band
+            lay, c, q, flow, self.column_at = small
         if lay is None:
-            if walled:
+            if walled and not (p.get("near_base") and all("only" in x for x in walled)):
                 raise BuildError(f"no {r} outpost whose trunk can reach a smelting column (nothing placed): "
                                  + "; ".join(walled)[:300])
+            if p.get("near_base"):
+                raise BuildError(f"no room for a dense {r} field of {NEAR_FIELD_MIN}+ drills on the patches near "
+                                 "the base")
             raise BuildError(f"no room for a dense band of 2+ drills on the spare {r} patches known")
         d = "east" if flow > 0 else "west"
-        site = Site(self.name, {"resource": r, "count": 0, "outpost": True, "dense": True}, c)
+        site = Site(self.name, {"resource": r, "count": 0, "outpost": True, "dense": True,
+                                **({"near_base": True} if p.get("near_base") else {}),
+                                **({"into": "chest"} if p.get("into") == "chest" else {})}, c)
         for t in lay["belt"]:
             w.place("transport-belt", t[0] + 0.5, t[1] + 0.5, d, {t})
         for cx, cy, facing in lay["drills"]:
@@ -342,6 +397,16 @@ class Outpost(Module):
         if not base.powered_poles():
             raise BuildError("an outpost needs the power network to reach it: build steam_power first")
         cands = spare_patches(w, base, r)
+        if p.get("near_base"):                         # a dense field near the base: near patches only
+            cands = near_patches(w, base, r)
+            p["field"] = True                          # smelted beside it (coal: depot chests at the base)
+            if not cands:
+                raise BuildError(f"no room for a dense {r} field near the base: no {r} patch within "
+                                 f"{NEAR_FIELD_MAX:.0f} tiles")
+        elif p.get("near_first") and r in OUTPOST_MIN and not p.get("box"):
+            # a far trip only once the near patches are full: they are tried first
+            near = near_patches(w, base, r)
+            cands = near[:2] + [q for q in cands if q not in near[:2]]
         if p.get("box"):                               # the patch the plan set aside for it, if still known
             planned = [q for q in w.patches if q["name"] == r and q.get("box")
                        and _same_patch(q["box"], p["box"])]
@@ -350,6 +415,10 @@ class Outpost(Module):
             raise BuildError(f"no {r} patch known that nobody works yet: scout first "
                              f'({{"do": "scout", "resource": "{r}"}})')
         home = base.centre or w.pos
+        if r in OUTPOST_MIN and not p.get("box") and not p.get("near_base") and not p.get("near_first"):
+            # big patches first: a far trip for a few drills is waste
+            cands = [q for q in cands if q.get("tiles", 0) >= BIG_PATCH_TILES] + \
+                [q for q in cands if q.get("tiles", 0) < BIG_PATCH_TILES]
         if p.get("dense", True):
             return self._build_dense(w, base, p, r, n, cands, home)
         walled: list[str] = []

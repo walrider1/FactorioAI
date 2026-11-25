@@ -218,6 +218,11 @@ def starving(crew) -> dict[str, list[dict]]:
     link step."""
     out: dict[str, list[dict]] = {}
     for p in unfed_ports(crew):
+        # a workshop's ports are the courier's: no belt there is how it is meant to run, not starving. Run
+        # 20261124-120854: blue workshop 64's 23 courier-fed ports held the engine, circuit and blue factories
+        # back, and the overseer had the (by then working) workshop torn down to clear the gate
+        if p.get("kind") == "workshop":
+            continue
         if p["state"] == "no_source" or (p["state"] == "blocked" and not routing_fail(p.get("why"))):
             out.setdefault(p["item"], []).append(p)
     return {k: v for k, v in out.items() if len(v) >= GATE_MIN_PORTS}

@@ -20,6 +20,9 @@ def stamp_stages(stages: list[dict], seen: dict, minute: float | None, primed: b
     """Give each cleared roadmap stage `done_minute`: the game minute it was first seen done (the overlay's split
     times). A stage already done the first time the roadmap is read (a resume without the old file) gets None."""
     for s in stages:
+        if s.get("milestone") and not s.get("done"):
+            seen.pop(s.get("name"), None)            # stamped before the game's milestone: not cleared after all
+            continue
         if s.get("done"):
             if s.get("name") not in seen:
                 seen[s.get("name")] = minute if primed else None
@@ -132,6 +135,8 @@ class Telemetry:
                 "rates": {k: v.get("made_per_min") for k, v in ((w.stats or {}).get("items") or {}).items()
                           if v.get("made_per_min")},
                 "patches": [{"name": p["name"], "box": p["box"], "tiles": p["tiles"]} for p in w.patches[:40]],
+                # the stream's world map: crude-oil wells it knows (single tiles, not patches)
+                "oil_wells": [list(t) for t in sorted((getattr(w, "resources", None) or {}).get("crude-oil", ()))][:60],
                 "stage": {"main": w.stage, "steps": list(w.steps), "foreman": w.foreman_step,
                           "thinking": bool(self.state["strategist"].get("thinking_since"))},
                 "trace": list(w.trace),

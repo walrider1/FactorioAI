@@ -54,6 +54,48 @@ SILO_KIT = {"steel-plate": 1000, "concrete": 1000, "processing-unit": 200, "elec
 CRUDE_PER_PUMPJACK = 300.0                       # a careful guess: fresh wells give 300-600 a minute
 
 
+PACK_COLOUR = {"automation-science-pack": "Red", "logistic-science-pack": "Green", "chemical-science-pack": "Blue",
+               "production-science-pack": "Purple", "utility-science-pack": "Yellow"}
+
+
+def automated_milestone(crew, item: str) -> str | None:
+    """The id of the task's first rate milestone for this item (the "automated" step), None without one."""
+    for m in getattr(crew, "milestone_ladder", None) or []:
+        if m.get("per_minute") and m.get("automated", True) and item in [m.get("item")] + list(m.get("also") or []):
+            return m.get("id")
+    return None
+
+
+def automated(crew, pack: str, default: float) -> bool:
+    """Is this pack made by machines at its milestone's rate? The game decides: its milestone check leaves
+    hand-crafting out (the scenario counts the crew's crafts apart). The production statistics do not, so a crew
+    crafting red science for its first research read as "Red science automated" at minute 34.7 of run
+    20261125-154120, before any red science machine stood. Without such a milestone in the task: the measured
+    rate less what the crew crafted by hand over the last minutes."""
+    mid = automated_milestone(crew, pack)
+    if mid is not None:
+        return mid in (getattr(crew.w, "milestones", None) or {})
+    return pack_rate(crew, pack) - hand_rate(crew, pack) >= default
+
+
+def hand_rate(crew, item: str, window_min: float = 5.0) -> float:
+    """What the crew crafted of an item a minute lately, from the game's running count of hand crafts (kept per
+    reading on the crew, so no extra game call)."""
+    row = ((getattr(crew.w, "stats", None) or {}).get("items") or {}).get(item) or {}
+    try:
+        now = crew.w.now_tick() / 3600
+    except Exception:  # noqa: BLE001 - stub worlds in tests
+        return 0.0
+    seen = crew.__dict__.setdefault("_hand_seen", {}).setdefault(item, [])
+    total = float(row.get("hand_made") or 0)
+    if not seen or seen[-1][0] < now:
+        seen.append((now, total))
+    while len(seen) > 2 and now - seen[1][0] >= window_min:
+        seen.pop(0)
+    t0, n0 = seen[0]
+    return (total - n0) / (now - t0) if now - t0 >= 0.5 else 0.0
+
+
 def planned_rate(crew, pack: str) -> float:
     """What the factories and cells built for an item were sized for (nominal: they may starve)."""
     fac = sum(float(s.params.get("per_minute", 0)) for s in crew.base.of("factory") if s.params.get("item") == pack)
@@ -160,19 +202,19 @@ def roadmap(crew) -> dict:
     stages = [
         st("Power and labs", base.of("steam_power") and base.of("labs"),
            f"{power['stations']} steam stations, {labs} labs"),
-        st("Red science automated", science["automation-science-pack"]["made_per_min"] >= auto("automation-science-pack", 5),
+        st("Red science automated", automated(crew, "automation-science-pack", auto("automation-science-pack", 5)),
            made("automation-science-pack")),
-        st("Green science automated", science["logistic-science-pack"]["made_per_min"] >= auto("logistic-science-pack", 5),
+        st("Green science automated", automated(crew, "logistic-science-pack", auto("logistic-science-pack", 5)),
            made("logistic-science-pack")),
         st("Workshop floor and electric mines", base.of("workshop") and base.of("electric_mine"),
            f"{len(crew.cells())} cells, {len(base.of('electric_mine'))} electric mines"),
         st("Oil: pumpjacks and a refinery", oil and any(c["machine"] == "oil-refinery" for _, c in crew.cells()),
            f"{base.count('pumpjack')} pumpjacks"),
-        st("Blue science automated", science["chemical-science-pack"]["made_per_min"] >= auto("chemical-science-pack", 5),
+        st("Blue science automated", automated(crew, "chemical-science-pack", auto("chemical-science-pack", 5)),
            made("chemical-science-pack")),
-        st("Purple science automated", science["production-science-pack"]["made_per_min"] >= auto("production-science-pack", 3),
+        st("Purple science automated", automated(crew, "production-science-pack", auto("production-science-pack", 3)),
            made("production-science-pack")),
-        st("Yellow science automated", science["utility-science-pack"]["made_per_min"] >= auto("utility-science-pack", 3),
+        st("Yellow science automated", automated(crew, "utility-science-pack", auto("utility-science-pack", 3)),
            made("utility-science-pack")),
         st("Rocket silo researched", "rocket-silo" in researched,
            f"{len(path)} technologies left" if path else "researched"),
@@ -180,6 +222,13 @@ def roadmap(crew) -> dict:
         st("Rocket parts", rockets > 0, ""),
         st("Rocket launched", rockets > 0, f"{rockets} launched"),
     ]
+    # science stages go by the game's automated milestones (automated()): each carries its milestone id, so a stamp
+    # a resumed run kept from before this rule is dropped while the milestone is not in (telemetry.stamp_stages)
+    for s in stages:
+        if s["name"].endswith("science automated"):
+            pack = next((p for p, c in PACK_COLOUR.items() if s["name"].startswith(c)), None)
+            if pack and automated_milestone(crew, pack):
+                s["milestone"] = automated_milestone(crew, pack)
     now = next((i for i, s in enumerate(stages) if not s["done"]), None)
     for i, s in enumerate(stages):
         s["status"] = "done" if s["done"] else "now" if i == now else "todo"

@@ -153,7 +153,7 @@ def test_a_dry_coal_mine_feeding_a_belt_is_rebuilt_on_fresh_ore_at_once():
     crew.links = [{"source": (-29.5, 26.5), "to_site": 7, "item": "coal", "kind": "item", "port": {}, "entities": []}]
     fix = upkeep.depleted_fix(crew, mine)
     assert fix == {"do": "replace", "site": mine.id, "force": True,
-                   "with": {"do": "build", "module": "electric_mine", "resource": "coal", "count": 2, "into": "chest"}}
+                   "with": {"do": "build", "module": "electric_mine", "resource": "coal", "count": 4, "into": "chest"}}   # rebuilt bigger
     alerts = assess.depleted_alerts(crew)
     assert len(alerts) == 1 and alerts[0]["level"] == "urgent" and alerts[0]["fix"] == fix
     assert alerts[0]["key"].startswith(assess.CRITICAL)                 # the rule floor acts on it by itself

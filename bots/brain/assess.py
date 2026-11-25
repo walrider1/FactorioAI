@@ -29,9 +29,13 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any
 
+from .belts import LINK_REACH
+
 FUELS = ("coal", "wood")
 CRITICAL = ("coal", "boiler", "power", "fuel", "pipe", "belt-foreign", "gap-")   # keys the rule floor fixes itself
-SOON = ("rebuild-", "swap-")    # keys it queues by itself without pausing the goal in hand (planned, not urgent)
+SOON = ("rebuild-", "swap-", "ore-soon-", "trunk-")  # keys it queues by itself without pausing the goal in hand (planned)
+FAR_LINK = "a link reaches"     # in a link failure: only the distance stopped it (Crew._link_port), a trunk fixes it
+TRUNK_AUTO_MAX = 600            # Manhattan tiles: a farther source is better made next to the site than belted over
 GOAL_DOS = ("build", "research", "stock", "remove", "replace", "connect", "feed", "priority", "wait",
             "link", "link_science", "scout", "upgrade", "repair", "repipe", "relink", "purge", "trunk")
 LONG_GOAL_MIN = 8.0
@@ -80,7 +84,7 @@ def expand_fix(crew, resource: str) -> dict | None:
     except Exception:  # noqa: BLE001 - stub crews in tests
         return None
     if spare:
-        return {"do": "build", "module": "outpost", "resource": resource, "count": 8}
+        return {"do": "build", "module": "outpost", "resource": resource, "count": 16 if resource in ("iron-ore", "copper-ore") else 8}
     return {"do": "scout", "resource": resource}
 
 
@@ -101,8 +105,50 @@ def ore_alerts(crew) -> list[dict]:
         nxt = o.get("next_patch")
         what = f"{r}: {why}; " + (f"the next patch is {nxt['distance']} tiles out: an outpost mines it and belts it home"
                                   if nxt else "no other patch known: scout for one before the drills stop")
-        out.append({"level": "warn", "key": f"ore-{r}", "what": what, "fix": o["fix"]})
+        soon = _ore_soon(crew, r, o)
+        out.append({"level": "urgent" if soon else "warn", "key": f"ore-soon-{r}" if soon else f"ore-{r}",
+                    "what": what + (f" ({soon}: queued now, the base must not wait for it)" if soon else ""),
+                    "fix": o["fix"]})
     return out
+
+
+ORE_SOON_MIN = 150.0            # game minutes of iron or copper left where we mine it: the next patch is built now
+
+
+def _ore_soon(crew, resource: str, o: dict) -> str | None:
+    """Why the next patch of a plate ore is built now by the rule floor, not left to the planners: its worked
+    patches run out within ORE_SOON_MIN, or they are full while the plate is short. Run 20261124-015025: iron near
+    the base ran dry from minute 330, the outpost came only after burner mines and hand feeding, 20 and 33 minutes
+    late, and iron stood at 38/min against 207 wanted."""
+    if resource not in ("iron-ore", "copper-ore") or not electric_coal(crew):
+        return None
+    left = o.get("minutes_left")
+    if left is not None and left < ORE_SOON_MIN:
+        return f"about {left} game minutes of ore left"
+    if not o.get("room_for_more"):
+        if _stranded(crew, resource):
+            return None                               # mined but not delivered: links, not a far patch
+        from .overseer import short_of
+        why = short_of(crew, "iron-plate" if resource == "iron-ore" else "copper-plate")
+        if why:
+            return f"the patches near the base are full and {why}"
+    return None
+
+
+STRANDED_SHARE = 0.3
+
+
+def _stranded(crew, resource: str) -> bool:
+    """Do the mines of this ore stand with nowhere to put a good share of what they mine? Then the plate is short
+    for want of belts, not of ore. Run 20261124-120854: three copper mines stood full while the green science
+    factory got 18.8 of its 24.8 copper a minute; a far outpost would not have fed it."""
+    n = full = 0
+    for s in crew.base.sites:
+        if s.kind in ("electric_mine", "burner_mine") and s.params.get("resource") == resource:
+            h = getattr(s, "health", None) or {}
+            n += sum(h.values())
+            full += h.get("waiting_for_space_in_destination", 0) + h.get("full_output", 0)
+    return n > 0 and full >= STRANDED_SHARE * n
 
 
 def supply_fix(crew, item: str, short: float) -> dict | None:
@@ -162,6 +208,22 @@ def input_chain_alerts(crew) -> list[dict]:
         out.append({"level": "warn", "key": f"input-chain-{c['chest'][0]},{c['chest'][1]}", "what": what,
                     "fix": fix})
     return out
+
+
+def _strands(crew, q: dict) -> bool:
+    """Is at least what this port wants of its item made and left in chests nobody links (nodes.stranded)? Only
+    for a factory or research station, which the relocate builds next to its sources."""
+    site = crew.base.get(q.get("into_site")) if q.get("into_site") is not None else None
+    if site is None or site.kind not in ("factory", "labs"):
+        return False
+    try:
+        from .nodes import stranded
+        lost = sum(r["per_minute"] for r in stranded(crew) if r["item"] == q.get("item"))
+    except Exception:  # noqa: BLE001 - stub crews in tests
+        return False
+    want = sum(float(pt.get("per_minute") or 0) for pt in site.params.get("ports", [])
+               if pt.get("item") == q.get("item") and not pt.get("fed"))
+    return lost >= max(5.0, want)
 
 
 def relocate_fix(crew, q: dict) -> dict | None:
@@ -276,6 +338,16 @@ def fuel_alerts(crew) -> list[dict]:
             "; the drills behind them back up (waiting_for_space): a fuel problem, not a belt one" if furnaces else "")
         port = next((pt for pt in s.params.get("ports", []) if pt.get("fuel")), None)
         if port is not None and not port.get("fed"):
+            stuck = next((q for q in (crew.stuck_links() if hasattr(crew, "stuck_links") else [])
+                          if tuple(q["at"]) == tuple(port["end"])), None)
+            if stuck is not None:
+                # its coal belt found no route: coal by hand meanwhile, so a smelting column never stands cold
+                # while the link waits for its retry (a cold column backs its whole field up)
+                out.append({"level": "urgent", "key": f"fuel-site-{s.id}",
+                            "what": what + f"; its coal belt failed {stuck['failed']}x ({stuck['why'][:80]}): fed "
+                                           "by hand until it is linked",
+                            "fix": {"do": "feed", "site": s.id, "item": "coal", "count": min(200, 40 * dry)}})
+                continue
             out.append({"level": "urgent", "key": f"fuel-belt-{s.id}", "what": what + "; its coal belt is not linked",
                         "fix": {"do": "link"}})
             continue
@@ -425,6 +497,46 @@ def depleted_alerts(crew) -> list[dict]:
     return out
 
 
+def unfinished_key(mod: str, params: dict) -> str:
+    """What a half-built site was meant to be: its rebuild is tried once per such key."""
+    return mod + json.dumps({k: v for k, v in params.items() if k not in ("reflex",)}, sort_keys=True, default=str)
+
+
+UNFINISHED_GRACE_MIN = 2.0      # game minutes a half-built site stands before it is taken up (its own goal may retry)
+
+
+def unfinished_alerts(crew) -> list[dict]:
+    """A build that stopped half-way leaves an "unfinished" site: buildings that do nothing (often unpowered) and
+    hold ground and parts. The rule floor takes it up and builds the same thing again once, from the parts it
+    gets back (a replace with clear_first); a second failure only takes it up. An outpost's smelting column is
+    only taken up: the outpost's own finishing step builds its column (and trunk) again. Run 20261125-154120:
+    a 13-furnace column stopped at 125 buildings (no iron chest), stood unpowered for 25 minutes, and a second
+    column went up elsewhere."""
+    out: list[dict] = []
+    try:
+        minute = crew._minute()
+        from .modules import MODULES
+    except Exception:  # noqa: BLE001 - stub crews in tests
+        return out
+    for s in crew.base.sites:
+        if not s.kind.startswith("unfinished ") or minute - float(s.built_minute or 0) < UNFINISHED_GRACE_MIN:
+            continue
+        mod = s.kind[len("unfinished "):]
+        p = {k: v for k, v in s.params.items() if k not in ("do", "module", "reflex")}
+        column = mod == "smelter_column" and p.get("resource") in ("iron-ore", "copper-ore", "coal", "stone",
+                                                                   "uranium-ore")
+        tried = getattr(crew, "__dict__", {}).get("_unfinished_retried") or set()
+        again = mod in MODULES and not column and unfinished_key(mod, p) not in tried
+        fix = ({"do": "replace", "site": s.id, "clear_first": True,
+                "with": {"do": "build", "module": mod, **p}} if again else
+               {"do": "remove", "site": s.id, "force": True})
+        out.append({"level": "urgent", "key": f"rebuild-unfinished-{s.id}",
+                    "what": f"site {s.id} is a half-built {mod} ({len(s.entities)} buildings; {s.note[:100]}): "
+                            + ("taken up and built again from its parts" if again else "taken up (parts back)"),
+                    "fix": fix})
+    return out
+
+
 def orphan_alerts(crew) -> list[dict]:
     """Factories whose only consumer was removed (Crew._note_orphans): link them to another consumer of their
     item, or remove them, so their machines and the belt they tap serve something."""
@@ -477,6 +589,7 @@ def detect(crew) -> list[dict]:
                                    "swap: use less (no new boilers or furnace rows) until electric furnaces"),
                         "fix": fix})
     out += depleted_alerts(crew)
+    out += unfinished_alerts(crew)
     out += orphan_alerts(crew)
     out += rebuild_soon_alerts(crew)
     out += rebuild_alerts(crew)
@@ -487,14 +600,17 @@ def detect(crew) -> list[dict]:
             out.append({"level": "urgent", "key": f"coal-mine-{s.id}",
                         "what": f"coal mine site {s.id}: {dry} drill(s) out of fuel; coal production is stopping",
                         "fix": {"do": "feed", "site": s.id, "item": "coal", "count": 10 * dry}})
-    for (x, y), n in crew.foreman.boiler_coal.items():
+    for (x, y), n in list(crew.foreman.boiler_coal.items()):
         if n < 10:
             site = next((s for s in base.of("steam_power") if any(
                 abs(cx - x) < 1 and abs(cy - y) < 1 for cx, cy, _ in s.chests)), None)
+            if site is None:                          # the station came down: a stale chest, nothing to feed (run
+                crew.foreman.boiler_coal.pop((x, y), None)   # 20261124-015025: "feed site None" failed 6 times)
+                continue
             out.append({"level": "urgent", "key": f"boiler-{x},{y}",
-                        "what": f"power station {'site ' + str(site.id) if site else ''}: only {n} coal left in the "
+                        "what": f"power station site {site.id}: only {n} coal left in the "
                                 "boiler's chest; the power (labs, assemblers) stops when it is empty",
-                        "fix": {"do": "feed", "site": site.id if site else None, "item": "coal", "count": 60}})
+                        "fix": {"do": "feed", "site": site.id, "item": "coal", "count": 60}})
 
     # power: electric sites cut off, or the network at its limit
     for s in base.sites:
@@ -549,7 +665,25 @@ def detect(crew) -> list[dict]:
 
     # belt links that keep failing: say why once, so nobody keeps asking for the same link
     for q in (crew.stuck_links() if hasattr(crew, "stuck_links") else []):
-        if q["failed"] >= 2:
+        far = far_link_fix(q)
+        if far is not None:
+            # only the distance stopped it: no retry ever helps, the trunk goal does (queued by the rules)
+            out.append({"level": "urgent", "key": f"trunk-{q['at'][0]},{q['at'][1]}",
+                        "what": f"the {q['item']} link into site {q['into_site']} is beyond a link's reach "
+                                f"({q['why'][:120]}): a trunk belt is laid as a goal of its own",
+                        "fix": far})
+        elif q["failed"] >= 2 and _strands(crew, q):
+            # the plates are there, only out of a belt's reach: the factory goes next to them (built first), not
+            # a third try a half hour on. Run 20261125-154120: the red factory stood 80 tiles from a 13-furnace
+            # column whose 244 plates a minute filled its chests, two links failed, and research stalled on packs
+            fix = relocate_fix(crew, q)
+            out.append({"level": "urgent" if fix else "warn", "key": f"rebuild-near-{q['at'][0]},{q['at'][1]}",
+                        "what": f"the {q['item']} link into site {q['into_site']} failed {q['failed']}x while "
+                                f"{q['item']} sits unused in chests: "
+                                + ("the site is built again next to them, then the old one comes down" if fix else
+                                   "it cannot be moved (sealed or no module for it)"),
+                        "fix": fix})
+        elif q["failed"] >= 2:
             fix = relocate_fix(crew, q) if q["failed"] >= 3 else None
             out.append({"level": "warn", "key": f"link-stuck-{q['at'][0]},{q['at'][1]}",
                         "what": f"the {q['item']} link into site {q['into_site']} failed {q['failed']}x: {q['why'][:200]}"
@@ -569,7 +703,7 @@ def detect(crew) -> list[dict]:
             out.append({"level": "warn", "key": f"plate-routing-{row['item']}",
                         "what": row["text"] + ": the shortage is routing, not supply. More mines or another "
                                 f"{row['item']} consumer change nothing until those ports get a belt. A relink "
-                                f"reaches only sources within {getattr(crew, 'LINK_MAX_TILES', 150)} tiles: a "
+                                f"reaches only sources within {LINK_REACH} tiles: a "
                                 "farther spare source needs a trunk goal, or a new mine or smelter next to the "
                                 "starving site; not another relink", "fix": None})
     for s in base.sites:
@@ -674,6 +808,19 @@ def situation(crew, alerts: list[dict], doctrine: str = "") -> dict:
         "overseer": {"guidance": getattr(crew, "overseer_guidance", None),
                      "forbidden": [f["match"] for f in getattr(crew, "overseer_forbid", [])]},
     }
+
+
+def far_link_fix(q: dict) -> dict | None:
+    """The trunk goal for a stuck link that failed on distance alone, or None. A failed trunk records its own
+    reason (no FAR_LINK in it), so a trunk that cannot be laid is not queued again and again."""
+    why = str(q.get("why") or "")
+    if FAR_LINK not in why or q.get("into_site") is None or not q.get("item"):
+        return None
+    import re
+    m = re.search(r"is (\d+) tiles from", why)
+    if m and int(m.group(1)) > TRUNK_AUTO_MAX:
+        return None
+    return {"do": "trunk", "site": q["into_site"], "item": q["item"]}
 
 
 def _plan_waited(crew) -> float:

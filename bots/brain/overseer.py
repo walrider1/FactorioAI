@@ -115,7 +115,7 @@ When to act at all:
   consumer of that item fix nothing (the crew holds such builds back while the item's ports starve). Fix the
   route: remove what walls a port in, {{"do": "relink", "site": id}} to lay one site's input belts again (from a
   line built since, say), or replace the starving factory with one next to its source. A link (and a relink)
-  reaches only sources within 150 tiles: when the spare sources are farther, the fix is {{"do": "trunk", "site":
+  reaches only sources within 220 tiles: when the spare sources are farther, the fix is {{"do": "trunk", "site":
   id, "item": item}} (one long belt, a goal of its own) or a nearer mine, never another relink. "lines" lists each
   plate line, what it carries, what is drawn and what is left: a new factory belongs where a line has spare.
 
@@ -132,6 +132,10 @@ How to act (only for a problem named above):
   "protected" is the plan's own goal after the plan waited {starve:.0f} minutes behind fixes ("plan_waited_min"
   counts toward that): it is neither paused nor dropped, your orders run right after it. Keep the urgent queue
   short: everything in it delays the plan.
+- Spare capacity on paper is not supply: a line whose mines run dry ("ore_outlook" minutes_left, rebuild alerts)
+  has no spare. Never forbid building, mining or replacing a mine of something that is short ("short_supply":
+  made under 90% of what its ports want, or ports with no source): such forbids are refused, and a goal that adds
+  supply of a short item runs whatever is forbidden.
 - forbid: stop a loop that is happening now, e.g. {{"match": {{"do": "build", "module": "smelter_column"}},
   "minutes": 10, "why": "..."}}. Every goal with those keys and values is refused, also when another build would
   start it. At most 3 stand (the oldest drop out), each at most 30 minutes. Never forbid what queues.closeout
@@ -209,6 +213,16 @@ def _diagnoses(crew) -> list[dict]:
         return []
 
 
+def _short_supply(crew) -> list[str]:
+    """Plates, coal and steel the base makes too little of now (short_of): builds of these are never forbidden."""
+    out = []
+    for item in ("iron-plate", "copper-plate", "coal", "stone-brick", "steel-plate"):
+        why = short_of(crew, item)
+        if why:
+            out.append(why)
+    return out
+
+
 def full_report(crew, base_report: dict, results: list[dict], previous: list[dict], extra: dict | None = None) -> dict:
     """Everything the bot knows, for the overseer. base_report: the strategist's own report."""
     w = crew.w
@@ -250,6 +264,7 @@ def full_report(crew, base_report: dict, results: list[dict], previous: list[dic
         "inventory_full": dict(sorted(w.inventory.items(), key=lambda kv: -kv[1])),
         "results_history": [{"goal": _short(r["goal"]), "ok": r["ok"], "minutes": r.get("game_minutes"),
                              "result": str(r.get("result", ""))[:220]} for r in results[-25:]],
+        "short_supply": _short_supply(crew),
         "forbidden": [{"match": f["match"], "minutes_left": round((f["until"] - w.now_tick()) / 3600, 1),
                        "why": f.get("why", "")} for f in active_forbids(crew)],
         "previous_overseer": previous[-3:],
@@ -267,12 +282,85 @@ def active_forbids(crew) -> list[dict]:
 
 
 def forbidden(crew, goal: dict) -> dict | None:
-    """The forbid a goal falls under (None: allowed). A match is a partial goal: every key must be equal."""
+    """The forbid a goal falls under (None: allowed). A match is a partial goal: every key must be equal. A goal
+    that adds supply of something measurably short (relieves) is never held back by a forbid."""
     g = {k: v for k, v in goal.items() if k != "reflex"}
     for f in active_forbids(crew):
         m = f["match"]
         if m and all(g.get(k) == v for k, v in m.items()):
+            if relieves(crew, g):
+                return None
             return f
+    return None
+
+
+# ------------------------------------------------------------------ what a forbid may never hold back
+# Run 20261124-015025: the overseer forbade every iron build for 30 minutes, three times, because "existing iron
+# lines have substantial spare capacity": the lines were big on paper while their mines ran dry. Iron fell to
+# 38 plates a minute against 207 wanted, and the rule floor's replacements of dry mines were refused as forbidden.
+SHORT_SHARE = 0.9              # made under this share of what the ports want: short, whatever the lines say
+ORE_ITEM = {"iron-ore": "iron-plate", "copper-ore": "copper-plate", "stone": "stone-brick", "coal": "coal"}
+
+
+def goal_item(goal: dict) -> str | None:
+    """The item a build (or a replace's build) adds supply of: a mine's or outpost's plate, a steel column's
+    steel, pumpjacks' crude oil, a factory's or workshop's item."""
+    g = goal.get("with") if goal.get("do") == "replace" and isinstance(goal.get("with"), dict) else goal
+    r = g.get("resource")
+    if g.get("module") == "smelter_column" and r == "iron-plate":
+        return "steel-plate"
+    if r in ORE_ITEM:
+        return ORE_ITEM[r]
+    if g.get("module") == "pumpjack" or r == "crude-oil":
+        return "crude-oil"
+    return g.get("item")
+
+
+def short_of(crew, item: str | None) -> str | None:
+    """Why an item is short now (made under SHORT_SHARE of what its ports want, ports with no source at all,
+    coal burned faster than mined), or None."""
+    if not item:
+        return None
+    try:
+        if item == "coal" and hasattr(crew, "coal_budget"):
+            b = crew.coal_budget()
+            if b.get("burned_per_min", 0) > b.get("mined_per_min", 0):
+                return f"coal: mined {b['mined_per_min']}/min, burned {b['burned_per_min']}/min"
+        want = sum(float(pt.get("per_minute") or 0) for _, pt in crew.item_ports() if pt.get("item") == item)
+        items = (getattr(crew.w, "stats", None) or {}).get("items") or {}
+        made = float((items.get(item) or {}).get("made_per_min") or 0)
+        if want > 0 and made < SHORT_SHARE * want:
+            return f"{item}: made {made:.0f}/min, its ports want {want:.0f}/min"
+        from .nodes import starving
+        hungry = starving(crew)
+        if item in hungry:
+            return f"{item}: {len(hungry[item])} port(s) with no source"
+    except Exception:  # noqa: BLE001 - stub crews: nothing measured, nothing exempt
+        return None
+    return None
+
+
+def _dry_mine(crew, site) -> bool:
+    try:
+        from .upkeep import MINES, mine_depleted, rebuild_due
+        return site is not None and site.kind in MINES and (mine_depleted(site) or bool(rebuild_due(crew, site)))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def relieves(crew, goal: dict) -> str | None:
+    """Why a goal must run whatever is forbidden: it adds supply of an item that is short now, or it puts a mine
+    that runs dry back on fresh ore (the same mine again: no new capacity, only none lost)."""
+    item = goal_item(goal)
+    why = short_of(crew, item)
+    if why:
+        return why
+    base = getattr(crew, "base", None)
+    if goal.get("do") == "replace" and base is not None and _dry_mine(crew, base.get(goal.get("site"))):
+        return f"site {goal.get('site')} runs dry"
+    old = getattr(crew, "_replacing", None)            # the build inside such a replace
+    if goal.get("do") == "build" and old is not None and goal.get("resource") == old.params.get("resource")             and _dry_mine(crew, old):
+        return f"site {old.id} runs dry"
     return None
 
 
@@ -460,6 +548,10 @@ def apply_orders(crew, d: dict, log=print, event=lambda kind, **data: None) -> l
             hit = _closeout_match(crew, f["match"])
             if hit is not None:
                 changed.append(f"forbid {f['match']} refused: the close-out needs {_short(hit)}")
+                continue
+            short = short_of(crew, goal_item(f["match"])) if f["match"].get("do") in ("build", "replace", None)                 else None
+            if short:
+                changed.append(f"forbid {f['match']} refused: {short}")
                 continue
             try:
                 mins = max(1.0, min(FORBID_MAX_MIN, float(f.get("minutes") or FORBID_DEFAULT_MIN)))

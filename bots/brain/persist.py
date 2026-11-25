@@ -25,7 +25,7 @@ VERSION = 1
 
 # never carried over: the new process's own connection, callbacks, threads, clocks and per-process budgets
 SKIP = {
-    "crew": {"w", "kn", "log", "supervisor", "watchdog", "foreman", "designs", "current", "preempt", "kit_hold",
+    "crew": {"w", "kn", "log", "supervisor", "watchdog", "foreman", "designs", "current", "preempt", "kit_hold", "outpost_hold",
              "_claim", "_leaving", "fix_notes", "_finishing", "drop_current", "strategist", "preempt_force", "reserved", "preempt_for"},
     "foreman": {"crew", "last", "busy"},
     "world": {"run", "kn", "log", "speed", "_tick_wall", "recorder", "blocking", "checkpoint", "tend", "make_way",

@@ -47,12 +47,77 @@ def test_removing_a_factory_takes_up_its_links_both_ways_and_frees_its_consumers
     out = _link(crew, (20.5, 5.5), belts_.id, "iron-gear-wheel", _row(22, 38, 5))
     tap = _link(crew, (30, 5), belts_.id, "iron-gear-wheel", [("belt", (30, 6), "south"), ("belt", (30, 7), "south")],
                 tap_of=out)
+    crew.base.add(Site("factory", {"item": "iron-gear-wheel", "per_minute": 10}, (60, 0),   # a spare source to
+                       chests=[(60.5, 5.5, "iron-gear-wheel")]))                           # feed in later
+    crew.boost_links = lambda: ([], [])          # the splice itself: test_a_replaced_mine_feeds_the_old_belts...
     msg = crew.remove(gears.id)
-    assert crew.links == [] and "3 belt link(s)" in msg and str(belts_.id) in msg
-    assert out["port"]["fed"] is None and tap["port"]["fed"] is None      # the consumer gets linked again
+    # the belt into it comes up with it; the belt out of it (and the tap on that belt) stays standing for a new
+    # source to be fed into its side: the consumer keeps its belts
+    assert len(crew.links) == 2 and crew.links[0] is out and crew.links[1] is tap
+    assert "took up 1 belt link(s)" in msg and "1 belt link(s) out of it stay standing" in msg
+    assert out["port"]["fed"] and tap["port"]["fed"]
+    assert (20.5, 5.5) in crew.gone_roots() and crew._source_rate((20.5, 5.5), "iron-gear-wheel") == 0.0
     picked = {(round(e[1] - 0.5), round(e[2] - 0.5)) for e in w.picked}
-    assert {s[1] for s in out["steps"]} <= picked and {s[1] for s in into["steps"]} <= picked
+    assert {s[1] for s in into["steps"]} <= picked and not {s[1] for s in out["steps"]} & picked
+    assert out["ins_removed"]                                            # its inserter at the old chest comes up
     assert crew._free_outputs("iron-plate", belts_)                      # the mine's chest is free again
+    # no new source within SPLICE_WAIT_MIN: taken up after all (with its tap), so the ports get linked afresh
+    t0 = crew.gone_roots()[(20.5, 5.5)]
+    crew._minute = lambda: t0 + crew.SPLICE_WAIT_MIN + 1
+    notes = crew.expire_gone()
+    assert crew.links == [] and notes and "2 link(s)" in notes[0] and out["port"]["fed"] is None
+    assert crew.gone_roots() == {}
+
+
+def test_a_replaced_mine_feeds_the_old_belts_and_no_consumer_is_touched():
+    crew, w, _ = _crew()
+    crew.removal_blocker = lambda s: None
+    crew.foreman.forget = lambda s: None
+    crew.removed = []
+    w.pos, w.doing = (0, 0), (lambda text: None)
+    old = crew.base.add(Site("electric_mine", {"resource": "iron-ore", "into": "furnace"}, (0, 0),
+                             chests=[(0.5, 0.5, "iron-plate")], entities=[("stone-furnace", 3.0, 3.0, "north")]))
+    w.used |= {(0, 0)}
+    fac = crew.base.add(Site("factory", {"item": "iron-gear-wheel", "per_minute": 10}, (30, 0)))
+    gear = crew.base.add(Site("factory", {"item": "x"}, (30, 20)))
+    ln = _link(crew, (0.5, 0.5), fac.id, "iron-plate", _row(2, 25, 0), per=15.0)
+    tap = _link(crew, (12, 0), gear.id, "iron-plate", [("belt", (12, 1), "south"), ("belt", (12, 2), "south"),
+                                                      ("belt", (12, 3), "south")], per=3.0, tap_of=ln)
+    new = crew.base.add(Site("electric_mine", {"resource": "iron-ore", "into": "furnace"}, (0, 8),
+                             chests=[(0.5, 8.5, "iron-plate")], entities=[("stone-furnace", 3.0, 11.0, "north")]))
+    w.used |= {(0, 8)}
+    crew._replacing = old
+    try:
+        assert "iron-plate" in crew._makes(old)
+    finally:
+        crew._replacing = None
+    msg = crew.remove(old.id, force=True)
+    assert "stay standing" in msg
+    boosts = [q for q in crew.links if q.get("boost_into") is ln]
+    assert len(boosts) == 1 and tuple(boosts[0]["source"]) == (0.5, 8.5)  # the new mine's chest, into the side
+    assert crew.spliced((0.5, 0.5)) and ln in crew.links and tap in crew.links
+    assert ln["port"]["fed"] and tap["port"]["fed"]                       # neither consumer was relinked
+    load, supply = crew._budget("iron-plate")[(0.5, 0.5)]
+    assert load == 18.0 and supply == 18.75                               # what feeds the old belts now
+    crew._minute = lambda: 1e6
+    assert crew.expire_gone() == [] and ln in crew.links                  # spliced: stays for good
+
+
+def test_a_relink_leaves_a_belt_other_factories_tap_and_feeds_more_into_it():
+    crew, w, _ = _crew()
+    mine = crew.base.add(Site("electric_mine", {"resource": "iron-ore", "into": "furnace"}, (0, 5),
+                              chests=[(0.5, 0.5, "iron-plate"), (0.5, 10.5, "iron-plate")],
+                              entities=[("stone-furnace", 3.0, 3.0, "north")]))
+    w.used |= {(0, 0), (0, 10)}
+    fac = crew.base.add(Site("factory", {"item": "iron-gear-wheel", "per_minute": 20}, (30, 0)))
+    gear = crew.base.add(Site("factory", {"item": "x"}, (30, 20)))
+    ln = _link(crew, (0.5, 0.5), fac.id, "iron-plate", _row(2, 25, 0), per=15.0)
+    tap = _link(crew, (12, 0), gear.id, "iron-plate", [("belt", (12, 1), "south"), ("belt", (12, 2), "south"),
+                                                      ("belt", (12, 3), "south")], per=10.0, tap_of=ln)
+    msg = crew.relink(fac.id, "iron-plate")
+    assert ln in crew.links and tap in crew.links and "shared" in msg      # nothing unplugged
+    assert [q for q in crew.links if q.get("boost_into") is ln]           # the spare chest fed in instead
+    assert not any(e for e in w.picked if (round(e[1] - 0.5), round(e[2] - 0.5)) in {s[1] for s in ln["steps"]})
 
 
 # ------------------------------------------------------------------ 2. inputs matched by rate, any item
@@ -295,3 +360,19 @@ def test_medium_poles_only_once_they_can_be_made():
     assert crew._line_pole(200) == "medium-electric-pole" and crew._line_pole(20) == "small-electric-pole"
     crew.kn.unlocked = set()
     assert crew._line_pole(200) == "small-electric-pole"
+
+
+def test_a_removed_source_with_nothing_to_feed_in_takes_its_belts_out_at_once():
+    """No replacement and no spare source of the item: keeping the belts only starves their factories for
+    SPLICE_WAIT_MIN (run 20261124-015025: 5 of 8 kept belt sets), so they come up now and get linked afresh."""
+    crew, w, _ = _crew()
+    crew.removal_blocker = lambda s: None
+    crew.foreman.forget = lambda s: None
+    crew.removed = []
+    w.pos, w.doing = (0, 0), (lambda text: None)
+    gears = crew.base.add(Site("factory", {"item": "iron-gear-wheel", "per_minute": 10}, (20, 0),
+                               chests=[(20.5, 5.5, "iron-gear-wheel")]))
+    belts_ = crew.base.add(Site("factory", {"item": "transport-belt"}, (40, 0)))
+    out = _link(crew, (20.5, 5.5), belts_.id, "iron-gear-wheel", _row(22, 38, 5))
+    crew.remove(gears.id)
+    assert crew.links == [] and out["port"]["fed"] is None and crew.gone_roots() == {}

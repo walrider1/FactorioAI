@@ -37,10 +37,24 @@ FURNACE = {"stone-furnace": 18.75, "steel-furnace": 37.5}       # plates a minut
 STEEL = {"stone-furnace": 3.75, "steel-furnace": 7.5}           # steel a minute (16 s recipe)
 MINABLE = {"iron-ore", "copper-ore", "coal", "stone", "uranium-ore"}
 MAX_UNITS = {"electric_mine": 12, "burner_mine": 8, "smelter_column": 24}
+# Fewer, bigger mines: a 2-drill row runs dry within hours and every mine is one more source with its own belts
+# (run 20261121-140755: 27 of 37 electric mines had 2 drills, 15 were rebuilt, and each rebuild moved belts). An
+# electric row of a bulk resource is built at least this big (the row finder takes the longest run that fits, so
+# a crowded patch still gets what fits); the spare it makes backs up in its furnaces or chests, where the crew
+# collects it. Stone and anything else used in small amounts keeps the plain sizing.
+BULK = ("iron-ore", "copper-ore", "coal")
+MIN_UNITS = {"electric_mine": 6}
+MIN_UNITS_CHEST = {"electric_mine": 4}          # ore or coal straight into chests: 30/min a drill already
 
 
-def _units(want: float, rate: float, module: str) -> int:
-    return max(2, min(MAX_UNITS.get(module, 12), math.ceil(want / max(rate, 0.01))))
+def least_units(module: str, resource: str | None, into: str = "furnace") -> int:
+    if resource not in BULK:
+        return 2
+    return (MIN_UNITS_CHEST if into == "chest" else MIN_UNITS).get(module, 2)
+
+
+def _units(want: float, rate: float, module: str, into: str = "furnace", resource: str | None = None) -> int:
+    return max(least_units(module, resource, into), min(MAX_UNITS.get(module, 12), math.ceil(want / max(rate, 0.01))))
 
 
 def _electric(crew) -> bool:
@@ -73,6 +87,47 @@ def _column_furnace(kn) -> str:
     return "steel-furnace" if "steel-furnace" in (getattr(kn, "unlocked", None) or set()) else "stone-furnace"
 
 
+# Every resource is mined densely once electric drills run. Not uranium yet: its drills need sulfuric acid piped
+# to each of them, which the dense layout does not lay (a uranium field would stand idle).
+FIELD_ORES = ("iron-ore", "copper-ore", "coal", "stone")
+NEAR_FIELD_LEAST = 4            # drills of a near-base dense field at least (~120 ore a minute). Run 20261125-154120:
+                                # 8 drills and a 13-furnace column for 33 iron/min at minute 49 took 19 minutes
+NEAR_FIELD_MOST = 16            # and at most: one 24-furnace column smelts what 15 drills mine (stone furnaces)
+SMALL_MINE = 6                  # an electric mine of this many drills or fewer is replaced by a field on a full patch
+                                # (rows built before fields were possible are 6 drills: supply.MIN_UNITS)
+FIELD_RETRY_MIN = 30.0          # game minutes of mine rows after a near field failed to build
+CLEAR_RETRY_MIN = 60.0         # game minutes before another small mine is cleared for a field after one failed
+
+
+def near_field(crew, resource: str, want: float, into: str, cleared: bool = False) -> dict | None:
+    """A dense field on the patch near the base (outposts.Outpost with near_base): drills on both sides of one
+    belt, smelted in a column beside it (plates, bricks), or into depot chests at the base (coal, and any ore or
+    stone wanted raw: into chest)."""
+    if resource not in FIELD_ORES:
+        return None
+    unlocked = getattr(getattr(crew, "kn", None), "unlocked", None)
+    if into == "furnace" and resource != "coal" and unlocked is not None \
+            and "long-handed-inserter" not in unlocked:
+        # its smelting column lifts coal with long-handed inserters (automation): until then a row, swapped for a
+        # field later (small_mines). Run 20261125-154120: the copper field failed at minute 39 on just that
+        return None
+    failed = (getattr(crew, "__dict__", {}).get("_field_failed") or {}).get(resource)
+    if not cleared and failed is not None and getattr(crew, "_minute", lambda: 0.0)() - failed < FIELD_RETRY_MIN:
+        return None                                  # one failed lately: rows meanwhile
+    n = max(NEAR_FIELD_LEAST, min(NEAR_FIELD_MOST, math.ceil(want / ELECTRIC_ORE)))
+    return {"do": "build", "module": "outpost", "resource": resource, "count": n, "near_base": True,
+            **({"into": "chest"} if into == "chest" and resource != "coal" else {})}
+
+
+def small_mines(crew, resource: str) -> list:
+    """Electric mines of a few drills on this ore, smallest and oldest first: what a dense field replaces once the
+    patch near the base has no room left (the old drills and their furnaces come down first, see Crew replace
+    with clear_first)."""
+    return sorted((s for s in crew.base.of("electric_mine") if s.params.get("resource") == resource
+                   and int(s.params.get("count") or 0) <= SMALL_MINE),
+                  key=lambda s: (int(s.params.get("count") or 0), s.id))
+
+
 def mining_options(crew, resource: str, want: float, into: str) -> list[dict]:
     """Ways to mine `want` more a minute of a resource (into chests for the ore itself, furnaces for its plate):
     best first. Plate rates are per drill: the slower of the drill and its stone furnace."""
@@ -93,17 +148,30 @@ def mining_options(crew, resource: str, want: float, into: str) -> list[dict]:
             n = int(burners[0].params.get("count", 2))
             out.append({"do": "replace", "site": burners[0].id,
                         "with": {"do": "build", "module": "electric_mine", "resource": resource,
-                                 "count": max(2, min(12, n)), "into": into}})
+                                 "count": max(_units(want, item_per_unit, "electric_mine", into, resource), min(12, n)),
+                                 "into": into}})
+        # (a field that found no room before may fit once a small mine's ground is cleared)
+        field = near_field(crew, resource, want, into, cleared=True) if electric else None
+        smalls = small_mines(crew, resource) if field else []
+        failed = (getattr(crew, "__dict__", {}).get("_clear_failed") or {}).get(resource)
+        minute = getattr(crew, "_minute", lambda: 0.0)()
+        if smalls and (failed is None or minute - failed > CLEAR_RETRY_MIN):
+            # a full patch of small rows: the smallest comes down and a dense field takes its ground
+            out.append({"do": "replace", "site": smalls[0].id, "clear_first": True, "with": field})
         from .assess import expand_fix
         fix = expand_fix(crew, resource)
         if fix:
             out.append(fix)
         return out
-    if electric:
+    dense = near_field(crew, resource, want, into) if electric else None
+    if dense:                     # once electric drills run, bulk ore and coal come from dense fields near the base
+        out.append(dense)
+    if electric:                  # a row only where the overseer forbids the field (or no field fits: patch full)
         out.append({"do": "build", "module": "electric_mine", "resource": resource,
-                    "count": _units(want, item_per_unit, "electric_mine"), "into": into})
-    out.append({"do": "build", "module": "burner_mine", "resource": resource,
-                "count": _units(want, burner_per_unit, "burner_mine"), "into": into})
+                    "count": _units(want, item_per_unit, "electric_mine", into, resource), "into": into})
+    if not electric:              # once electric drills run, never back to hand-fed burners: run 20261124-015025
+        out.append({"do": "build", "module": "burner_mine", "resource": resource,   # fell back to them when the
+                    "count": _units(want, burner_per_unit, "burner_mine"), "into": into})   # electric row was banned
     return out
 
 

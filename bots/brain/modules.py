@@ -1527,8 +1527,10 @@ class ElectricMine(Module):
                 "is researched its furnaces burn coal from a belt behind the chests (a long-handed inserter each) "
                 "that the crew links to an electric coal mine right away; before that they are fed by hand, and "
                 "get their coal belt later where they stand. The plate supply for factories and "
-                "workshops. Needs electric-mining-drill researched and power. "
-                "args: {resource, count (2-12), into: furnace|chest}")
+                "workshops. Needs electric-mining-drill researched and power. For iron and copper plates and "
+                "for coal a dense field near the base ({\"module\": \"outpost\", \"near_base\": true}) mines the "
+                "same patch twice as densely and smelts beside it: use rows for stone, raw ore, or where the "
+                "field finds no room. args: {resource, count (2-12), into: furnace|chest}")
     # a north-facing unit, relative to the drill's centre tile (cx, cy): the drill drops on (cx, cy - 2)
     # (catalog drop_vector 0, -1.85), the furnace covers it, an inserter above lifts plates into a chest
     UNIT_W = 3
@@ -1545,8 +1547,15 @@ class ElectricMine(Module):
             return "line"
         return into
 
+    def _count(self, p: dict) -> int:
+        """Drills asked for, at least the bulk minimum whoever asks (the planners, the tidy-up, a swap, a rebuild:
+        run 20261124-015025 had 11 of 20 mines at 1-2 drills, each running dry and moving belts within hours)."""
+        from .supply import least_units
+        lo = least_units(self.name, p.get("resource"), self._into(p))
+        return max(lo, min(12, int(p.get("count") or 4)))
+
     def kit(self, w, base, p):
-        n = max(1, min(12, int(p.get("count", 4))))
+        n = self._count(p)
         lay = self.layout(w, p)
         out = {"electric-mining-drill": n, "small-electric-pole": n // 2 + 2}
         if lay != "line":
@@ -1620,7 +1629,7 @@ class ElectricMine(Module):
         return best
 
     def build(self, w, base, p):
-        resource, n, into = p["resource"], max(1, min(12, int(p.get("count", 4)))), self._into(p)
+        resource, n, into = p["resource"], self._count(p), self._into(p)
         if not base.powered_poles():
             raise BuildError("electric drills need power: build steam_power first")
         patch = w.patch(resource, min_tiles=30)
@@ -1760,6 +1769,15 @@ class Pumpjack(Module):
             raise BuildError(f"no crude oil within ~{far} tiles of the base yet ({w.oil_rings} of {w.OIL_MAX_RINGS} "
                              "search rings walked); the next pumpjack goal searches farther out")
         taken = {(e[1], e[2]) for s in base.sites for e in s.entities if e[0] == "pumpjack"}
+        if not [q for q in wells if q not in taken and not any(w.blocked(t) for t in w.footprint("pumpjack", *q))]:
+            # every well we know is pumped: a workshop that needs crude must still get it, so the search goes on
+            # outward (run 20261124-015025: 2 wells, both pumped for plastic; chemical science never got crude)
+            w.doing("every known crude-oil well is pumped: searching farther out for another field")
+            wells = w.oil_wells(near=home, more=True)
+            if not [q for q in wells if q not in taken]:
+                raise BuildError(f"all {len(wells)} known crude-oil wells are pumped and no other field within "
+                                 f"~{w.oil_searched()} tiles of the base ({w.oil_rings} of {w.OIL_MAX_RINGS} rings "
+                                 "searched); the next pumpjack goal searches farther out")
         site = Site(self.name, {"count": 0}, wells[0])
         last, placed = "", []
         for x, y in wells:

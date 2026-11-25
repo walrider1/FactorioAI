@@ -64,7 +64,8 @@ PLACE_GRACE_MIN = 8.0
 EXPECTED_LOAD = 0.7     # share of their full load the sites with every input fed draw once they run (power_status)
 GOAL_BUDGET_MIN = {"build": 25.0, "replace": 30.0, "remove": 8.0, "link": 10.0, "link_science": 10.0, "stock": 8.0,
                    "feed": 4.0, "connect": 6.0, "upgrade": 20.0, "repair": 8.0, "repipe": 8.0, "scout": 10.0, "design": 4.0,
-                   "priority": 1.0, "purge": 10.0, "relink": 12.0, "trunk": 30.0}
+                   "priority": 1.0, "purge": 10.0, "relink": 12.0, "trunk": 40.0}
+RESEARCH_BUDGET_MIN = 25.0
 MODULE_BUDGET_MIN = {"outpost": 45.0, "workshop": 40.0, "silo": 60.0, "factory": 30.0, "steam_power": 15.0,
                      "research_station": 15.0, "electric_mine": 12.0, "burner_mine": 8.0, "pumpjack": 15.0,
                      "smelter_column": 15.0, "labs": 8.0}
@@ -132,6 +133,7 @@ class Crew:
         self.storage_held: dict[tuple, dict[str, int]] = {}   # what each storage chest holds (the crew's book)
         self.yard: tuple[int, int] | None = None          # top-left tile of the storage yard
         self.kit_hold: dict[str, int] = {}                # the kit of the build in hand: never left in storage
+        self.outpost_hold: dict[str, int] = {}            # an outpost's column, trunk and poles, until they stand
         self.reserved: dict[str, int] = {}                # what the goal in hand is gathering (raw plates, the iron
                                                           # for its steel): the courier and storage leave it alone
         self._claim: set = set()                          # tiles a build is clearing (no storage goes there)
@@ -220,12 +222,15 @@ class Crew:
         return bool(self.current) and (not self.w.steps or self.w.steps[-1] not in self.PINNED)
 
     def goal_budget(self, goal: dict) -> float | None:
-        """Game minutes this goal may take (None: no limit, e.g. research, which waits on the labs)."""
+        """Game minutes this goal may take (None: no limit)."""
         do = goal.get("do")
         if do == "wait":
             return float(goal.get("seconds", 30)) / 60 + 3.0
         if do == "research":
-            return None
+            # the labs go on researching whatever happens to the goal: stopping it only frees the crew. Run
+            # 20261124-015025: production science held the crew 35 game minutes while the fixes blue science
+            # waited on stood behind it (unlimited until then)
+            return RESEARCH_BUDGET_MIN
         if do in ("build", "replace"):
             mod = (goal.get("with") or {}).get("module") if do == "replace" else goal.get("module")
             base = MODULE_BUDGET_MIN.get(mod or "", GOAL_BUDGET_MIN["build"])
@@ -335,13 +340,22 @@ class Crew:
             new = goal.get("with") or {}
             if new.get("do") != "build":
                 raise BuildError("replace needs a build goal in 'with'")
+            if goal.get("clear_first"):
+                return self._clear_and_build(old, new)
             before = {s.id for s in self.base.sites}
             self._note_bad_place(old)                    # walled in where it stands: not the same spot again
+            self._replacing = old
             try:
                 built = self.build(new)                      # make before break: the old one runs meanwhile
             except BuildError as exc:
                 raise BuildError(self._undo_replacement(new, before, old, exc)) from None
-            return built + "; " + self.remove(old.id, force=False)
+            finally:
+                self._replacing = None
+            self._replaced = old.id                      # built: the sole-maker guard has nothing to keep
+            try:
+                return built + "; " + self.remove(old.id, force=False)
+            finally:
+                self._replaced = None
         if do == "design":
             return self.design(goal)
         if do == "connect":
@@ -360,6 +374,40 @@ class Crew:
         if do == "repipe":
             return self.repipe(goal.get("site"))
         raise BuildError(f"unknown goal {do}")
+
+    def _clear_and_build(self, old: Site, new: dict) -> str:
+        """Break before make, for a small mine on a full patch: its drills (and furnaces) come down first so a
+        dense field can take that ground (supply.small_mines). Its belts stay, and the link step feeds the field's
+        plates into them like any new source. Should the field not fit even so, the old mine goes back up, and
+        no other small mine of the ore is cleared for a while (supply.CLEAR_RETRY_MIN)."""
+        r = old.params.get("resource")
+        back = {"do": "build", "module": old.kind, "resource": r, "count": int(old.params.get("count") or 2),
+                **({"into": old.params["into"]} if old.params.get("into") else {})}
+        self._replaced = old.id                          # cleared on purpose: the sole-maker guard steps aside
+        try:
+            gone = self.remove(old.id, force=True)
+        finally:
+            self._replaced = None
+        self._patch_full.pop(r, None)                    # its ground is free now
+        if old.kind.startswith("unfinished"):            # a half-built site (assess.unfinished_alerts): the same
+            from .assess import unfinished_key           # build again from its parts (once), nothing to put back
+            self.__dict__.setdefault("_unfinished_retried", set()).add(
+                unfinished_key(old.kind[len("unfinished "):], {k: v for k, v in new.items() if k not in ("do", "module")}))
+            try:
+                return f"{gone}; " + self.build(new)
+            except BuildError as exc:
+                raise BuildError(f"took up half-built site {old.id}; building it again failed: "
+                                 f"{str(exc)[:200]}") from None
+        try:
+            return f"{gone}; " + self.build(new)
+        except BuildError as exc:
+            self.__dict__.setdefault("_clear_failed", {})[r] = self._minute()
+            try:
+                again = self.build(back)
+            except BuildError as exc2:
+                again = f"putting it back failed too: {str(exc2)[:120]}"
+            raise BuildError(f"cleared site {old.id} for a dense {r} field, which did not fit "
+                             f"({str(exc)[:160]}); {again}") from None
 
     def repipe(self, site_id) -> str:
         """A workshop machine piped on the wrong connection (a refinery's crude on its water input): the right
@@ -491,10 +539,80 @@ class Crew:
             fields = self.oil_fields()
             if not fields:
                 raise BuildError(f"no crude oil within ~{self.w.oil_searched()} tiles of the base")
+        if all(q["pumped"] >= q["wells"] for q in fields):    # every well is taken: a new field is what helps
+            before = len(fields)
+            self.w.oil_wells(self.base.centre, more=True)
+            fields = self.oil_fields()
+            if len(fields) <= before:
+                raise BuildError(f"every known crude-oil well is pumped and no other field within "
+                                 f"~{self.w.oil_searched()} tiles of the base yet; the next scout goes farther out")
+            f = max(fields, key=lambda q: q["wells"] - q["pumped"])
+            return (f"found another crude-oil field at {f['centre']} ({f['distance']} tiles from the base, "
+                    f"{f['wells']} wells): build pumpjacks, they go on the free wells")
         f = fields[0]
         return (f"crude oil is known: {sum(q['wells'] for q in fields)} wells in {len(fields)} field(s), the nearest "
                 f"at {f['centre']} ({f['distance']} tiles from the base, {f['wells']} wells, {f['pumped']} pumped). "
                 "Nothing to scout: build pumpjacks there; a workshop pipes its crude in from them")
+
+    def _crude_first(self, exc: BuildError) -> bool:
+        """A workshop whose design found no crude for it ("build pumpjacks first", "every pumpjack already feeds
+        another floor") gets its pumpjacks now, inside the same goal: the pumpjack goal searches farther out when
+        every known well is taken. A workshop that needs a resource always goes and gets it. Run 20261124-015025:
+        chemical science failed five times on taken wells and nobody looked for another field. Returns True when
+        pumpjacks were built (design again), False when the error is about something else."""
+        msg = str(exc)
+        if "build pumpjacks first" not in msg and "every pumpjack already feeds" not in msg:
+            return False
+        import re
+        m = re.search(r'"count": (\d+)', msg)
+        k = max(1, min(4, int(m.group(1)) if m else 2))
+        self.log(f"[crew] the workshop needs crude oil nobody pumps for it: {k} pumpjack(s) first")
+        self.build({"do": "build", "module": "pumpjack", "count": k})
+        return True
+
+    def _outpost_extra(self, params: dict) -> dict[str, int]:
+        """What an outpost's job needs past its drills, made before the walk out: its smelting column (sized as
+        _finish_outpost sizes it), the trunk home and the pole line. Run 20261124-015025: iron outposts took 20
+        and 33 game minutes, mostly trips back to the base for belts, poles and furnaces. Estimated from the
+        patch it will likely go on (the plan's box, else the nearest big spare patch)."""
+        from . import outposts
+        r = params.get("resource")
+        if not r:
+            return {}
+        home = self.base.centre or self.w.pos
+        c = None
+        if params.get("box"):
+            b = params["box"]
+            c = ((b[0] + b[2]) / 2, (b[1] + b[3]) / 2)
+        elif params.get("near_base") or params.get("near_first"):
+            near = outposts.near_patches(self.w, self.base, r)
+            if near:
+                q = near[0]
+                c = (q["nearest"]["x"], q["nearest"]["y"]) if q.get("nearest") else (q["centre"]["x"], q["centre"]["y"])
+        if c is None and not params.get("box") and not params.get("near_base"):
+            spare = outposts.spare_patches(self.w, self.base, r)
+            big = [q for q in spare if q.get("tiles", 0) >= outposts.BIG_PATCH_TILES] or spare
+            if big:
+                q = big[0]
+                c = (q["centre"]["x"], q["centre"]["y"]) if q.get("centre") else (q["nearest"]["x"], q["nearest"]["y"])
+        if c is None:
+            return {}
+        d = math.dist(c, home)
+        drills = MODULES["outpost"]._n(params)
+        into = outposts.column_into(params)
+        rate = 45.0 if into == "chest" else (37.5 if "steel-furnace" in self.kn.unlocked else 18.75)
+        if r == "stone" and into == "furnace":
+            rate *= 2
+        n = max(1, min(24, math.ceil(outposts.DRILL_PER_MIN * drills / rate)))
+        try:
+            out = dict(MODULES["smelter_column"].kit(self.w, self.base, {"resource": r, "count": n, "into": into}))
+        except Exception:  # noqa: BLE001 - an estimate: the column's own build makes what is missing
+            out = {}
+        beside = (params.get("field") or params.get("near_base") or d <= outposts.FIELD_SMELT_MAX) and into == "furnace"
+        out["transport-belt"] = out.get("transport-belt", 0) + (24 if beside else int(d * 1.25) + 10)
+        kind = self._line_pole(d)
+        out[kind] = out.get(kind, 0) + math.ceil(d / (MEDIUM_REACH if kind == MEDIUM_POLE else REACH)) + 4
+        return out
 
     def _finish_outpost(self, site: Site) -> str:
         """After the drills stand: the column at the base end (sized to what they mine), then the trunk.
@@ -516,9 +634,9 @@ class Crew:
         col = next((s for s in self.base.of("smelter_column") if s.params.get("outpost") == site.id), None)
         if col is None:
             per = float(site.params.get("per_minute") or 30.0 * site.params.get("count", 2))
-            into = "chest" if r == "coal" else "furnace"
+            into = outposts.column_into(site.params)
             rate = 45.0 if into == "chest" else (37.5 if "steel-furnace" in self.kn.unlocked else 18.75)
-            if r == "stone":
+            if r == "stone" and into == "furnace":
                 rate *= 2                              # two stone a brick
             n = max(1, min(24, math.ceil(per / rate)))
             before = {s.id for s in self.base.sites}
@@ -527,8 +645,8 @@ class Crew:
             # smelting, then the belt out); far out the column stays at the base, where its coal belt is short
             beside = site.params.get("field") or math.dist(tuple(site.params["head"]), home) <= outposts.FIELD_SMELT_MAX
             col_goal = {"do": "build", "module": "smelter_column", "resource": r, "count": n,
-                        "toward": site.params["head"]}
-            if beside and r != "coal":
+                        "toward": site.params["head"], **({"into": "chest"} if into == "chest" else {})}
+            if beside and into == "furnace":
                 col_goal["near"] = list(site.params["head"])
             if site.params.get("column_at"):           # the spot its trunk route was checked into (outpost_probe)
                 col_goal["at"] = list(site.params["column_at"])
@@ -539,7 +657,17 @@ class Crew:
                 # or the next try builds yet another one
                 col = self._new_column(before)
                 if col is None:
-                    return f"its smelting column failed for now ({str(exc)[:120]}); the link step tries again"
+                    # a half-built column comes back up (its parts are the next try's kit): run 20261125-154120
+                    # left one with 125 buildings and no power, and the next try built a second column elsewhere
+                    left = [s for s in self.base.sites if s.id not in before and s.kind == "unfinished smelter_column"]
+                    for s in left:
+                        try:
+                            self.remove(s.id, force=True)
+                        except BuildError as exc2:
+                            self.foreman.note(f"half-built column site {s.id} not taken up: {str(exc2)[:80]}")
+                    return (f"its smelting column failed for now ({str(exc)[:120]})"
+                            + ("; its half-built column was taken up again" if left else "")
+                            + "; the link step tries again")
                 col.params["outpost"] = site.id
                 return (f"column site {col.id} stands but its build ended with: {str(exc)[:120]}; the link step "
                         "lays the trunk")
@@ -586,14 +714,14 @@ class Crew:
         r = p["resource"]
         col = MODULES["smelter_column"]
         per = outposts.DRILL_PER_MIN * max(1, drills)
-        into = "chest" if r == "coal" else "furnace"
+        into = outposts.column_into(p)
         rate = 45.0 if into == "chest" else (37.5 if "steel-furnace" in self.kn.unlocked else 18.75)
-        if r == "stone":
+        if r == "stone" and into == "furnace":
             rate *= 2
         n = max(1, min(24, math.ceil(per / rate)))
         home = self.base.centre or self.w.pos
-        cp = {"resource": r, "count": n, "toward": list(head)}
-        if (p.get("field") or math.dist(head, home) <= outposts.FIELD_SMELT_MAX) and r != "coal":
+        cp = {"resource": r, "count": n, "toward": list(head), **({"into": "chest"} if into == "chest" else {})}
+        if (p.get("field") or math.dist(head, home) <= outposts.FIELD_SMELT_MAX) and into == "furnace":
             cp["near"] = list(head)
         skip: list = []
         for _ in range(3):
@@ -783,7 +911,59 @@ class Crew:
             return None                                   # only the first factory waiting
         return None
 
+    SPLIT_MAX = 2                   # feeder factories split off one factory that does not fit as one block
+
     def build(self, goal: dict) -> str:
+        """Build a module. A belt factory whose layout fits nowhere as one block is split: its biggest made-here
+        intermediate gets a factory of its own (built first by _intermediates_first) and this one takes it by
+        belt, up to SPLIT_MAX times. Run 20261124-120854: advanced circuits from plates (4 circuit and 6
+        advanced-circuit assemblers plus three input belts) found no belt route in 8 designs at 4 places, so
+        blue science failed after 26 minutes; six assemblers fed circuits, cable and plastic route easily."""
+        if goal.get("module") == "outpost" and not goal.get("near_base") and not goal.get("box") \
+                and goal.get("resource") in ("iron-ore", "copper-ore", "coal", "stone") \
+                and not self.patch_full(goal["resource"]):
+            # the near patches first while they have room: a far trip, a pole line and a trunk only once they
+            # are full (run 20261124-120854: an iron outpost 360 tiles out while the iron patch at home had room)
+            goal = {**goal, "near_first": True}
+        if goal.get("module") != "factory":
+            return self._build(goal)
+        split: list[str] = []
+        while True:
+            try:
+                return self._build(goal)
+            except BuildError as exc:
+                item = goal.get("item")
+                if f"no {item} factory fits" not in str(exc) or len(split) >= self.SPLIT_MAX:
+                    raise
+                part = self._split_candidate(goal)
+                if part is None:
+                    raise
+                split.append(part)
+                raw = goal.get("inputs") or []
+                raw = [raw] if isinstance(raw, str) else list(raw)
+                goal = {**goal, "inputs": raw + [part]}
+                self.log(f"[crew] no {item} factory fits as one block: {part} gets a factory of its own first, "
+                         f"and the {item} factory takes it by belt")
+                if self.current is not None:          # the new feeder's time on top of the goal's budget
+                    self.current["extra_min"] = float(self.current.get("extra_min") or 0.0) +                         MODULE_BUDGET_MIN.get("factory", GOAL_BUDGET_MIN["build"])
+
+    def _split_candidate(self, goal: dict) -> str | None:
+        """The intermediate a too-big factory should take by belt instead of making: the one with the most
+        assemblers in its chain that an assembler makes (not a plate, not already an input)."""
+        try:
+            fac = MODULES["factory"]
+            params = {k: v for k, v in goal.items() if k not in ("do", "module")}
+            supplied, pl = fac.supplied_for(self.kn, params)
+            from fab import recipes as fr
+            makeable = set(fac.can_make(self.kn))
+        except Exception:  # noqa: BLE001 - nothing to split by: the failure stands
+            return None
+        item = goal.get("item")
+        cands = [(n, k) for k, n in (getattr(pl, "machines", None) or {}).items()
+                 if k != item and k not in supplied and k in fr.RECIPES and k in makeable and k not in self.PLATE_ORE]
+        return max(cands)[1] if cands else None
+
+    def _build(self, goal: dict) -> str:
         self._check_forbidden({"do": "build", **{k: v for k, v in goal.items() if k != "do"}})
         mod = MODULES.get(goal.get("module", ""))
         if mod is None:
@@ -809,7 +989,13 @@ class Crew:
             # 20261121-140755: blue science built a 2-engine steam station for 15 game minutes, then failed on a
             # shore 407 tiles away that the design would have named at once
             with self.w.step("design"):
-                mod.kit(self.w, self.base, params)
+                try:
+                    mod.kit(self.w, self.base, params)
+                except BuildError as exc:
+                    crude = getattr(self, "_crude_first", None)
+                    if crude is None or not crude(exc):
+                        raise
+                    mod.kit(self.w, self.base, params)    # once more, with the new pumpjacks
         first = self._coal_first(mod.name, params)
         first += self._power_first(mod.name, params)
         first += self._fuel_first(mod.name, params)
@@ -839,6 +1025,9 @@ class Crew:
                 self.unlock_recipes(mod.recipes(self.w, self.base, params))   # e.g. green science before its factory
             with self.w.step("design"):
                 kit = mod.kit(self.w, self.base, params)       # a design may change once more is unlocked
+            if mod.name == "outpost":         # the whole trip's kit before the walk: column, trunk, pole line
+                self.outpost_hold = self._outpost_extra(params)
+                kit = {k: kit.get(k, 0) + self.outpost_hold.get(k, 0) for k in set(kit) | set(self.outpost_hold)}
             fuel = 8 * kit.get("burner-mining-drill", 0) + 5 * kit.get("stone-furnace", 0) + (40 if "boiler" in kit else 0)
             if fuel:                  # coal from our coal mine; wood only before one exists, from trees close by
                 item = self.fuel_item()
@@ -855,6 +1044,12 @@ class Crew:
             except Exception as exc:
                 if isinstance(exc, Preempted):
                     paused = True
+                if mod.name == "outpost":
+                    self.outpost_hold = {}
+                if mod.name == "outpost" and params.get("near_base") and isinstance(exc, BuildError):
+                    # a near field that failed (no trunk route to its column, say): mine rows for a while, so a
+                    # coal or plate shortage is never stuck on the same field again and again (supply.near_field)
+                    self.__dict__.setdefault("_field_failed", {})[params.get("resource")] = self._minute()
                 if mod.name == "factory" and isinstance(exc, BuildError):   # its layout did not fit: not again
                     self._factory_failed[params.get("item")] = self._minute()  # for a while
                 if mod.name in ("factory", "workshop") and isinstance(exc, BuildError):
@@ -862,9 +1057,11 @@ class Crew:
                 if mod.name == "smelter_column" and params.get("resource") == "iron-plate" \
                         and isinstance(exc, BuildError):
                     self.failed_suppliers["steel-plate"] = self._minute()
-                if mod.name == "electric_mine" and isinstance(exc, BuildError) and \
+                if (mod.name == "electric_mine" or (mod.name == "outpost" and params.get("near_base"))) \
+                        and isinstance(exc, BuildError) and \
                         ("no room" in str(exc) or "patches with room are" in str(exc)):
-                    self._patch_full[params.get("resource")] = (self._minute(), self._base_sig())
+                    r = params.get("resource")
+                    self._patch_full[r] = (self._minute(), self._patch_sig(r))
                 if rec:                              # what did get built stays known, so it can be removed
                     left = self.base.add(Site(f"unfinished {mod.name}", params, _centre(rec), entities=rec,
                                               built_minute=self._minute()))
@@ -905,12 +1102,20 @@ class Crew:
         elif site.kind == "steam_power":
             site.params["fuel"] = "hand"      # until logistics: then link() fits it a coal belt
         if site.kind == "outpost":                # its smelting column at the base and the trunk between them
-            msg += "; " + self._finish_outpost(site)
+            try:
+                msg += "; " + self._finish_outpost(site)
+            finally:
+                self.outpost_hold = {}
         made = {what for *_, what in site.chests if what not in self.TAGS}
         if site.params.get("line"):
             made.add(site.params["line"]["item"])
-        if any(pt["item"] in made for s, pt in self.unfed_ports() if s is not site) \
-                or any(c["item"] in made for c in self.short_chains()):   # a new source for a short belt
+        # a source built to replace one of the same product is kept for the old one's belts: once the old site
+        # comes down its belts stay and this one is fed into their side (_detach, boost_links), so it is not
+        # handed to other ports first
+        old = getattr(self, "_replacing", None)
+        holding = old is not None and bool(made & self._makes(old))
+        if not holding and (any(pt["item"] in made for s, pt in self.unfed_ports() if s is not site)
+                            or any(c["item"] in made for c in self.short_chains())):   # a source for a short belt
             try:                              # a new source (a coal mine, say): belt it to the ports that wait for it
                 msg += "; " + self.link()
             except BuildError as exc:
@@ -1001,6 +1206,15 @@ class Crew:
                 if short <= 0:
                     continue
                 self.log(f"[crew] plates first: {want:.0f} {plate}/min wanted, {spare:.0f}/min to spare")
+                from .supply import near_field
+                full = getattr(self, "patch_full", lambda r: False)
+                field = near_field(self, ore, want - spare, "furnace") if not full(ore) else None
+                if field is not None:         # a dense field near the base, smelted beside it; a row if none fits
+                    try:
+                        notes.append(self.build(field))
+                        continue
+                    except BuildError as exc:
+                        self.log(f"[crew] plates first: no dense {ore} field ({str(exc)[:100]}): a mine row")
                 try:
                     notes.append(self.build({"do": "build", "module": "electric_mine", "resource": ore,
                                              "count": max(2, min(12, short)), "into": "furnace"}))
@@ -1928,9 +2142,10 @@ class Crew:
 
     def _keep(self, item: str) -> int:
         """What stays on hand whatever happens: fuel for the base, chests and poles to build with, and the kit
-        of the build in hand."""
+        of the build in hand (an outpost's column, trunk and pole line too, until they stand)."""
         stack = int((self.kn.items.get(item) or {}).get("stack_size") or 50)
-        keep = max(self.kit_hold.get(item, 0), self.reserved.get(item, 0))
+        keep = max(self.kit_hold.get(item, 0), self.reserved.get(item, 0),
+                   (getattr(self, "outpost_hold", None) or {}).get(item, 0))
         if item in FUEL:
             keep = max(keep, KEEP_ON_HAND.get(item, 100))
         if item in self.STORAGE_CHESTS:
@@ -2051,9 +2266,13 @@ class Crew:
         return None
 
     def _new_storage(self, avoid=frozenset()) -> tuple[float, float]:
-        chest = "iron-chest" if self.w.inventory.get("iron-chest", 0) or self.w.inventory.get("iron-plate", 0) >= 8 \
-            else "wooden-chest"
-        if not self.w.inventory.get(chest, 0):
+        # never a chest the build in hand needs: run 20261125-154120 set the iron chests made for an outpost's
+        # smelting column down as storage mid-build, and the column stopped after 125 buildings "no iron-chest"
+        held = max((getattr(self, "kit_hold", None) or {}).get("iron-chest", 0),
+                   (getattr(self, "outpost_hold", None) or {}).get("iron-chest", 0))
+        spare = self.w.inventory.get("iron-chest", 0) - held
+        chest = "iron-chest" if spare > 0 or self.w.inventory.get("iron-plate", 0) >= 8 else "wooden-chest"
+        if self.w.inventory.get(chest, 0) - (held if chest == "iron-chest" else 0) <= 0:
             self.w.craft(self.kn.recipe_for(chest, hand=True) or chest, 1)
         spot = self._storage_spot(set(avoid))
         if spot is None:
@@ -2473,6 +2692,8 @@ class Crew:
         return {(e["x"], e["y"]): e.get("status", "") for e in d.get("entities") or [] if (e["x"], e["y"]) in own}
 
     # =============================================================== removal
+    SOLE_MAKER = "it is the only site making"
+
     def removal_blocker(self, site: Site) -> str | None:
         b = self.base
         age = self._minute() - site.built_minute
@@ -2481,6 +2702,16 @@ class Crew:
         if healthy and age < KEEP_MINUTES:
             return (f"it was built {age:.1f} minutes ago and is working; removing it now usually means rebuilding it "
                     "soon. Only remove it if a failure message named it as in the way")
+        item = site.params.get("item")
+        if (healthy and site.kind in ("factory", "workshop") and item
+                and site.id not in (getattr(self, "orphans", None) or {})
+                and not any(s is not site and s.kind in ("factory", "workshop") and s.params.get("item") == item
+                            for s in b.sites)):
+            # make before break: run 20261124-120854 removed blue workshop 64 (26 machines working, its first
+            # packs just out) on "blue science is still zero", and nothing made blue for the next hour
+            return (f"{self.SOLE_MAKER} {item} and {site.health.get('working', 0)} of its machines are "
+                    f"working; removing it leaves nothing making {item}. Replace it instead (the new one is built "
+                    "before this one comes down)")
         if site.kind == "storage":
             return ("it holds what the crew cannot carry; storage chests move by themselves when a build needs "
                     "their tiles")
@@ -2535,12 +2766,14 @@ class Crew:
         if site is None:
             raise BuildError(f"there is no site {site_id}")
         why = self.removal_blocker(site)
+        if why and why.startswith(self.SOLE_MAKER) and getattr(self, "_replaced", None) == site.id:
+            why = None                                # its replacement already stands (replace: make before break)
         if why and not force:
             raise BuildError(f"not removing site {site.id} ({site.kind}): {why}. Replace it, or pass force: true")
         self._note_bad_place(site)
         feeders = self._feeders_of(site)
         detached = self._detach(site)
-        cut = bool(detached) and "get linked again" in detached
+        cut = bool(detached) and ("get linked again" in detached or "new source fed in" in detached)
         self._release_margin(site)
         self.release_strip(site.id)
         if site.kind in ("workshop", "unfinished workshop") and hasattr(MODULES.get("workshop"), "forget"):
@@ -2686,9 +2919,19 @@ class Crew:
         and the link step connects them again (to a replacement, say). Without this a removed factory left its
         consumers "fed" by a belt from nowhere, and the courier stopped carrying for them too."""
         chests = {(round(x, 2), round(y, 2)) for x, y, _ in site.chests}
-        direct = [ln for ln in self.links
-                  if ln.get("to_site") == site.id or ln.get("outpost") == site.id or ln.get("tap_site") == site.id
-                  or (round(ln["source"][0], 2), round(ln["source"][1], 2)) in chests]
+        if site.params.get("line"):
+            chests.add(tuple(round(v, 2) for v in site.params["line"]["source"]))
+        into = lambda ln: (ln.get("to_site") == site.id or ln.get("outpost") == site.id
+                           or ln.get("tap_site") == site.id)
+        # belts OUT of it stay where they are: the factories they feed keep their belts, and the link step feeds a
+        # new source into the side of those belts (boost_links: the replacement first, or any spare source). Run
+        # 20261121-140755: every mined-out mine took its belts with it, each consumer was relinked, and each relink
+        # took up the belts other factories tapped too: 45% of the game time after minute 120 went into that.
+        kept = self._keep_outbound(site, [ln for ln in self.links if not into(ln) and ln.get("kind") != "science"
+                                          and (round(ln["source"][0], 2), round(ln["source"][1], 2)) in chests])
+        direct = [ln for ln in self.links if into(ln)
+                  or ((round(ln["source"][0], 2), round(ln["source"][1], 2)) in chests
+                      and not any(ln is k for k in kept))]
         gone: list[dict] = []
         todo = list(direct)
         while todo:                                   # and whatever hangs off those
@@ -2698,8 +2941,9 @@ class Crew:
             gone.append(ln)
             todo += [q for q in self.links if (q.get("tap_of") is ln or q.get("boost_into") is ln)
                      and not any(q is g for g in gone)]
+        note = (f"{len(kept)} belt link(s) out of it stay standing and get a new source fed in" if kept else "")
         if not gone:
-            return ""
+            return note
         relink = sorted({ln["to_site"] for ln in gone if ln.get("to_site") != site.id})
         for ln in reversed(gone):                     # the hangers-on first, then the links themselves
             if ln.get("to_site") == site.id and ln.get("kind") != "trunk":
@@ -2708,7 +2952,92 @@ class Crew:
                 site.entities.extend(e for e in gone_ents if e not in site.entities)
             else:
                 self._unlink(ln)
-        return f"took up {len(gone)} belt link(s)" + (f"; sites {relink} get linked again" if relink else "")
+        return (f"took up {len(gone)} belt link(s)" + (f"; sites {relink} get linked again" if relink else "")
+                + (f"; {note}" if note else ""))
+
+    # A kept belt whose source came down gets a new source fed into its side within this long; if none can be
+    # (no spare source, no side to join), it is taken up as before and its ports linked afresh.
+    SPLICE_WAIT_MIN = 10.0
+
+    def gone_roots(self) -> dict:
+        """{source key: game minute it came down} of kept belts whose source was removed (see _keep_outbound)."""
+        g = self.__dict__.get("_gone_roots")
+        if not isinstance(g, dict):
+            g = self.__dict__["_gone_roots"] = {}
+        return g
+
+    def _makes(self, site: Site) -> set:
+        """What a site's outputs carry (its chests and its line)."""
+        made = {what for *_, what in site.chests if what not in self.TAGS}
+        if site.params.get("line"):
+            made.add(site.params["line"]["item"])
+        return made
+
+    def _keep_outbound(self, site: Site, out: list[dict]) -> list[dict]:
+        """The links out of a site about to come down that stay standing: their own inserter at the site comes up
+        (nothing else may ever be lifted onto the belt from that tile), and their source is remembered as gone,
+        so it counts as giving nothing and the link step feeds a new source into the belt's side."""
+        kept = []
+        for ln in out:
+            if ln.get("kind") == "trunk":
+                continue
+            # only where a new source can be fed in: a replacement already standing, or another spare source of
+            # the item. Run 20261124-015025: 5 of 8 kept belt sets had none, their factories got nothing for the
+            # 10 minutes until they were taken up and relinked anyway
+            if not any(q[2] is not site for q in self._spare(ln["item"])):
+                continue
+            if ln.get("ins") and not ln.get("ins_removed"):
+                (ix, iy), facing, name = ln["ins"]
+                e = next((q for q in ln.get("entities", []) if q[0] == name
+                          and (math.floor(q[1]), math.floor(q[2])) == (ix, iy)), None)
+                if e is not None:
+                    try:
+                        self.w.pickup(*e)
+                    except BuildError:
+                        pass
+                    ln["entities"] = [q for q in ln["entities"] if q is not e]
+                ln["ins_removed"] = True
+            self.gone_roots().setdefault(tuple(ln["source"]), self._minute())
+            kept.append(ln)
+        return kept
+
+    def spliced(self, root) -> bool:
+        """Has a new source been fed into the belts of this (gone) source?"""
+        root = tuple(root)
+        return any(tuple(ln.get("boost_of") or ()) == root for ln in self.links)
+
+    def _gone_chain(self, root) -> list[dict]:
+        root = tuple(root)
+        return [ln for ln in self.links if ln.get("boost_into") is None and ln.get("kind") not in ("trunk", "science")
+                and self._coal_root(ln) == root]
+
+    def expire_gone(self) -> list[str]:
+        """Kept belts whose source is gone: alive again if a source stands there now; spliced ones stay; ones still
+        unspliced after SPLICE_WAIT_MIN are taken up (with what hangs off them) so their ports get linked afresh."""
+        notes = []
+        now = self._minute()
+        for root, t in list(self.gone_roots().items()):
+            chain = self._gone_chain(root)
+            item = chain[0]["item"] if chain else None
+            if not chain or (item is not None and self._source_site(root, item) is not None):
+                self.gone_roots().pop(root, None)
+                continue
+            if self.spliced(root) or now - t < self.SPLICE_WAIT_MIN:
+                continue
+            gone, todo = [], list(chain)
+            while todo:
+                q = todo.pop()
+                if any(q is g for g in gone):
+                    continue
+                gone.append(q)
+                todo += [h for h in self.links if h.get("tap_of") is q or h.get("boost_into") is q]
+            for q in reversed(gone):
+                self._unlink(q)
+                self._link_fails.pop(tuple(q["port"]["end"]), None)
+            self.gone_roots().pop(root, None)
+            notes.append(f"the {item} belts of a removed source at {list(root)} got no new source in "
+                         f"{self.SPLICE_WAIT_MIN:.0f} min: taken up ({len(gone)} link(s)), linked afresh")
+        return notes
 
     def hints(self) -> list[str]:
         """What the general manager should consider: depleted, unpowered, starved or idle sites."""
@@ -2819,7 +3148,8 @@ class Crew:
         # every pack the path costs: made by a factory already, automated now, or (only if that is cheap or
         # impossible) hand-crafted within a budget; packs by hand mean the labs need the crew, so it waits
         notes = []
-        if self.ensure_packs(path, notes):
+        by_hand = self.ensure_packs(path, notes)
+        if by_hand:
             wait = True
         rs = self.w.research or {}
         busy = set(rs.get("queue") or []) | ({rs["current"]} if rs.get("current") else set())
@@ -2842,7 +3172,7 @@ class Crew:
         if not wait:
             return f"researching {', '.join(path)}"
         with self.w.step("research"):
-            return self._wait_research(tech, path)
+            return self._wait_research(tech, path, defer=not by_hand)   # packs by hand need the crew there
 
     # ===================================================== research station
     def science_sources(self) -> list[tuple[float, float, str]]:
@@ -2897,7 +3227,13 @@ class Crew:
         sources = {(x, y) for x, y, _ in self.science_sources()}
         for key, f in list(self._link_fails.items()):
             sid = f.get("site")
-            if sid is None or self.base.get(sid) is not None or key in ends or key in sources:
+            if key in ends or key in sources:
+                continue
+            # a science link's key is its source chest: once that chest is gone (its factory removed) the failure
+            # is stale even though the station stands. Run 20261124-120854: removed workshop 64's blue chest kept
+            # a stuck link, and the far-link alert sent a trunk for packs nothing made any more
+            science = str(f.get("item", "")).endswith("science-pack") and len(key) == 2                 and all(isinstance(v, (int, float)) for v in key)
+            if not science and (sid is None or self.base.get(sid) is not None):
                 continue
             self._link_fails.pop(key, None)
             self._link_failed.pop(key, None)
@@ -2973,6 +3309,8 @@ class Crew:
             return True
         if any(c["spare_sources"] and c["boost_may_retry"] for c in self.short_chains()):
             return True                               # a short belt and a spare source to feed into it
+        if any(not self.spliced(r) for r in self.gone_roots()):
+            return True                               # kept belts of a removed source: splice in, or link afresh
         return any(self._free_outputs(pt["item"], s, self._need(pt)) for s, pt in self.unfed_ports())
 
     @staticmethod
@@ -3015,6 +3353,8 @@ class Crew:
         a factory's or a workshop cell's output."""
         site = self._source_site(root, item)
         if site is None:
+            if tuple(root) in self.gone_roots():
+                return 0.0                            # it came down: what feeds its belts now are the boosts
             return self.COAL_PER_CHEST
         ln = site.params.get("line")
         if ln and tuple(ln["source"]) == tuple(root):
@@ -3134,16 +3474,33 @@ class Crew:
     def patch_full(self, resource: str) -> bool:
         """Did a mine of this resource find no room on its patches (and nothing changed since)?"""
         f = self._patch_full.get(resource)
-        return f is not None and f[1] == self._base_sig() and self._minute() - f[0] < 30
+        return f is not None and f[1] == self._patch_sig(resource) and self._minute() - f[0] < 30
+
+    def _patch_sig(self, resource: str) -> tuple:
+        """What changes the room on a resource's patches: its own mines standing or coming down. Run
+        20261124-120854: the mark was keyed on every site in the base, so the next unrelated build cleared it,
+        the ore outlook said "room for more" again and copper's next patch was never planned."""
+        return tuple(sorted(s.id for s in self.base.sites if s.params.get("resource") == resource
+                            and s.kind in ("electric_mine", "burner_mine", "outpost")))
 
     def _sideload_ports(self, chain: list[dict], item: str = "coal") -> list[tuple[dict, dict]]:
         """Where a belt can join a chain from the side: beside a straight belt fed straight from behind (so it
-        stays straight), pointing into it. A port-like target for each, with the link it joins."""
+        stays straight), pointing into it. A port-like target for each, with the link it joins. A kept belt whose
+        source came down (its inserter taken up) is joined head-on too: a belt running into its first tile from
+        behind, where the inserter stood. Run 20261124-015025: kept belts with no straight stretch to join from
+        the side were taken up and relinked."""
         from . import belts
         others = {tuple(t) for s, pt in self.all_ports() for t in (pt["end"], pt["approach"])}
         out = []
         for ln in chain:
             st = ln.get("steps", [])
+            if ln.get("ins_removed") and st and st[0][0] == "belt":
+                vx, vy = belts.VEC[st[0][2]]
+                end = (st[0][1][0] - vx, st[0][1][1] - vy)
+                appr = (end[0] - vx, end[1] - vy)
+                if not ({end, appr} & others) and all(self._belt_free(t) for t in (end, appr)):
+                    out.append(({"item": item, "end": list(end), "approach": list(appr), "per_minute": 0,
+                                 "boost": True, "head": True}, ln))
             for i in range(1, len(st) - 1):
                 a, b, c = st[i - 1], st[i], st[i + 1]
                 if not (a[0] == b[0] == c[0] == "belt") or not (a[2] == b[2] == c[2]):
@@ -3214,7 +3571,11 @@ class Crew:
         """Feed a spare source into every chain whose ports take more than its source gets (any item): a belt
         from the spare chest side-loads onto one of the chain's straight belts. Returns (done, failed)."""
         done, failed = [], []
-        for root in self._overloaded():
+        roots = list(self._overloaded())
+        # belts whose source came down get the first spare source (the replacement, usually) fed in, whatever
+        # their ports book: a port that books nothing still gets nothing from a removed mine
+        roots = [r for r in self.gone_roots() if not self.spliced(r) and r not in roots] + roots
+        for root in roots:
             item = self._item_of_root(root)
             if item is None:
                 continue
@@ -3264,6 +3625,9 @@ class Crew:
         links nothing while links are stuck fails with why and what would unblock them, so a planner that asks
         again learns it will not work until something changes."""
         parts, science_done = [], False
+        expired = self.expire_gone()                  # kept belts no new source could be fed into: linked afresh
+        if expired:
+            parts.append("; ".join(expired))
         for out_site, col in self.pending_trunks():   # an outpost whose trunk failed before
             msg = self._finish_outpost(out_site)
             if out_site.params.get("trunk_to") is None:
@@ -3378,15 +3742,21 @@ class Crew:
         if not ports:
             raise BuildError(f"site {site.id} has no input port" + (f" for {item}" if item else ""))
         ends = {tuple(pt["end"]) for pt in ports}
-        gone: list = []
-        todo = [ln for ln in self.links if tuple((ln.get("port") or {}).get("end") or ()) in ends
+        mine = [ln for ln in self.links if tuple((ln.get("port") or {}).get("end") or ()) in ends
                 and ln.get("kind") != "science"]
-        while todo:                                   # and whatever taps those belts
-            q = todo.pop()
-            if any(q is g for g in gone):
-                continue
-            gone.append(q)
-            todo += [h for h in self.links if h.get("tap_of") is q or h.get("boost_into") is q]
+        # a belt other factories tap (or that a spare source is fed into) stays: taking it up unplugged them, and
+        # they were relinked in turn (run 20261121-140755: site 56 relinked 10 times, its neighbours after it).
+        # Such a belt starving is a supply problem: more is fed into it instead.
+        shared = [ln for ln in mine if any(h.get("tap_of") is ln or h.get("boost_into") is ln for h in self.links)]
+        gone = [ln for ln in mine if not any(ln is s for s in shared)]
+        boosted: list[str] = []
+        if shared and not gone:
+            done, failed = self.boost_links()
+            boosted = done or failed
+            return (f"site {site.id}: its {item or 'input'} belt is shared with sites "
+                    f"{sorted({h['to_site'] for s in shared for h in self.links if h.get('tap_of') is s})}"
+                    " and stays where it is; " + ("; ".join(boosted)[:240] if boosted else
+                                                  "no spare source to feed into it: more of it must be made"))
         for q in reversed(gone):
             self._unlink(q)
         for e in ends:
@@ -3404,6 +3774,25 @@ class Crew:
 
     TRUNK_SOURCES = 3              # far sources a trunk goal tries, nearest first
 
+    def _station_trunk_target(self, site: Site, item: str | None) -> tuple[dict | None, list | str]:
+        """(free port, unlinked outputs of `item` nearest first) for a trunk into research station `site`, or
+        (None, why nothing is needed). Raises when it cannot be done."""
+        if not item:
+            raise BuildError(f'a trunk into research station {site.id} needs the pack: {{"do": "trunk", "site": '
+                             f'{site.id}, "item": "chemical-science-pack"}}')
+        ports = site.params.get("ports", [])
+        if any(pt.get("pack") == item for pt in ports):
+            return None, f"research station {site.id} already gets {item} by belt"
+        free = [pt for pt in ports if pt.get("pack") is None]
+        if not free:
+            raise BuildError(f"research station {site.id} has no free port for {item}")
+        srcs = [(x, y, self._source_site((x, y), item)) for x, y, p in self.science_sources()
+                if p == item and (x, y) not in self.science_links]
+        if not srcs:
+            raise BuildError(f"no {item} output without a belt to a research station: nothing to carry")
+        port = min(free, key=lambda pt: min(self._manhattan(q[:2], pt["end"]) for q in srcs))
+        return port, sorted(srcs, key=lambda q: self._manhattan(q[:2], port["end"]))
+
     def trunk(self, site_id, item: str | None = None) -> str:
         """One long belt (beyond a link's reach, belts.LINK_REACH) from the nearest spare source of an item into
         one unfed port of a site, as a goal with its own budget: the ground along the way is looked at first and
@@ -3413,22 +3802,34 @@ class Crew:
         site = self.base.get(site_id)
         if site is None:
             raise BuildError(f"there is no site {site_id}")
-        ports = [pt for pt in site.params.get("ports", []) if pt.get("item")
-                 and not pt.get("fed") and (item is None or pt["item"] == item)]
-        if not ports:
-            raise BuildError(f"site {site.id} has no unfed input port" + (f" for {item}" if item else ""))
-        port = ports[0]
-        if port.get("trunk"):
-            # a column's ore port is what a trunk is for: its source is the outpost's head. Run 20261122-133537:
-            # "trunk site 33" was ordered 6x and each answered "no unfed input port for iron-ore"
-            return self._outpost_trunk(site, port)
-        it = port["item"]
-        srcs = sorted(self._free_outputs(it, site, self._need(port)),
-                      key=lambda q: self._manhattan(q[:2], port["end"]))
-        if not srcs:
-            raise BuildError(f"no source of {it} with any to spare for site {site.id}: build one first")
-        if self._manhattan(srcs[0][:2], port["end"]) <= belts.LINK_REACH:
-            return f"a {it} source is within a link's reach of site {site.id}: " + self.relink(site.id, it)
+        kind, pack = "item", None
+        if site.params.get("station"):
+            # a research station's ports take any colour (port["pack"] says which once belted). Run
+            # 20261124-120854: "trunk site 50 chemical-science-pack" answered "no unfed input port", so the far
+            # blue workshop never reached a lab and a new station was asked for instead
+            port, srcs = self._station_trunk_target(site, item)
+            if port is None:
+                return srcs                               # why nothing is needed
+            it, kind, pack = item, "science", item
+            if self._manhattan(srcs[0][:2], port["end"]) <= belts.LINK_REACH:
+                return f"a {it} output is within a link's reach of station {site.id}: " + self.link_science()
+        else:
+            ports = [pt for pt in site.params.get("ports", []) if pt.get("item")
+                     and not pt.get("fed") and (item is None or pt["item"] == item)]
+            if not ports:
+                raise BuildError(f"site {site.id} has no unfed input port" + (f" for {item}" if item else ""))
+            port = ports[0]
+            if port.get("trunk"):
+                # a column's ore port is what a trunk is for: its source is the outpost's head. Run 20261122-133537:
+                # "trunk site 33" was ordered 6x and each answered "no unfed input port for iron-ore"
+                return self._outpost_trunk(site, port)
+            it = port["item"]
+            srcs = sorted(self._free_outputs(it, site, self._need(port)),
+                          key=lambda q: self._manhattan(q[:2], port["end"]))
+            if not srcs:
+                raise BuildError(f"no source of {it} with any to spare for site {site.id}: build one first")
+            if self._manhattan(srcs[0][:2], port["end"]) <= belts.LINK_REACH:
+                return f"a {it} source is within a link's reach of site {site.id}: " + self.relink(site.id, it)
         others = {tuple(t) for s, pt in self.all_ports() if pt is not port for t in (pt["end"], pt["approach"])}
         appr = tuple(port["approach"])
         errors: list[str] = []
@@ -3465,16 +3866,18 @@ class Crew:
                         "tap": None, "rip": [], "relay": None}
                 try:
                     with self.w.step("build"):
-                        rec = self._build_link(plan, port, site, "item", None, extra={"long": True})
+                        rec = self._build_link(plan, port, site, kind, pack, extra={"long": True})
                 except BuildError as exc:
                     errors.append(f"from {label}: {str(exc)[:100]}")
                     break
-                self._link_fails.pop(tuple(port["end"]), None)
+                self._link_fails.pop(key if kind == "science" else tuple(port["end"]), None)
                 return (f"a {rec['belts']}-belt trunk carries {it} from {label} into site {site.id} "
                         f"({belts.route_len(steps)} tiles)")
             else:
                 errors.append(f"from {label}: no route inside a corridor along the way")
-        self._note_link_fail(tuple(port["end"]), it, site, "trunk: " + "; ".join(errors)[:200])
+        # a science failure is keyed by its source chest (link_science), an item port's by the port
+        fail_key = (srcs[0][0], srcs[0][1]) if kind == "science" else tuple(port["end"])
+        self._note_link_fail(fail_key, it, site, "trunk: " + "; ".join(errors)[:200])
         raise BuildError(f"no {it} trunk into site {site.id}: " + "; ".join(errors)[:300]
                          + ". A mine, smelter or factory of it next to the site avoids the long belt")
 
@@ -3572,6 +3975,10 @@ class Crew:
                              '"research_station", "count": 6})')
         todo = self.unlinked_sources()
         if not todo:
+            with self.w.step("build"):
+                tapped = self._tap_short_stations(stations)
+            if tapped:
+                return "linked by tapping a science belt: " + "; ".join(tapped)
             # said from what stands, not from the retry list: run 20261121-140755 said "every science output
             # already reaches a research station" while red and green had failed 14x into site 53
             waiting = self.unreached_science()
@@ -3591,10 +3998,15 @@ class Crew:
                 # only red, others nothing, and none of them researched)
                 def packs(s):
                     return {pt.get("pack") for pt in s.params["ports"] if pt.get("pack")}
-                ports = sorted(((pack in packs(s), -len(packs(s)), math.dist((x, y), s.centre), s, pt)
+                # a port no belt reaches comes last whatever colours its station has: run 20261124-120854 sent
+                # blue (handled first, while station 65 sixty tiles off had no colour yet) to station 50's ports
+                # 233+ tiles away, all three tries failed, and the back-off kept it from station 65 for good
+                from .belts import LINK_REACH
+                ports = sorted(((self._manhattan((x, y), pt["end"]) > LINK_REACH, pack in packs(s), -len(packs(s)),
+                                 math.dist((x, y), s.centre), s, pt)
                                 for s in stations for pt in s.params["ports"] if pt["pack"] is None),
-                               key=lambda q: q[:3])
-                ports = [(q[2], q[3], q[4]) for q in ports]
+                               key=lambda q: q[:4])
+                ports = [(q[3], q[4], q[5]) for q in ports]
                 if not ports:
                     if self._pack_everywhere(pack, stations):
                         # every station already gets this colour from another output: this one is spare, not a
@@ -3613,11 +4025,14 @@ class Crew:
                     except BuildError as exc:
                         err = exc
                 if rec is None:
-                    self._note_link_fail((x, y), pack, ports[0][1], str(err))   # the nearest station
+                    # kept against the nearest station with a free port: a trunk goal (assess, far links) runs there
+                    near = min((q[1] for q in ports), key=lambda s: math.dist((x, y), s.centre))
+                    self._note_link_fail((x, y), pack, near, str(err))
                     failed.append(f"{pack} at ({x:.0f}, {y:.0f}): {str(err)[:200]}")
                     continue
                 self._link_fails.pop((x, y), None)
                 done.append(f"{pack} from ({x:.0f}, {y:.0f}) to station site {rec['to_site']}, {rec['belts']} belts{how}")
+            done += self._tap_short_stations(stations)
         moved = self._move_labs(self.unreached_science())
         if moved:
             failed.append(moved)
@@ -3633,6 +4048,37 @@ class Crew:
             if not done:
                 raise BuildError(msg)
         return msg
+
+    def _tap_short_stations(self, stations: list) -> list[str]:
+        """A station that lacks a colour the base makes, with no source chest of it free or routable, takes it
+        from a belt that already carries that colour to another station: an inserter lifts packs off it onto a
+        belt into a free port. Run 20261124-120854: station 41 got red only; the one free green chest was boxed in
+        by other belts, the router was never offered the three green belts into site 26, and 41's labs sat idle
+        for 45 minutes. Returns a note per link laid."""
+        made = {p for *_, p in self.science_sources()}
+        notes = []
+        for st in stations:
+            have = {pt.get("pack") for pt in st.params.get("ports", []) if pt.get("pack")}
+            free = [pt for pt in st.params.get("ports", []) if pt.get("pack") is None]
+            for pack in sorted(made - have):
+                if not free:
+                    break
+                key = ("tap", st.id, pack)
+                if not self._may_retry(key):
+                    continue
+                taps = self._belt_taps(pack, st)
+                if not taps:
+                    continue
+                port = min(free, key=lambda pt: min(self._manhattan(t, pt["end"]) for t, _ in taps))
+                try:
+                    rec, how = self._link_port(port, st, [], taps, kind="science", pack=pack)
+                except BuildError as exc:
+                    self._note_link_fail(key, pack, st, str(exc))
+                    continue
+                self._link_fails.pop(key, None)
+                free.remove(port)
+                notes.append(f"{pack} into station site {st.id}, {rec['belts']} belts{how}")
+        return notes
 
     @staticmethod
     def _pack_everywhere(pack: str, stations: list) -> bool:
@@ -4535,10 +4981,12 @@ class Crew:
     # this long while the foreman fed the labs will not move by waiting: the goal fails and says which packs.
     RESEARCH_STALL_MIN = 3.0
 
-    def _wait_research(self, tech: str, path: list[str]) -> str:
+    def _wait_research(self, tech: str, path: list[str], defer: bool = True) -> str:
         secs = sum(self.kn.research_seconds(t, self.base.count("labs")) for t in path)
         deadline = time.monotonic() + secs * 4 / self.w.speed + 120
         mark, since = None, self._minute()
+        rs0 = self.w.research or {}
+        first = (self._minute(), rs0.get("current"), float(rs0.get("progress") or 0))
         while time.monotonic() < deadline and self.w.minutes_left > 0.5:
             self.checkpoint()
             rs = self.w.research or {}
@@ -4554,8 +5002,35 @@ class Crew:
                 mark, since = now_mark, self._minute()
             elif self._minute() - since >= self.RESEARCH_STALL_MIN:
                 raise BuildError(self._research_stalled(tech, rs, self._minute() - since))
+            eta = self._research_eta(path, rs, first)
+            if defer and eta is not None and eta > self.RESEARCH_DEFER_MIN:
+                raise BuildError(f"research for {tech} needs about {eta:.0f} more game minutes at this pace: the "
+                                 "crew does other work meanwhile (the research goes on); build this once "
+                                 f"{tech} is researched")
             time.sleep(2)
         raise BuildError(f"research {tech} did not finish in time")
+
+    # Run 20261124-120854: "build pumpjack" waited 16 game minutes on oil-gathering creeping from 0 to 53% and was
+    # dropped over budget, while science links and copper belts waited for the crew. Research that moves but
+    # will take longer than this is left to run: the goal fails with the time it needs and comes back later.
+    RESEARCH_DEFER_MIN = 8.0
+    RESEARCH_ETA_AFTER_MIN = 1.5
+
+    def _research_eta(self, path: list[str], rs: dict, first: tuple) -> float | None:
+        """Game minutes until the last tech of `path` is done at the pace seen since `first` (minute, tech,
+        progress), or None while there is too little to judge (under RESEARCH_ETA_AFTER_MIN, or another tech)."""
+        t0, cur0, p0 = first
+        cur, p = rs.get("current"), float(rs.get("progress") or 0)
+        span = self._minute() - t0
+        if span < self.RESEARCH_ETA_AFTER_MIN or cur is None or cur != cur0 or p <= p0:
+            return None
+        rate = (p - p0) / span                         # of the current tech, a game minute
+        labs = max(1, self.base.count("labs"))
+        nominal = self.kn.research_seconds(cur, labs) / 60.0
+        slow = (1.0 / rate) / nominal if nominal > 0 else 1.0
+        rest = sum(self.kn.research_seconds(t, labs) / 60.0 for t in path
+                   if t != cur and t not in self.kn.researched)
+        return (1.0 - p) / rate + slow * rest
 
     def _research_stalled(self, tech: str, rs: dict, minutes: float) -> str:
         cur = rs.get("current") or tech
@@ -5312,7 +5787,8 @@ class Foreman:
         unlocked = getattr(crew.kn, "unlocked", set()) or set()
         inv = crew.w.inventory
         held = {**(getattr(crew, "reserved", None) or {})}
-        for k, v in (getattr(crew, "kit_hold", None) or {}).items():
+        holds = [getattr(crew, "kit_hold", None) or {}, getattr(crew, "outpost_hold", None) or {}]
+        for k, v in [kv for h in holds for kv in h.items()]:
             held[k] = max(held.get(k, 0), v)
         for item, want in SPARES.items():            # a hoard on hand goes to storage (kits draw on it there)
             keep = max(SPARES_CAP * want, held.get(item, 0))
@@ -5475,6 +5951,8 @@ class Foreman:
             belted = any(pt.get("fuel") and pt.get("fed") for pt in s.params.get("ports", []))
             for e in ents:
                 if e["name"] == "iron-chest":                 # the boiler's coal chest
+                    if s.kind != "steam_power":               # a mine's or a column's chest: not a boiler's (run
+                        continue                              # 20261124-015025: "feed site None" six times)
                     have = ((e.get("inventories") or {}).get("contents") or {}).get("coal", 0)
                     self.boiler_coal[(e["x"], e["y"])] = have
                     if belted and have >= 5:                  # a coal belt fills it: hands only if it runs dry

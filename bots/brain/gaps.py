@@ -305,7 +305,7 @@ def repair(crew, site) -> tuple[int, list[str]]:
                     site.poles.append(_tile((x, y)))
                 if g.get("fuel"):
                     w.fuel(x, y, int(g["fuel"]))
-            if g.get("recipe"):
+            if g.get("recipe") and not name.endswith("furnace"):   # a furnace sets its own (see workshop.build)
                 r = w.act({"type": "set_recipe", "x": x, "y": y, "recipe": g["recipe"]})
                 if not r.get("ok"):
                     g["placed"] = True             # standing: only its recipe is left to set

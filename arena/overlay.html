@@ -10,12 +10,14 @@
 <style>
 /* Stream overlay for OBS (browser source, 1920x1080, transparent). Built on a 1920x1080 stage that scales to the
    source size. It keeps to the edges so the game stays visible:
-     top strip     the road to the rocket as speedrun splits (in-game times) and the in-game clock
+     top strip     the road to the rocket as speedrun splits and the run clock, in real time since the run began
+                 (every timer a viewer sees is real time; the bot itself works in game time)
      right         the brain's thoughts (strategist, overseer, assessor, rules) and research
      bottom left   the brain as a live state machine
      bottom bar    the current instruction, the hands, the last goals
+     right, lower  the world map: ore patches and oil wells the bot has found, its sites, where it is
    URL options: ?run=ID (default: the run that is playing) · ?demo=1 (fake data to place it in OBS) ·
-   ?thoughts=0 · ?brain=0 (hide a panel) · ?bg=1 (dark backdrop, to check it outside OBS) ·
+   ?thoughts=0 · ?brain=0 · ?world=0 (hide a panel) · ?bg=1 (dark backdrop, to check it outside OBS) ·
    ?pb=map (race the best earlier run on the same map; default: the best earlier run of the task on any map)
    Look: cut steel plates, hazard stripes for anything working. One accent (orange) plus neutrals; red only for
    "something went wrong". Every text box has a fixed height and clamps its lines, so nothing grows. */
@@ -154,8 +156,7 @@ body.bg { background: radial-gradient(circle at 50% 42%, #3a382d, #191813 75%); 
 .cmd .doing { min-width: 0; flex: 1; font: 800 30px/1.1 var(--f-d); letter-spacing: .01em; }
 .cmd .why { margin-top: 5px; font: 500 15px/1.2 var(--f-b); color: var(--muted); }
 .cmd .why i { font: 700 11px/1 var(--f-m); font-style: normal; letter-spacing: .12em; color: var(--dim); margin-right: 8px; }
-.hands .step { margin-top: 8px; font: 800 22px/1 var(--f-d); letter-spacing: .05em; text-transform: uppercase; color: var(--acc); }
-.hands .act { margin-top: 5px; font: 500 15px/1.2 var(--f-b); color: var(--muted); }
+.hands .step { margin-top: 8px; font: 700 19px/1.15 var(--f-d); letter-spacing: .01em; color: var(--acc); }
 .log .sq { display: flex; gap: 4px; margin-top: 8px; height: 22px; }
 .log .sq span { flex: none; display: grid; place-items: center; width: 22px; height: 22px; font: 800 14px/1 var(--f-d); color: var(--acc); background: var(--well); }
 .log .sq span.bad { color: #fff; background: var(--bad); }
@@ -186,6 +187,36 @@ body.bg { background: radial-gradient(circle at 50% 42%, #3a382d, #191813 75%); 
 #sfxTest button small { font: 500 12px/20px var(--f-m); color: var(--dim); text-transform: none; letter-spacing: 0; }
 #sfxTest button:hover { box-shadow: inset 0 0 0 2px var(--acc); }
 #sfxTest button:active { background: var(--acc); color: var(--acc-ink); }
+/* ---------------------------------------------------------------- Atlas: the base map, the blueprint being built, its loop
+   Shown only when the bot is Atlas (the run writes atlas_live.json); the brain bot's panels stay as they are. */
+#map { left: 24px; top: 94px; width: 392px; height: 420px; padding: 14px 14px 0; }
+#bp { left: 24px; top: 528px; width: 392px; height: 258px; padding: 14px 14px 0; }
+#map canvas, #bp canvas { display: block; margin-top: 10px; }
+#bp .meter { margin-top: 10px; }
+#bp .meter i { background: var(--hazard); background-size: 28px 28px; animation: march .9s linear infinite; }
+#bp .meter i.done { background: var(--acc); animation: none; }
+#bp .hd .t { color: var(--ink); font: 800 17px/1 var(--f-d); letter-spacing: .08em; }
+#loop { display: block; width: 364px; height: 205px; margin-top: 10px; overflow: visible; }
+#loop .n > rect { fill: #1d1b19; stroke: var(--line-hi); stroke-width: 1.5; }
+#loop .n > text { fill: var(--dim); font: 700 15px var(--f-d); letter-spacing: .12em; text-transform: uppercase; }
+#loop .n.on > rect { fill: url(#hz2); stroke: var(--acc); stroke-width: 2.5; }
+#loop .n.on > text { fill: var(--ink); }
+#loop .n.was > rect { stroke: var(--acc); } #loop .n.was > text { fill: var(--muted); }
+#loop .n.ai > rect { stroke-dasharray: 5 4; }
+#loop .n.ai.on > rect { fill: var(--acc); stroke: var(--acc); } #loop .n.ai.on > text { fill: var(--acc-ink); }
+#loop .n > text.s { fill: var(--dim); font: 500 12px var(--f-m); letter-spacing: 0; text-transform: none; }
+#loop .w { fill: none; stroke: var(--line-hi); stroke-width: 2.5; }
+#loop .w.ai { stroke-dasharray: 4 4; }
+#loop .w.hot { stroke: var(--acc); stroke-dasharray: 8 6; animation: flow .6s linear infinite; }
+#loop marker path { fill: var(--line-hi); }
+body.atlas #fsm, body.atlas #feed, body.atlas #thinking, body.atlas #thoughts > .hd { display: none; }
+body.atlas #thoughts { height: auto; grid-template-rows: auto; padding-top: 2px; }
+body.atlas #why, body.atlas #whoTag, body.atlas .hands .hd > span:last-child, body.atlas #okRate { display: none; }
+body.atlas #thoughts .research { border-top: 0; } body:not(.atlas) #loop, body:not(.atlas) #map, body:not(.atlas) #bp { display: none; }
+/* ---------------------------------------------------------------- the world map (brain bot), under the thoughts */
+#world { right: 24px; top: 656px; width: 372px; height: 296px; padding: 14px 14px 0; }
+#world canvas { display: block; margin-top: 10px; }
+body.atlas #world { display: none; }
 @media (prefers-reduced-motion: reduce) { *, *::after, *::before { animation: none !important; transition: none !important; } }
 </style>
 </head>
@@ -195,7 +226,7 @@ body.bg { background: radial-gradient(circle at 50% 42%, #3a382d, #191813 75%); 
     <div class="lead"><span class="live" id="live">LIVE</span><span class="pct"><span id="pct">0%</span><small>ROCKET</small></span><span class="vs" id="vsPb"></span></div>
     <div id="splits"></div>
     <div class="tally"><div><span>Run</span><b id="runNo">#1</b></div><div><span>Upgrades</span><b class="up" id="upNo">0</b></div></div>
-    <div class="clock"><div class="t" id="clock">0:00:00</div><div class="cap" id="clockCap">in-game time</div></div>
+    <div class="clock"><div class="t" id="clock">0:00:00</div><div class="cap" id="clockCap">run time</div></div>
   </div>
 
   <div class="plate" id="thoughts">
@@ -212,6 +243,29 @@ body.bg { background: radial-gradient(circle at 50% 42%, #3a382d, #191813 75%); 
 
   <div class="plate" id="brain">
     <div class="hd"><span class="t">Brain // control loop</span><span>bill <b id="bill">$0.00</b></span></div>
+    <svg id="loop" viewBox="0 0 440 248" aria-label="Atlas: see, plan, design, build, measure, judge">
+      <defs>
+        <marker id="ah2" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z"/></marker>
+        <pattern id="hz2" width="14" height="14" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+          <rect width="14" height="14" fill="#1f1306"/><rect width="7" height="14" fill="#ff9a1f"/>
+          <animateTransform attributeName="patternTransform" type="translate" from="0 0" to="14 0" dur=".9s" repeatCount="indefinite" additive="sum"/>
+        </pattern>
+      </defs>
+      <path class="w" id="e-see" d="M118 24 H150" marker-end="url(#ah2)"/>
+      <path class="w" id="e-plan" d="M262 24 H294" marker-end="url(#ah2)"/>
+      <path class="w" id="e-design" d="M350 48 V100" marker-end="url(#ah2)"/>
+      <path class="w" id="e-build" d="M294 124 H262" marker-end="url(#ah2)"/>
+      <path class="w" id="e-measure" d="M150 124 H118" marker-end="url(#ah2)"/>
+      <path class="w" id="e-judge" d="M60 148 C60 220 350 220 350 152" marker-end="url(#ah2)"/>
+      <path class="w ai" id="e-llm" d="M60 100 V86" />
+      <g class="n" id="l-see"><rect x="4" y="0" width="112" height="48"/><text x="60" y="30" text-anchor="middle">See</text></g>
+      <g class="n" id="l-plan"><rect x="152" y="0" width="108" height="48"/><text x="206" y="30" text-anchor="middle">Plan</text></g>
+      <g class="n" id="l-design"><rect x="296" y="0" width="108" height="48"/><text x="350" y="30" text-anchor="middle">Design</text></g>
+      <g class="n" id="l-build"><rect x="296" y="102" width="108" height="48"/><text x="350" y="132" text-anchor="middle">Build</text></g>
+      <g class="n" id="l-measure"><rect x="152" y="102" width="108" height="48"/><text x="206" y="132" text-anchor="middle">Measure</text></g>
+      <g class="n" id="l-judge"><rect x="4" y="102" width="112" height="48"/><text x="60" y="132" text-anchor="middle">Judge</text></g>
+      <g class="n ai" id="l-llm"><rect x="4" y="58" width="112" height="28"/><text x="60" y="78" text-anchor="middle" id="llmCost">AI</text></g>
+    </svg>
     <svg id="fsm" viewBox="0 0 440 248" aria-label="The bot's control loop">
       <defs>
         <marker id="ah" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z"/></marker>
@@ -239,6 +293,9 @@ body.bg { background: radial-gradient(circle at 50% 42%, #3a382d, #191813 75%); 
     </svg>
   </div>
 
+  <div class="plate" id="world"><div class="hd"><span class="t">World</span><span id="worldCount"></span></div><canvas id="worldc" width="344" height="244"></canvas></div>
+  <div class="plate" id="map"><div class="hd"><span class="t">Base</span><span id="mapCount"></span></div><canvas id="mapc" width="364" height="364"></canvas></div>
+  <div class="plate" id="bp"><div class="hd"><span class="t" id="bpName">–</span><span id="bpPct"></span></div><canvas id="bpc" width="364" height="190"></canvas><div class="meter"><i id="bpBar"></i></div></div>
   <div class="plate" id="bar">
     <div class="cmd">
       <div class="hd"><span class="t">Current instruction</span><span id="whoTag" class="who">strategist</span></div>
@@ -247,8 +304,7 @@ body.bg { background: radial-gradient(circle at 50% 42%, #3a382d, #191813 75%); 
     </div>
     <div class="hands">
       <div class="hd"><span class="t">Hands</span><span><b id="tUsed">0:00</b> / <span id="tBudget">–</span></span></div>
-      <div class="step clamp1" id="handStep">idle</div>
-      <div class="act clamp1" id="handAct"></div>
+      <div class="step clamp2" id="handStep">Idle</div>
     </div>
     <div class="log">
       <div class="hd"><span class="t">Last goals</span><span id="okRate"></span></div>
@@ -267,6 +323,7 @@ const $ = id => document.getElementById(id);
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 if (Q.get("bg") === "1") document.body.classList.add("bg");
 if (Q.get("thoughts") === "0") $("thoughts").classList.add("hide");
+if (Q.get("world") === "0") $("world").classList.add("hide");
 if (Q.get("brain") === "0") { $("brain").classList.add("hide"); $("bar").style.left = "24px"; }
 
 function fit() { const s = Math.min(innerWidth / 1920, innerHeight / 1080); $("stage").style.transform = `scale(${s})`; }
@@ -334,6 +391,11 @@ const STEP = { make: "crafting", plates: "grabbing plates", smelt: "smelting", b
   unlock: "unlocking recipe", remove: "tearing down", wait: "waiting", research: "researching", storage: "tidying pockets", between: "next belt",
   courier: "hauling", refresh: "looking around", coal: "refuelling", sites: "checking sites", power: "checking power", labs: "feeding labs" };
 // game minutes -> m:ss / h:mm:ss (durations, the clock) or h:mm (splits)
+// the hands line: the bot's own activity text, read as a sentence ("crafting 80 x iron-gear-wheel" ->
+// "Crafting 80 iron gear wheel"), no internal prefixes
+const cap = t => t ? t[0].toUpperCase() + t.slice(1) : t;
+const handText = a => cap(String(a).replace(/^foreman:\s*/i, "").replace(/(\d+) x /g, "$1 ")
+  .replace(/([a-z]+(?:-[a-z0-9]+)+)/g, m => m.replace(/-/g, " ")));
 const fmt = m => { if (m == null || isNaN(m)) return "–"; const h = Math.floor(m / 60), mm = Math.floor(m % 60), s = Math.floor((m * 60) % 60);
   return h ? `${h}:${String(mm).padStart(2, "0")}:${String(s).padStart(2, "0")}` : `${mm}:${String(s).padStart(2, "0")}`; };
 const fmtClock = m => { m = m || 0; const h = Math.floor(m / 60), mm = Math.floor(m % 60), s = Math.floor((m * 60) % 60);
@@ -354,11 +416,18 @@ const short = n => SHORT[n] || String(n || "").split(/[ :]/)[0];
 const STAGE_MS = { "Power and labs": "power-on", "Red science automated": "red-auto", "Green science automated": "green-auto",
   "Blue science automated": "blue-auto", "Purple science automated": "purple-auto",
   "Yellow science automated": "yellow-auto", "Rocket silo researched": "silo", "Rocket launched": "rocket" };
-function splitMinute(s, ms, splits) {
-  if (splits && splits[s.name] != null) return splits[s.name];
-  if (s.done_minute != null) return s.done_minute;
-  const tick = (ms || {})[STAGE_MS[s.name]];
-  return typeof tick === "number" ? tick / 3600 : null;
+// real time: the monitor maps the run's game clock to real minutes played (d.real); RT turns a game minute into one
+let CLK = null;
+const RT = g => g == null || isNaN(g) ? g : CLK ? Math.max(0, CLK.now - (CLK.game - g) * CLK.ratio) : g;
+const RD = g => g == null || isNaN(g) ? g : CLK ? g * CLK.ratio : g;      // a game duration in real minutes
+function splitMinute(s, ms, splits, real) {
+  if (real && real.splits && real.splits[s.name] != null) return real.splits[s.name];
+  const mid = STAGE_MS[s.name];
+  if (real && real.ms && mid && real.ms[mid] != null) return real.ms[mid];
+  if (splits && splits[s.name] != null) return RT(splits[s.name]);
+  if (s.done_minute != null) return RT(s.done_minute);
+  const tick = (ms || {})[mid];
+  return typeof tick === "number" ? RT(tick / 3600) : null;
 }
 // against the personal best: "−0:31" ahead, "+12:05" behind (m:ss under an hour, h:mm over)
 function fmtDelta(x) {
@@ -602,17 +671,17 @@ const MAINS = ["start", "take-goal", "run-goal", "record", "replan", "end"];
 function renderTop(d, L, stages) {
   const playing = isPlaying(d, L);
   $("live").textContent = playing ? "LIVE" : d.finished ? "ENDED" : "PAUSED"; $("live").classList.toggle("off", !playing);
-  setText("clock", fmtClock(L.game_minute));
+  setText("clock", fmtClock(CLK ? CLK.now : L.game_minute));
   const S = d.stream || {};
   if (S.run_no) setText("runNo", "#" + S.run_no);
   const up = String(S.upgrades ?? 0);
   if ($("upNo").textContent !== up) { $("upNo").textContent = up; $("upNo").classList.remove("pop"); void $("upNo").offsetWidth; $("upNo").classList.add("pop"); }
   // the clock is the game's: it stops while the world is paused, so say so
-  setText("clockCap", playing ? "in-game time" : "in-game · paused"); $("clockCap").classList.toggle("frozen", !playing);
+  setText("clockCap", playing ? "run time" : "paused"); $("clockCap").classList.toggle("frozen", !playing);
   if (!stages.length) return;
   $("splits").style.gridTemplateColumns = `repeat(${stages.length}, minmax(0, 1fr))`;
   const done = stages.filter(s => s.done).length, nowIdx = stages.findIndex(s => s.status === "now");
-  const at = stages.map(s => s.done ? splitMinute(s, L.milestones, d.splits) : null);
+  const at = stages.map(s => s.done ? splitMinute(s, L.milestones, d.splits, { splits: d.splits_real, ms: d.milestones_real }) : null);
   const prev = Math.max(0, ...at.filter(v => v != null));   // the current split runs from the last cleared one
   // racing the personal best: how each cleared stage compares, and the target for the one in hand
   const pb = d.pb || null, pbs = (pb && pb.splits) || {}, best = (pb && pb.best) || {};
@@ -621,7 +690,7 @@ function renderTop(d, L, stages) {
     if (mine == null || theirs == null) return null;
     return { d: mine - theirs, gold: best[s.name] != null && mine < best[s.name] };
   };
-  const gm = L.game_minute || 0;
+  const gm = CLK ? CLK.now : L.game_minute || 0;
   setHTML("splits", stages.map((s, i) => {
     const st = s.done ? "done" : s.status === "now" ? "now" : "";
     let tm = "";
@@ -642,7 +711,7 @@ function renderTop(d, L, stages) {
   if (lastStage != null && done > lastStage) {
     const s = stages[done - 1], m = at[done - 1], v = vs(done - 1);
     const big = v && v.gold ? "New best split!" : "Stage cleared";
-    toast("ms", big, `${s.name}${m != null ? " · " + fmt(m) + " in-game" : ""}${v ? " · " + fmtDelta(v.d) + " vs PB" : ""}`, 8); confetti(); SFX.play("stage");
+    toast("ms", big, `${s.name}${m != null ? " · " + fmt(m) : ""}${v ? " · " + fmtDelta(v.d) + " vs PB" : ""}`, 8); confetti(); SFX.play("stage");
   }
   lastStage = done;
 }
@@ -658,9 +727,9 @@ function renderBar(d, L) {
   setText("whoTag", "by " + who); $("whoTag").className = "who " + who;
   // the hands: what the body does right now, against the goal's time budget
   const st = L.stage || {}, steps = playing ? st.steps || [] : [], top = steps[steps.length - 1] || (playing ? st.foreman : null);
-  setText("handStep", top ? (STEP[top] || top) : cg && playing ? "working" : "idle");
-  setText("handAct", L.activity || "");
-  const used = cg ? Math.max(0, (L.game_minute || 0) - cg.since_minute) : 0, budget = cg && cg.budget_min;
+  setText("handStep", playing && L.activity ? handText(L.activity)
+    : cap(top ? (STEP[top] || top) : cg && playing ? "working" : "idle"));
+  const used = cg ? Math.max(0, RT(L.game_minute || 0) - RT(cg.since_minute)) : 0, budget = cg && cg.budget_min ? RD(cg.budget_min) : null;
   setText("tUsed", fmt(used)); setText("tBudget", budget ? fmt(budget) : "no limit");
   // the last goals: a square each, newest first
   const res = (L.results || []).slice(-10).reverse();
@@ -672,7 +741,7 @@ function renderBar(d, L) {
   if (firstNew) SFX.play(isOk(res[0]) ? "ok" : "fail");
   const okN = res.filter(isOk).length; setText("okRate", res.length ? `${okN}/${res.length} ok` : "");
   const r = res[0];
-  setText("last", r ? `${isOk(r) ? "✓" : "✕"} ${sayText(r.goal)}${r.game_minutes != null ? ` · ${(+r.game_minutes).toFixed(1)}m` : ""}${isOk(r) ? "" : " · " + firstSentence(r.result, 60)}` : "");
+  setText("last", r ? `${isOk(r) ? "✓" : "✕"} ${sayText(r.goal)}${r.game_minutes != null ? ` · ${fmt(RD(+r.game_minutes))}` : ""}${isOk(r) ? "" : " · " + firstSentence(r.result, 60)}` : "");
   seenResults = sig;
 }
 
@@ -702,7 +771,7 @@ function renderBrain(d, L) {
   // the overseer (an LLM that reads the whole base every few minutes)
   if (ov.thinking) { $("n-overseer").classList.add("busy"); $("e-overseer").classList.add("hot"); }
   else if (recent("oversee")) { $("n-overseer").classList.add("flash"); $("e-overseer").classList.add("hot"); }
-  setText("ovSub", ov.thinking ? "reading base…" : ov.next_minute != null ? `next in ${fmt(Math.max(0, ov.next_minute - (L.game_minute || 0)))}` : ov.model ? "audits base" : "off");
+  setText("ovSub", ov.thinking ? "reading base…" : ov.next_minute != null ? `next in ${fmt(RD(Math.max(0, ov.next_minute - (L.game_minute || 0))))}` : ov.model ? "audits base" : "off");
   // the supervisor: hard rules (red) and the assessor
   if (recent("assess", "rules")) { $("n-supervisor").classList.add("alarm"); $("e-supervisor").classList.add("hot"); setText("supSub", "rule tripped"); }
   else if (recent("assess", "assessor")) { $("n-supervisor").classList.add("flash"); $("e-supervisor").classList.add("hot"); setText("supSub", "re-ordering"); }
@@ -722,14 +791,14 @@ function renderBrain(d, L) {
 
 // a decision in the brain, as the viewer reads it
 function thought(e) {
-  const m = e.minute != null ? fmt(e.minute) : "";
+  const m = e.minute != null ? fmt(RT(e.minute)) : "";
   const ord = (e.changes || []).map(sayChange).filter(Boolean)[0] || "";
   switch (e.kind) {
     case "plan": return { who: "strategist", m, txt: e.note || "New plan.", ord: (e.goals || []).length ? `queued ${e.goals.length} goals` : "" };
     case "oversee": return { who: "overseer", m, txt: firstSentence(e.note, 200), ord };
     case "assess": return { who: e.who === "rules" ? "rules" : "assessor", m, txt: e.note || "", ord };
     case "fix": return { who: "fixer", m, txt: e.note || e.why || "", ord: e.why ? "because " + e.why : "" };
-    case "watchdog": return { who: "watchdog", m, txt: `No progress for ${Math.round(e.minutes_without_progress || 0)} game minutes: shaking things up`, ord: e.action ? "action: " + e.action : "" };
+    case "watchdog": return { who: "watchdog", m, txt: `No progress for ${Math.round(RD(e.minutes_without_progress || 0))} minutes: shaking things up`, ord: e.action ? "action: " + e.action : "" };
     case "closeout": return { who: "strategist", m, txt: "Close-out: " + (e.why || ""), ord: (e.goals || []).length ? `queued ${e.goals.length} goals` : "" };
     case "gate": return { who: "rules", m, txt: firstSentence(e.why, 180), ord: e.goal ? "held back: " + sayText(e.goal) : "" };
     case "milestone": return { who: "milestone", m, txt: "Milestone reached: " + (e.ids || []).join(", "), ord: "" };
@@ -776,14 +845,300 @@ function renderResearch(L, rm) {
     return `<div class="pk ${s.unlocked === false ? "off" : v > 0 ? "on" : ""}"><span class="v">${v}</span><span class="k">${nm}</span></div>`; }).join(""));
 }
 
+// Atlas speaks the same panels' language: its job is the instruction, its built blocks the last goals, its eras
+// the splits (milestone ladder), its loop phase the hands
+const VERB = { mine: "mining", craft: "crafting", place: "placing", place_line: "laying belts", move: "walking", insert: "loading",
+  extract: "unloading", pickup: "clearing", research: "research", batch: "placing", rotate: "turning", set_recipe: "setting up" };
+function atlasLive(d) {
+  const A = d.atlas, last = Math.max(A.updated || 0, A.acted || 0), fresh = d.now - last < 30;
+  const quiet = d.now - (A.updated || 0) > 30;           // the bot is working without reporting: the action log speaks
+  const job = quiet ? "" : A.job || "";
+  if (A.act_pos && (quiet || !A.pos)) A.pos = A.act_pos;
+  const minute = Math.max(A.minute || 0, (A.tick || 0) / 3600), verb = VERB[A.act] || A.act || "";
+  const doing = verb ? verb[0].toUpperCase() + verb.slice(1) + (A.act_what ? " " + nice(A.act_what) : "") : "";
+  const OPEN = { gather: "Gathering", bootstrap: "First furnaces", burners: "Burner drills", power: "Steam power", lab: "First lab", research: "Research" };
+  const what = job.startsWith("bus") ? "bus" : (AT.byJob && AT.byJob.get(job) || {}).product || job.split("@")[0].replace(/^(make|smelt)-/, "");
+  const open = job.startsWith("opening:") ? OPEN[job.split(":")[1]] || job.split(":")[1] : null;
+  const ev = (A.events || []).map(e => ({ goal: `build ${e.text} {}`, ok: true, result: "built", game_minutes: null }));
+  return { status: fresh && !d.finished ? "playing" : "paused", game_minute: minute, activity: "",
+    current_goal: open ? { goal: { do: open }, since_minute: minute, who: "plan" }
+      : job ? { goal: { do: "build", module: what }, since_minute: minute, who: "plan" }
+      : doing && fresh ? { goal: { do: doing }, since_minute: minute, who: "plan" } : null,
+    stage: { steps: [verb && (quiet || !job) ? verb : A.phase] }, results: ev, milestones: A.milestones || {},
+    research: A.research && A.research[0] ? { current: A.research[0], progress: A.research_progress || 0 } : null };
+}
+// the 21 milestones read as 10 stages, one short word each; a stage is done when all its milestones are
+const STAGES = [["Power", ["steam-power", "electronics", "power-on"]], ["Red", ["red-tech", "first-research", "red-auto"]],
+  ["Green", ["green-tech", "green-auto"]], ["Steel", ["steel"]], ["30/min", ["science-30"]],
+  ["Oil", ["oil", "plastics", "plastic-auto"]], ["Blue", ["blue-tech", "blue-auto"]], ["Purple", ["purple-tech", "purple-auto"]],
+  ["Yellow", ["yellow-tech", "yellow-auto"]], ["Rocket", ["silo", "rocket"]]];
+function atlasStages(d) {
+  const A = d.atlas, eras = A.eras || [], at = eras.indexOf(A.era);
+  const done = id => { const i = eras.indexOf(id); return i >= 0 && at >= 0 && i < at; };
+  const known = new Set((d.milestones || []).map(m => m.id));
+  return STAGES.map(([name, ids]) => {
+    const mine = ids.filter(id => known.has(id) || !known.size), all = mine.length && mine.every(done);
+    return { name, done: !!all, status: all ? "done" : mine.includes(A.era) ? "now" : "todo" };
+  }).filter((s, i) => STAGES[i][1].some(id => known.has(id) || !known.size));
+}
 function render(d) {
-  const L = d.live || {}, rm = L.roadmap || {}, stages = rm.stages || [];
+  CLK = d.real && d.real.now != null && (d.real.game || d.real.now) ? d.real : null;
+  const L = d.atlas ? atlasLive(d) : d.live || {}, rm = d.atlas ? {} : L.roadmap || {};
+  const stages = d.atlas ? atlasStages(d) : rm.stages || [];
   // each part on its own: one odd field never blanks the rest of the overlay
-  for (const part of [() => renderTop(d, L, stages), () => renderBar(d, L), () => renderBrain(d, L),
-    () => renderThoughts(L), () => renderResearch(L, rm)]) {
+  for (const part of [() => atlasRender(d), () => renderTop(d, L, stages), () => renderBar(d, L), () => renderBrain(d, L),
+    () => renderThoughts(L), () => renderResearch(L, rm), () => renderWorld(d.atlas ? null : L.world)]) {
     try { part(); } catch (e) { console.error(e); }
   }
 }
+
+// ---------------------------------------------------------------- the world map (brain bot)
+// Centred on the base, at a scale that keeps its sites readable (north up, one scale for x and y): every ore
+// patch the bot has found in its own colour, the crude-oil wells it knows, its sites (orange) and the character
+// (a white ring). Whatever lies beyond the view (far patches, a long walk) sits on the edge as an arrow in its
+// direction, with its distance in tiles.
+const ORE = { "iron-ore": ["#7f95a8", "iron"], "copper-ore": ["#c97b45", "copper"], "coal": ["#57524b", "coal"],
+  "stone": ["#a8967a", "stone"], "uranium-ore": ["#6cc04a", "uranium"], "crude-oil": ["#b77be0", "oil"] };
+function renderWorld(W) {
+  const cv = $("worldc"), g = cv.getContext("2d"), w = cv.width, h = cv.height;
+  g.clearRect(0, 0, w, h);
+  if (!W) return;
+  const P = (W.patches || []).filter(p => Array.isArray(p.box) && p.box.length === 4);
+  const oil = (W.oil_wells || []).filter(t => Array.isArray(t)), sites = (W.sites || []).filter(s => Array.isArray(s.at));
+  const pos = Array.isArray(W.position) ? W.position : null;
+  $("worldCount").textContent = `${P.length} patches · ${oil.length} wells · ${sites.length} sites`;
+  if (!sites.length && !pos) return;
+  const legend = 18, vh = h - legend, edge = 9;
+  const pts = sites.length ? sites.map(s => s.at) : [pos];
+  const cx = pts.reduce((a, q) => a + q[0], 0) / pts.length, cy = pts.reduce((a, q) => a + q[1], 0) / pts.length;
+  const far = Math.max(...pts.map(q => Math.max(Math.abs(q[0] - cx) * vh / w, Math.abs(q[1] - cy))));
+  const R = Math.min(260, Math.max(90, far * 1.35));          // half the view's height, in tiles
+  const k = (vh / 2 - edge) / R, mid = vh / 2;
+  const X = x => w / 2 + (x - cx) * k, Y = y => mid + (y - cy) * k;
+  const inside = (x, y) => x >= edge && x <= w - edge && y >= edge && y <= vh - edge;
+  // a point beyond the view: where the line from the centre leaves it
+  const pin = (x, y) => {
+    const dx = x - w / 2, dy = y - mid, t = Math.min((w / 2 - edge) / Math.abs(dx || 1e-9), (mid - edge) / Math.abs(dy || 1e-9));
+    return [w / 2 + dx * t, mid + dy * t, Math.atan2(dy, dx)];
+  };
+  const arrow = (x, y, a, c, label) => {
+    g.save(); g.translate(x, y); g.rotate(a); g.fillStyle = c;
+    g.beginPath(); g.moveTo(6, 0); g.lineTo(-4, -5); g.lineTo(-4, 5); g.closePath(); g.fill(); g.restore();
+    if (label) {
+      g.fillStyle = "#a8a197"; g.font = "500 10px 'JetBrains Mono', Consolas, monospace"; g.textBaseline = "middle";
+      const tw = g.measureText(label).width, lx = Math.min(w - tw - 2, Math.max(2, x - Math.cos(a) * (tw / 2 + 10) - tw / 2));
+      const ly = Math.min(vh - 6, Math.max(6, y - Math.sin(a) * 12));
+      g.fillText(label, lx, ly);
+    }
+  };
+  // a faint grid every 50 tiles (100 when the view is wide)
+  const step = R > 160 ? 100 : 50;
+  g.strokeStyle = "rgba(255,255,255,.05)"; g.lineWidth = 1;
+  for (let gx = Math.ceil((cx - w / 2 / k) / step) * step; X(gx) < w; gx += step) { g.beginPath(); g.moveTo(Math.round(X(gx)) + .5, 0); g.lineTo(Math.round(X(gx)) + .5, vh); g.stroke(); }
+  for (let gy = Math.ceil((cy - mid / k) / step) * step; Y(gy) < vh; gy += step) { g.beginPath(); g.moveTo(0, Math.round(Y(gy)) + .5); g.lineTo(w, Math.round(Y(gy)) + .5); g.stroke(); }
+  const seen = new Set(), pins = [];
+  g.save(); g.beginPath(); g.rect(0, 0, w, vh); g.clip();
+  for (const p of [...P].sort((a, b) => (b.tiles || 0) - (a.tiles || 0))) {
+    const c = (ORE[p.name] || ["#6f6960"])[0], mx = (p.box[0] + p.box[2]) / 2, my = (p.box[1] + p.box[3]) / 2;
+    seen.add(p.name);
+    if (!inside(X(mx), Y(my))) { pins.push([X(mx), Y(my), c, Math.hypot(mx - cx, my - cy)]); continue; }
+    const bw = Math.max(4, (p.box[2] - p.box[0]) * k), bh = Math.max(4, (p.box[3] - p.box[1]) * k);
+    const bx = X(mx) - bw / 2, by = Y(my) - bh / 2;
+    g.fillStyle = c; g.globalAlpha = .9; g.fillRect(bx, by, bw, bh); g.globalAlpha = 1;
+    g.strokeStyle = "rgba(255,255,255,.25)"; g.strokeRect(Math.round(bx) + .5, Math.round(by) + .5, Math.round(bw) - 1, Math.round(bh) - 1);
+  }
+  if (oil.length) seen.add("crude-oil");
+  const farOil = [];
+  for (const t of oil) {
+    const x = X(t[0] + .5), y = Y(t[1] + .5);
+    if (!inside(x, y)) { farOil.push([x, y, t]); continue; }
+    g.fillStyle = ORE["crude-oil"][0]; g.beginPath(); g.arc(x, y, 2.5, 0, Math.PI * 2); g.fill();
+  }
+  if (farOil.length) {                                           // one arrow for the nearest far well
+    const [x, y, t] = farOil.reduce((a, b) => Math.hypot(a[2][0] - cx, a[2][1] - cy) < Math.hypot(b[2][0] - cx, b[2][1] - cy) ? a : b);
+    pins.push([x, y, ORE["crude-oil"][0], Math.hypot(t[0] - cx, t[1] - cy)]);
+  }
+  const acc = getComputedStyle(document.documentElement).getPropertyValue("--acc").trim() || "#ff9a1f";
+  g.fillStyle = acc;
+  for (const s of sites) { const x = X(s.at[0]), y = Y(s.at[1]); if (inside(x, y)) g.fillRect(Math.round(x) - 1.5, Math.round(y) - 1.5, 3, 3); }
+  g.restore();
+  // far patches: an arrow on the edge each, labels for the nearest few so they never pile up
+  pins.sort((a, b) => a[3] - b[3]);
+  const labelled = [];
+  pins.forEach(([x, y, c, dist]) => {
+    const [px, py, a] = pin(x, y);
+    const room = labelled.every(q => Math.hypot(q[0] - px, q[1] - py) > 34);
+    arrow(px, py, a, c, room && labelled.length < 6 ? `${Math.round(dist)}` : "");
+    if (room) labelled.push([px, py]);
+  });
+  // the character: a white ring that breathes (on the edge, pointing at it, while it walks far out)
+  if (pos) {
+    const x = X(pos[0]), y = Y(pos[1]);
+    if (inside(x, y)) {
+      const r = 4.5 + Math.sin(performance.now() / 320) * 1.2;
+      g.strokeStyle = "#f4efe6"; g.lineWidth = 2; g.beginPath(); g.arc(x, y, r, 0, Math.PI * 2); g.stroke(); g.lineWidth = 1;
+    } else {
+      const [px, py, a] = pin(x, y);
+      arrow(px, py, a, "#f4efe6", `bot ${Math.round(Math.hypot(pos[0] - cx, pos[1] - cy))}`);
+    }
+  }
+  // legend: the colours on the map, and the grid's step
+  g.font = "500 11px 'JetBrains Mono', Consolas, monospace"; g.textBaseline = "middle";
+  let lx = 0; const ly = h - legend / 2;
+  for (const [name, [c, label]] of Object.entries(ORE)) {
+    if (!seen.has(name)) continue;
+    g.fillStyle = c; g.fillRect(lx, ly - 4, 8, 8); g.fillStyle = "#a8a197"; g.fillText(label, lx + 12, ly); lx += 20 + g.measureText(label).width;
+  }
+  g.fillStyle = acc; g.fillRect(lx, ly - 2, 4, 4); g.fillStyle = "#a8a197"; g.fillText("base", lx + 8, ly);
+  if (lx + 44 + 64 < w) { g.textAlign = "right"; g.fillStyle = "#6f6960"; g.fillText(`grid ${step}`, w, ly); g.textAlign = "left"; }
+}
+
+// ---------------------------------------------------------------- Atlas: the base map, the blueprint, the loop
+const AT = { plan: null, rev: null, img: null, live: null, flash: new Map(), lastCur: 0, lastJob: null, run: null };
+const TONE = { ".": null, "~": "#22303a", "#": "#6f6960", i: "#56626b", c: "#7a5440", k: "#0e0d0c", s: "#6d6350", o: "#4c3c58", u: "#3f5a3a",
+  "=": "#3d3934", "-": "#2f2c28" };
+async function atlasPlan(d) {
+  const a = d.atlas;
+  if (!a || a.plan_rev == null || a.plan_rev === AT.rev) return;
+  AT.rev = a.plan_rev;
+  try {
+    const r = await fetch(`/api/atlas-plan/${d.id}`, { cache: "no-store" });
+    if (!r.ok) return;
+    AT.plan = await r.json();
+    const P = AT.plan, c = document.createElement("canvas");
+    c.width = P.w; c.height = P.h;
+    const g = c.getContext("2d");
+    P.raster.forEach((row, y) => { for (let x = 0; x < row.length; x++) { const t = TONE[row[x]]; if (t) { g.fillStyle = t; g.fillRect(x, y, 1, 1); } } });
+    AT.img = c;
+    AT.byJob = new Map(P.blocks.map(b => [b.job, b]));
+    AT.bySlot = new Map(P.blocks.map(b => [b.slot, b]));
+  } catch (e) { console.error(e); }
+}
+function hazard(g, x, y, w, h, t) {                 // marching hazard stripes, the overlay's "working" look
+  g.save(); g.beginPath(); g.rect(x, y, w, h); g.clip();
+  g.fillStyle = "#1f1306"; g.fillRect(x, y, w, h); g.fillStyle = "#ff9a1f";
+  const off = (t / 32) % 14;
+  for (let k = -h - 14; k < w + h; k += 14) { g.beginPath(); g.moveTo(x + k + off, y + h); g.lineTo(x + k + off + 7, y + h); g.lineTo(x + k + off + 7 + h, y); g.lineTo(x + k + off + h, y); g.fill(); }
+  g.restore();
+}
+function drawMap(t) {
+  const P = AT.plan, L = AT.live, cv = $("mapc"), g = cv.getContext("2d");
+  g.clearRect(0, 0, cv.width, cv.height);
+  if (!P || !AT.img) return;
+  const k = Math.min(cv.width / P.w, cv.height / P.h), ox = (cv.width - P.w * k) / 2, oy = (cv.height - P.h * k) / 2;
+  const X = wx => ox + (wx - P.origin[0]) / P.cell * k, Y = wy => oy + (wy - P.origin[1]) / P.cell * k;
+  g.imageSmoothingEnabled = false;
+  g.drawImage(AT.img, ox, oy, P.w * k, P.h * k);
+  const jobs = (L && L.jobs) || {};
+  const bus = jobs.bus || jobs["bus:line"] || [0, 1];               // the spine lights up as its belts go down
+  const bf = Math.min(1, bus[1] ? bus[0] / Math.max(1, P.bus || bus[1]) : 0);
+  if (bf > 0) {
+    g.globalAlpha = .55 * bf; g.fillStyle = "#ff9a1f";
+    P.raster.forEach((row, y) => { for (let x = 0; x < row.length; x++) if (row[x] === "=") g.fillRect(ox + x * k, oy + y * k, k + .5, k + .5); });
+    g.globalAlpha = 1;
+  }
+  let built = 0, total = 0;
+  for (const s of P.slots) {
+    const [x0, y0, w, h] = s.rect, b = AT.bySlot.get(s.id);
+    const px = X(x0), py = Y(y0), pw = w / P.cell * k, ph = h / P.cell * k;
+    const st = b ? (jobs[b.job] || [0, b.ents.length, 0]) : null;
+    if (b) total++;
+    if (b && L && L.job === b.job && st[0] < st[1]) {
+      hazard(g, px, py, pw, ph, t);
+      g.strokeStyle = `rgba(255,154,31,${.5 + .5 * Math.sin(t / 180)})`; g.lineWidth = 2; g.strokeRect(px - 2, py - 2, pw + 4, ph + 4);
+    } else if (b && st[0] >= st[1] && st[1] > 0) {
+      built++; g.fillStyle = st[2] ? "#ff5340" : "#ff9a1f"; g.fillRect(px, py, pw, ph);
+      g.fillStyle = "rgba(31,19,6,.35)"; g.fillRect(px, py + ph * .66, pw, ph * .34);   // a sliver of shade: a solid block
+    } else if (b && st[0] > 0) {
+      g.fillStyle = "rgba(255,154,31,.35)"; g.fillRect(px, py, pw * st[0] / st[1], ph);
+      g.strokeStyle = "#57514a"; g.lineWidth = 1; g.strokeRect(px + .5, py + .5, pw - 1, ph - 1);
+    } else {
+      g.strokeStyle = b ? "#57514a" : "#3d3934"; g.lineWidth = 1; g.setLineDash(b ? [] : [2, 2]);
+      g.strokeRect(px + .5, py + .5, pw - 1, ph - 1); g.setLineDash([]);
+    }
+  }
+  setText("mapCount", total ? `${built}/${total}` : "");
+  if (L && L.pos) {                                                 // the character
+    const x = X(L.pos[0]), y = Y(L.pos[1]), r = 3 + 3 * ((t / 600) % 1);
+    g.strokeStyle = `rgba(244,239,230,${1 - (t / 600) % 1})`; g.lineWidth = 2; g.beginPath(); g.arc(x, y, r + 3, 0, 7); g.stroke();
+    g.fillStyle = "#f4efe6"; g.beginPath(); g.arc(x, y, 3, 0, 7); g.fill();
+  }
+}
+function drawBlueprint(t) {
+  const L = AT.live, cv = $("bpc"), g = cv.getContext("2d");
+  g.clearRect(0, 0, cv.width, cv.height);
+  if (L && L.job !== AT.lastJob) {
+    if (AT.byJob && AT.byJob.get(AT.lastJob)) AT.prev = AT.lastJob;   // between jobs the last block stays on screen
+    AT.flash.clear(); AT.lastJob = L.job;
+  }
+  if (L && !L.job && AT.prev && AT.byJob) {
+    const pb = AT.byJob.get(AT.prev);
+    L.job = AT.prev; L.cur = pb.ents.map((_, i) => i); AT.lastJob = AT.prev;
+    for (const i of L.cur) AT.flash.set(i, -1e9);
+  }
+  const b = L && AT.byJob && AT.byJob.get(L.job);
+  if (L && L.job && L.job.startsWith("bus")) return drawBus(g, cv, L, t);
+  if (!b) { setText("bpName", L && L.job ? nice((L.job.split(":")[1] || L.job.split("@")[0]).replace(/^(make|smelt)-/, "")) : "–"); return; }
+  const k = Math.min(cv.width / b.w, cv.height / b.d), ox = (cv.width - b.w * k) / 2, oy = (cv.height - b.d * k) / 2;
+  const on = new Set(L.cur || []);
+  for (const i of on) if (!AT.flash.has(i)) AT.flash.set(i, t);
+  g.fillStyle = "#1d1b19"; g.fillRect(ox, oy - 3, b.w * k, 2);       // the corridor edge the block faces
+  b.ents.forEach(([x, y, w, h, kind], i) => {
+    const px = ox + x * k, py = oy + y * k, pw = w * k, ph = h * k, placed = on.has(i);
+    const age = placed ? t - AT.flash.get(i) : 1e9, glow = Math.max(0, 1 - age / 450);
+    if (kind === "m") {
+      if (placed) { g.fillStyle = "#ff9a1f"; g.fillRect(px + 1, py + 1, pw - 2, ph - 2); g.fillStyle = "rgba(31,19,6,.4)"; g.fillRect(px + pw * .3, py + ph * .3, pw * .4, ph * .4); }
+      else { g.strokeStyle = "#57514a"; g.lineWidth = 1; g.strokeRect(px + 1.5, py + 1.5, pw - 3, ph - 3); }
+    } else {
+      const c = { b: "#a8a197", u: "#a8a197", s: "#f4efe6", i: "#ff9a1f", p: "#6f6960", f: "#8a96a0" }[kind] || "#a8a197";
+      const sz = kind === "i" || kind === "p" ? .5 : .8;
+      g.fillStyle = placed ? c : "#2f2c28";
+      g.fillRect(px + pw * (1 - sz) / 2, py + ph * (1 - sz) / 2, pw * sz, ph * sz);
+    }
+    if (glow > 0) { g.fillStyle = `rgba(255,255,255,${.85 * glow})`; g.fillRect(px - 1, py - 1, pw + 2, ph + 2); }
+  });
+  const st = (L.jobs || {})[L.job] || [on.size, b.ents.length];
+  const pct = Math.min(100, Math.round(100 * st[0] / Math.max(1, st[1])));
+  setText("bpName", b.product === "research" ? "labs" : nice(b.product));
+  setText("bpPct", `${pct}%`);
+  $("bpBar").style.width = `${pct}%`; $("bpBar").classList.toggle("done", pct >= 100);
+}
+function drawBus(g, cv, L, t) {                    // the bus: belt lanes running out along the spine, items riding them
+  const st = (L.jobs || {}).bus || (L.jobs || {})["bus:line"] || [0, 1];
+  const p = Math.min(1, st[0] / Math.max(1, st[1])), lanes = 12, gap = cv.height / (lanes + 1);
+  for (let i = 0; i < lanes; i++) {
+    const y = gap * (i + 1), len = cv.width * Math.max(0, Math.min(1, p * 1.25 - i * .02));
+    g.fillStyle = "#2f2c28"; g.fillRect(8, y - 3, cv.width - 16, 6);
+    g.fillStyle = "#a8a197"; g.fillRect(8, y - 3, Math.max(0, len - 16), 6);
+    g.fillStyle = "#ff9a1f";
+    for (let x = 8 + ((t / 14 + i * 9) % 22); x < len - 10; x += 22) g.fillRect(x, y - 2, 4, 4);
+  }
+  setText("bpName", "bus"); setText("bpPct", `${Math.round(p * 100)}%`);
+  $("bpBar").style.width = `${Math.round(p * 100)}%`; $("bpBar").classList.toggle("done", p >= 1);
+}
+const LOOP_ORDER = ["see", "plan", "design", "build", "measure", "judge"];
+function renderLoop() {
+  const L = AT.live || {}, ph = L.phase || "see";
+  for (const n of [...LOOP_ORDER, "llm"]) {
+    const el = $(`l-${n}`); if (!el) continue;
+    el.classList.toggle("on", n === ph);
+    el.classList.toggle("was", n !== ph && LOOP_ORDER.indexOf(n) >= 0 && LOOP_ORDER.indexOf(n) < LOOP_ORDER.indexOf(ph));
+  }
+  const prev = { see: null, plan: "see", design: "plan", build: "design", measure: "build", judge: "measure", llm: "llm" }[ph];
+  for (const n of [...LOOP_ORDER, "llm"]) { const e = $(`e-${n}`); if (e) e.classList.toggle("hot", n === prev || (ph === "design" && n === "judge" && L.era)); }
+  const llm = L.llm || {};
+  setText("llmCost", llm.calls ? `AI $${(+llm.spent).toFixed(3)}` : "AI");
+  setText("bill", `$${(+(llm.spent || 0)).toFixed(3)}`);
+}
+function atlasRender(d) {
+  document.body.classList.toggle("atlas", !!d.atlas);
+  if (!d.atlas) return;
+  AT.live = d.atlas;
+  atlasPlan(d);
+  renderLoop();
+}
+function atlasFrame(t) { if (AT.live) { try { drawMap(t); drawBlueprint(t); } catch (e) { console.error(e); } } requestAnimationFrame(atlasFrame); }
+requestAnimationFrame(atlasFrame);
 
 // ---------------------------------------------------------------- data: the live run, or a demo
 async function poll() {
@@ -792,6 +1147,7 @@ async function poll() {
     if (r.ok) render(await r.json());
   } catch { /* the monitor restarts: keep the last frame */ }
 }
+const DEMO_WORLD = {"patches":[{"name":"coal","box":[57,-168,70,-153],"tiles":147},{"name":"copper-ore","box":[421,-406,437,-392],"tiles":112},{"name":"coal","box":[502,-227,532,-198],"tiles":552},{"name":"coal","box":[54,-2,75,17],"tiles":249},{"name":"copper-ore","box":[442,-517,487,-467],"tiles":1242},{"name":"copper-ore","box":[47,15,70,37],"tiles":351},{"name":"iron-ore","box":[-70,-11,-37,23],"tiles":791},{"name":"stone","box":[-35,44,-20,58],"tiles":171},{"name":"stone","box":[-239,-81,-221,-65],"tiles":208},{"name":"coal","box":[-190,22,-178,38],"tiles":137},{"name":"stone","box":[476,215,495,237],"tiles":282},{"name":"stone","box":[-48,362,-30,376],"tiles":174},{"name":"iron-ore","box":[-402,122,-361,144],"tiles":666},{"name":"coal","box":[-467,70,-423,109],"tiles":1126},{"name":"uranium-ore","box":[-343,452,-314,481],"tiles":600}],"oil_wells":[[180,96],[184,99],[188,94]],"sites":[{"kind":"smelter-iron-ore","at":[-38,2]},{"kind":"storage","at":[24,4]},{"kind":"steam_power","at":[16,-30]},{"kind":"steam_power","at":[30,-28]},{"kind":"labs","at":[22,-22]},{"kind":"electric_mine","at":[-46,12]},{"kind":"electric_mine","at":[54,26]},{"kind":"electric_mine","at":[66,8]},{"kind":"steam_power","at":[12,-26]},{"kind":"factory","at":[-78,5]},{"kind":"poles","at":[-55,-20]},{"kind":"steam_power","at":[8,-30]},{"kind":"labs","at":[14,34]},{"kind":"electric_mine","at":[62,30]},{"kind":"electric_mine","at":[-52,-6]},{"kind":"poles","at":[-50,8]},{"kind":"electric_mine","at":[56,14]},{"kind":"poles","at":[60,22]},{"kind":"poles","at":[42,46]},{"kind":"electric_mine","at":[-51,2]},{"kind":"electric_mine","at":[70,12]},{"kind":"electric_mine","at":[63,22]},{"kind":"factory","at":[19,8]},{"kind":"poles","at":[6,20]},{"kind":"factory","at":[-13,-12]},{"kind":"electric_mine","at":[70,2]},{"kind":"labs","at":[-21,-38]},{"kind":"unfinished research_station","at":[59,-38]},{"kind":"electric_mine","at":[-56,12]},{"kind":"electric_mine","at":[-28,44]},{"kind":"electric_mine","at":[-49,18]},{"kind":"smelter_column","at":[-50,-20]},{"kind":"pumpjack","at":[64,-254]},{"kind":"factory","at":[-29,16]},{"kind":"smelter-stone","at":[-26,44]}]};   // a real run's map (20261124-120854)
 function demo() {                                    // fake data that moves, to place the overlay in OBS
   let t = 290, k = 0;
   const STG = ["Power and labs", "Red science automated", "Green science automated", "Workshop floor and electric mines", "Oil: pumpjacks and a refinery",
@@ -845,7 +1201,8 @@ function demo() {                                    // fake data that moves, to
       overseer: { model: "gpt-6.1-sol", thinking: thinkPhase >= 80 && thinkPhase < 100, next_minute: t + 3 - (k % 30) * .1, cost_usd: .87, calls: 27 },
       strategist: { thinking_since: thinkPhase < 30 ? now() - thinkPhase * .1 : null, cost_usd: .32, calls: 31,
         last: { note: "Replace the starved belt factory with a larger one near spare iron capacity, then advance plastics and chemical science.", minute: 294 } },
-      assessor: { cost_usd: .86, calls: 213 }, results, events: events.slice(-30) } });
+      assessor: { cost_usd: .86, calls: 213 }, results, events: events.slice(-30),
+      world: { ...DEMO_WORLD, position: [14 + 30 * Math.sin(k / 40), -1 + 20 * Math.cos(k / 40)] } } });
   }, 100);
 }
 if (Q.get("demo") === "1") demo(); else { poll(); setInterval(poll, 1000); }

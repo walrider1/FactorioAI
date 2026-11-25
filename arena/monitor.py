@@ -85,6 +85,118 @@ def _head_scan(path: Path, max_lines: int = 40) -> dict | None:
     return None
 
 
+# ---------------------------------------------------------------- real time, for the people watching
+# The bot thinks in game time; viewers see real time since the run started. A run's action log stamps every action
+# with the wall clock ("t") and the game tick ("tick_after"), so it maps one to the other. Real time counts only
+# while the run plays: a gap of more than GAP seconds between actions (stopped, saved, resumed later) adds nothing.
+GAP = 120.0
+_T_RE = re.compile(rb'"t":([0-9]+(?:\.[0-9]+)?)')
+_TICK_RE = re.compile(rb'"tick_after":([0-9]+)')
+
+
+class RealClock:
+    """Game tick -> real seconds played, read incrementally from a run's actions.jsonl."""
+
+    def __init__(self, path: Path):
+        self.path, self.off = path, 0
+        self.ticks: list[int] = []
+        self.real: list[float] = []          # real seconds played at each sample
+        self.last_t: float | None = None
+        self.played = 0.0
+
+    def update(self) -> "RealClock":
+        try:
+            size = self.path.stat().st_size
+            if size < self.off:              # a new file: start over
+                self.__init__(self.path)
+            if size == self.off:
+                return self
+            with open(self.path, "rb") as fh:
+                fh.seek(self.off)
+                chunk = fh.read()
+        except OSError:
+            return self
+        end = chunk.rfind(b"\n")
+        if end < 0:
+            return self
+        self.off += end + 1
+        for line in chunk[:end].split(b"\n"):
+            mt, mk = _T_RE.search(line), _TICK_RE.search(line)
+            if not mt:
+                continue
+            t = float(mt.group(1))
+            if self.last_t is not None:
+                self.played += min(max(0.0, t - self.last_t), GAP)
+            self.last_t = t
+            if mk:
+                tick = int(mk.group(1))
+                if not self.ticks or tick >= self.ticks[-1]:
+                    self.ticks.append(tick)
+                    self.real.append(self.played)
+        return self
+
+    def now(self, wall: float) -> float:
+        """Real seconds played up to `wall` (the clock runs on while actions keep coming)."""
+        if self.last_t is None:
+            return 0.0
+        return self.played + (min(wall - self.last_t, GAP) if wall - self.last_t < GAP else 0.0)
+
+    def at_tick(self, tick: float) -> float | None:
+        if not self.ticks:
+            return None
+        import bisect
+        i = bisect.bisect_left(self.ticks, tick)
+        if i <= 0:
+            return self.real[0]
+        if i >= len(self.ticks):
+            return self.real[-1]
+        t0, t1 = self.ticks[i - 1], self.ticks[i]
+        r0, r1 = self.real[i - 1], self.real[i]
+        return r0 + (r1 - r0) * ((tick - t0) / (t1 - t0) if t1 > t0 else 0.0)
+
+    def ratio(self) -> float:
+        """Real seconds per game second lately (to turn recent game durations into real ones)."""
+        n = len(self.ticks)
+        if n < 2:
+            return 1.0
+        j = max(0, n - 400)
+        dt, dr = self.ticks[-1] - self.ticks[j], self.real[-1] - self.real[j]
+        return (dr / (dt / 60.0)) if dt > 0 else 1.0
+
+
+def real_minutes(clock: RealClock, game_minutes: dict) -> dict:
+    out = {}
+    for k, v in (game_minutes or {}).items():
+        if isinstance(v, (int, float)):
+            r = clock.at_tick(v * 3600)
+            if r is not None:
+                out[k] = round(r / 60, 2)
+    return out
+
+
+def last_action(tail: list[dict]) -> dict:
+    """What the action log says the bot did last: wall time, game tick, a verb and its object, and where the
+    character is. Lets the overlay stay right while a bot works without reporting (Atlas's opening)."""
+    out: dict = {}
+    for r in reversed(tail):
+        a = r.get("action") or {}
+        d = r.get("data") or {}
+        tick = r.get("tick_after") or d.get("tick")
+        if tick and "tick" not in out:
+            out["tick"] = tick
+        if "acted" not in out and a.get("type") not in (None, "observe", "stats", "scan"):
+            out["acted"] = r.get("t")
+            out["act"] = a.get("type")
+            techs = a.get("techs") if isinstance(a.get("techs"), list) else [a.get("tech")]
+            out["act_what"] = a.get("entity") or a.get("recipe") or a.get("item") or (techs[0] if techs else None)
+        pos = d.get("position") if isinstance(d.get("position"), dict) else None
+        if pos and "act_pos" not in out:
+            out["act_pos"] = [round(pos["x"], 1), round(pos["y"], 1)]
+        if len(out) >= 5:
+            break
+    return out
+
+
 def _short_action(a: dict) -> str:
     t = a.get("type", "?")
     if t == "batch":
@@ -120,7 +232,17 @@ def stage_splits(live: dict) -> dict[str, float]:
         if s.get("done") and isinstance(s.get("done_minute"), (int, float)):
             out.setdefault(s.get("name"), round(float(s["done_minute"]), 2))
     ms = live.get("milestones") or {}
+    now_done = {s.get("name") for s in (live.get("roadmap") or {}).get("stages") or [] if s.get("done")}
     for name, mid in STAGE_MILESTONE.items():
+        if mid.endswith("-auto"):
+            # a science stage is the game's automated milestone (hand-crafted packs never count). Bots before
+            # 2026-11-25 stamped it from the production statistics, crafting included: run 20261124-165213 said
+            # red science at minute 27.4, the game's milestone came at 50.5
+            if isinstance(ms.get(mid), (int, float)):
+                out[name] = round(ms[mid] / 3600, 2)
+            elif name not in now_done:
+                out.pop(name, None)
+            continue
         if name not in out and isinstance(ms.get(mid), (int, float)):
             out[name] = round(ms[mid] / 3600, 2)
     return out
@@ -231,6 +353,15 @@ class Runs:
         self._cache[(path, kind)] = (mt, val)
         return val
 
+    def clock(self, d: Path) -> RealClock:
+        """The run's real-time clock, kept between requests and read on from where it stopped."""
+        if not hasattr(self, "_clocks"):
+            self._clocks = {}
+        c = self._clocks.get(d)
+        if c is None:
+            c = self._clocks[d] = RealClock(d / "actions.jsonl")
+        return c.update()
+
     def personal_best(self, d: Path, same_map: bool = False) -> dict | None:
         """The best earlier run of the same task (on the same map, if asked) to race, as splits."""
         meta = _json(d / "meta.json") or {}
@@ -242,6 +373,8 @@ class Runs:
             if om.get("task") != meta.get("task") or (same_map and om.get("map") != meta.get("map")):
                 continue
             sp = self._cached(o / "bot_live.json", "splits", lambda p: stage_splits(_json(p) or {}))
+            if sp:                                       # raced in real time: each run's own clock
+                sp = real_minutes(self.clock(o), sp)
             if sp:
                 others.append((o.name, sp))
                 maps[o.name] = om.get("map")
@@ -298,20 +431,37 @@ class Runs:
         rm = live.get("roadmap") or {}
         out["roadmap"] = {k: rm.get(k) for k in ("stages", "power", "science", "plates", "research")} if rm else None
         out["sites"] = len(live.get("base") or [])
+        # the overlay's world map: ore patches and oil wells the bot found, its sites, where it is
+        out["world"] = {"patches": live.get("patches") or [], "oil_wells": live.get("oil_wells") or [],
+                        "position": live.get("position"),
+                        "sites": [{"kind": s.get("kind"), "at": s.get("at") or s.get("near")}
+                                  for s in (live.get("base") or []) if s.get("at") or s.get("near")]}
         sup = live.get("supervisor") or {}
         out["supervisor_notes"] = (sup.get("notes") or [])[-4:]
-        return {"id": d.name, "title": task.get("title"), "map": meta.get("map"),
+        clock = self.clock(d)
+        real = {"now": round(clock.now(time.time()) / 60, 3), "ratio": round(clock.ratio(), 4),
+                "game": round((clock.ticks[-1] if clock.ticks else 0) / 3600, 3)}
+        atlas = _json(d / "atlas_live.json")                # the Atlas bot's plan-and-build feed (if it is Atlas)
+        if atlas is not None:
+            plan = d / "atlas_plan.json"
+            atlas["plan_rev"] = int(plan.stat().st_mtime) if plan.exists() else None
+            atlas.update(last_action(tail))                  # the game's own record: clock, last act, position
+        return {"id": d.name, "title": task.get("title"), "map": meta.get("map"), "atlas": atlas,
                 "milestones": [{"id": m["id"], "name": m["name"], "points": m["points"]}
                                for m in (task.get("score") or {}).get("milestones", [])],
                 "score": (result or {}).get("score", last.get("score")), "finished": bool(result),
                 "stale": stale, "live": out, "now": time.time(),
-                "splits": stage_splits(live), "pb": self.personal_best(d, same_map),
+                "splits": stage_splits(live), "pb": self.personal_best(d, same_map), "real": real,
+                "splits_real": real_minutes(clock, stage_splits(live)),
+                "milestones_real": real_minutes(clock, {k: v / 3600 for k, v in (live.get("milestones") or {}).items()
+                                                        if isinstance(v, (int, float))}),
                 "stream": self.stream_counters(d)}
 
     def stream_counters(self, d: Path | None = None) -> dict:
         """The show's counters: which run of the stream this is, and how many self-upgrades so far.
         runs/watch/stats.json (kept by stream/watchdog.py): {"since": "YYYYMMDD-HHMMSS" (UTC, like run ids),
-        "upgrades": n, "upgrading": bool}. Without it, every run of the task counts."""
+        "upgrades": n, "upgrading": bool, "first_run": n (the number the first run since then gets, default 1)}.
+        Without it, every run of the task counts."""
         st = _json(self.root / "watch" / "stats.json") or {}
         d = d or self.latest()
         out = {"upgrades": int(st.get("upgrades") or 0), "upgrading": bool(st.get("upgrading")), "run_no": None,
@@ -324,7 +474,7 @@ class Runs:
             o / "meta.json", "task", lambda p: (_json(p) or {}).get("task")) == task)
         if d.name not in names:                 # the run that was playing when the counters were reset
             names.insert(0, d.name)
-        out["run_no"] = names.index(d.name) + 1
+        out["run_no"] = names.index(d.name) + max(1, int(st.get("first_run") or 1))
         return out
 
     def detail(self, d: Path) -> dict:
@@ -370,12 +520,15 @@ def _handler(runs: Runs):
             pass
 
         def _send(self, code: int, body: bytes, ctype: str) -> None:
-            self.send_response(code)
-            self.send_header("Content-Type", ctype)
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            try:
+                self.send_response(code)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
+                pass                                  # the viewer hung up (OBS refreshing its page): nothing to say
 
         def do_GET(self):  # noqa: N802
             path = self.path.split("?")[0]
@@ -393,6 +546,13 @@ def _handler(runs: Runs):
                         return self._send(404, b'{"error":"no such run"}', "application/json")
                     same_map = "pb=map" in (self.path.split("?", 1)[1:] or [""])[0].split("&")
                     return self._send(200, json.dumps(runs.overlay(d, same_map), default=str).encode(), "application/json")
+                if path.startswith("/api/atlas-plan/"):            # the Atlas plan: large, fetched once per change
+                    rid = path.rsplit("/", 1)[-1]
+                    d = runs.latest() if rid == "latest" else runs.find(rid)
+                    f = d / "atlas_plan.json" if d is not None else None
+                    if f is None or not f.exists():
+                        return self._send(404, b'{"error":"no plan"}', "application/json")
+                    return self._send(200, f.read_bytes(), "application/json")
                 if path == "/api/stream":
                     return self._send(200, json.dumps(runs.stream_counters()).encode(), "application/json")
                 if path == "/api/runs":

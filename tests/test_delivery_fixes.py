@@ -58,7 +58,7 @@ def test_a_goal_over_its_budget_is_stopped_at_a_safe_moment_and_counts_as_a_fail
         crew.checkpoint()
     assert crew.drop_current
     assert crew.goal_budget({"do": "wait", "seconds": 60}) == 4.0
-    assert crew.goal_budget({"do": "research", "tech": "x"}) is None
+    assert crew.goal_budget({"do": "research", "tech": "x"}) == 25.0
     assert crew.goal_budget({"do": "replace", "site": 5, "with": {"do": "build", "module": "factory"}}) == 38.0
 
 

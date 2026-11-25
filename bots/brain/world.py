@@ -365,20 +365,30 @@ class FreeWorld(ab.World):
         """How far from the oil search's home the scans have covered, in tiles."""
         return int(self.oil_rings * self.oil_step() + self.scan_radius)
 
-    def oil_wells(self, near: tuple[float, float] | None = None) -> list[tuple[float, float]]:
+    def oil_wells(self, near: tuple[float, float] | None = None, more: bool = False) -> list[tuple[float, float]]:
         """Crude-oil wells (each one resource entity, where a pumpjack's centre goes), nearest `near` first.
         Wells sit a few tiles apart, so the default scan (patches of 4+ tiles) misses them: scan for single
         wells, look at the nearest fields to learn every well in them, explore when none is in range.
 
         The search remembers how far it went: rings around one home (the base), each farther out, with as many
         stops as it takes for the scans to cover the ring. A goal walks at most OIL_RINGS_PER_TRY new rings, so
-        the next pumpjack goal goes on where this one stopped instead of walking the same rings again."""
+        the next pumpjack goal goes on where this one stopped instead of walking the same rings again.
+
+        more: the wells known are all taken, so the rings go on outward until a field nobody knows yet shows up
+        (run 20261124-015025: two wells known, both pumped for plastic, and chemical science never got crude)."""
         def scan_oil() -> list[dict]:
             res = self.run.scan(self.scan_radius, resources=["crude-oil"], min_tiles=1)
             self._seen_tick(res)
             return (res.get("data") or {}).get("patches") or [] if res.get("ok") else []
+        known = set(self.resources.get("crude-oil", ()))
+
+        def fresh(fs: list[dict]) -> list[dict]:        # fields with no well we knew of before
+            return [f for f in fs if not any(math.dist(ab.tile(f["nearest"]["x"], f["nearest"]["y"]), k) <= 24
+                                             for k in known)]
         fields = scan_oil()
-        if not fields and not self.resources.get("crude-oil"):
+        if more and not fresh(fields):
+            fields = []
+        if not fields and (more or not self.resources.get("crude-oil")):
             if self.oil_home is None:
                 self.oil_home = tuple(near or self.pos)
             home, step = self.oil_home, self.oil_step()
@@ -398,6 +408,8 @@ class FreeWorld(ab.World):
                         pass
                     self.sleep_ticks(720)                 # the game charts the map around the character
                     fields = scan_oil()
+                    if more:
+                        fields = fresh(fields)
                     if fields:
                         break
                 if not fields:

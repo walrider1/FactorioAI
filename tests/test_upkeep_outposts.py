@@ -107,11 +107,12 @@ def test_an_outpost_lays_drills_on_one_side_of_a_collector_that_runs_toward_the_
     site = outposts.Outpost().build(w, crew.base, {"resource": "iron-ore", "count": 6, "dense": False})
     drills = [e for e in w.placed if e[0] == "electric-mining-drill"]
     belts_ = [e for e in w.placed if e[0] == "transport-belt"]
-    assert len(drills) == 6 and len(belts_) == 18 and all(e[3] == "west" for e in belts_)   # the base is west
+    # iron: at least OUTPOST_MIN drills asked; the row takes what the patch holds (10 here), 3 belts each
+    assert len(drills) == 10 and len(belts_) == 30 and all(e[3] == "west" for e in belts_)   # the base is west
     head = tuple(site.params["head"])
     assert head[0] == min(e[1] for e in belts_) - 0.5 and (head[0] - 1, head[1]) in w.keepout
     assert all(abs(d[2] - 0.5 - (head[1] + 2)) < 1e-9 for d in drills)      # every drill drops on that belt
-    assert site.poles and site.params["per_minute"] == 180.0
+    assert site.poles and site.params["per_minute"] == 300.0
 
 
 def test_an_outpost_needs_a_patch_nobody_works():
@@ -165,7 +166,7 @@ def test_the_outlook_prepares_the_next_patch_before_the_drills_stop():
     crew.patch_full = lambda r: False
     o = outposts.outlook(crew)["iron-ore"]
     assert o["minutes_left"] == 167 and 200 < o["next_patch"]["distance"] < 240
-    assert o["fix"] == {"do": "build", "module": "outpost", "resource": "iron-ore", "count": 8}
+    assert o["fix"] == {"do": "build", "module": "outpost", "resource": "iron-ore", "count": 16}
     w.patches.pop()                                               # nothing else known: go and look
     assert outposts.outlook(crew)["iron-ore"]["fix"] == {"do": "scout", "resource": "iron-ore"}
 

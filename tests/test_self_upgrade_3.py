@@ -54,11 +54,12 @@ def test_a_source_beyond_a_links_reach_is_refused_with_a_trunk_goal_named():
 
 
 def test_a_route_that_detours_past_a_links_length_is_left_to_a_trunk():
-    wall = {(50, y) for y in range(-65, 66)}
+    # in reach (180 tiles), but going round the wall (inside the 70-tile detour) is ~310 belts, past LINK_ROUTE_MAX
+    wall = {(90, y) for y in range(-65, 66)}
     crew = _link_crew(GridWorld(used=wall))
-    site = crew.base.add(Site("factory", {"item": "x"}, (101, 0)))
-    port = {"item": "iron-plate", "end": [100, 0], "approach": [99, 0], "fed": None}
-    with pytest.raises(BuildError, match="more than a link's 200"):
+    site = crew.base.add(Site("factory", {"item": "x"}, (181, 0)))
+    port = {"item": "iron-plate", "end": [180, 0], "approach": [179, 0], "fed": None}
+    with pytest.raises(BuildError, match=f"more than a link's {belts.LINK_ROUTE_MAX}"):
         crew._link_port(port, site, [(0.5, 0.5, None)], [], kind="item")
     assert port["fed"] is None and crew.links == []
 
@@ -72,8 +73,8 @@ def test_a_trunk_goal_lays_one_long_belt_from_the_far_source_into_the_port():
     crew._fits = lambda budget, root, need, item: True
     src = crew.base.add(Site("electric_mine", {"resource": "copper-ore", "into": "chest"}, (0, 0)))
     src.chests.append((0.5, 0.5, "copper-plate"))
-    port = {"item": "copper-plate", "end": [240, 0], "approach": [239, 0], "fed": None}
-    site = crew.base.add(Site("factory", {"item": "copper-cable", "ports": [port]}, (242, 0)))
+    port = {"item": "copper-plate", "end": [330, 0], "approach": [329, 0], "fed": None}     # past LINK_REACH
+    site = crew.base.add(Site("factory", {"item": "copper-cable", "ports": [port]}, (332, 0)))
     msg = crew.trunk(site.id, "copper-plate")
     assert "trunk carries copper-plate" in msg and port["fed"] == [0.5, 0.5]
     [rec] = crew.links

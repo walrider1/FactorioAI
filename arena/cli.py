@@ -206,6 +206,22 @@ def cmd_local_run(args) -> None:
                                     placer=placer, saver=saver,
                                     resume_from=(resume_save or "") if resume_id else None,
                                     autosave_minutes=args.autosave, overseer=overseer)
+            elif args.bot == "atlas":
+                import os
+                from atlas.bot import play as atlas_play  # type: ignore
+                stop = os.environ.get("ATLAS_STOP_AFTER") or None        # short checks: stop after a phase
+                cap = float(os.environ["ATLAS_MAX_MINUTES"]) if os.environ.get("ATLAS_MAX_MINUTES") else None
+                gateway = None
+                if os.environ.get("ATLAS_LLM"):                           # e.g. ATLAS_LLM=openai: doctrine + escalation
+                    from atlas.llm.gateway import Gateway  # type: ignore
+                    from dotenv_lite import load_env  # type: ignore
+                    load_env()
+                    gateway = Gateway.from_env(os.environ["ATLAS_LLM"],
+                                               budget_usd=float(os.environ.get("ATLAS_LLM_BUDGET") or 1.0),
+                                               log=lambda *a: print(*a, flush=True))
+                result = atlas_play(run, client, session.task.public(), log=lambda *a: print(*a, flush=True),
+                                    telemetry_dir=s.runs_dir / session.id, stop_after=stop, max_minutes=cap,
+                                    gateway=gateway)
             elif args.bot == "crew" or (args.bot == "scripted" and session.task.clock == "realtime"):
                 import crew_bot  # type: ignore
                 director = None
@@ -427,7 +443,7 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--watch", type=int, default=0, metavar="SECONDS",
                    help="factorio only: print the spectator port and wait this long before the bot plays")
     p.add_argument("--speed", type=float, help="game speed while time runs (default: factorio.advance_speed)")
-    p.add_argument("--bot", choices=["scripted", "openai", "crew", "brain"], default="scripted",
+    p.add_argument("--bot", choices=["scripted", "openai", "crew", "brain", "atlas"], default="scripted",
                    help="scripted = the task's scripted baseline; openai = bots/openai_bot.py (bills your key); "
                         "crew = bots/crew_bot.py, a director that plans + a scripted crew that builds (realtime)")
     p.add_argument("--strategist", choices=["scripted", "openai"], default="scripted",
