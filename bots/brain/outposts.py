@@ -519,11 +519,14 @@ class SmelterColumn(Module):
 
     def layout(self, w, p: dict) -> str:
         """chest (depot chests off the trunk), furnace (a product chest per furnace) or line (every furnace's
-        product onto one belt down the column): furnace columns are lines once belts can cross."""
+        product onto one belt down the column): an ore column is always a line. Its chests would be boxed in
+        (plate inserter east, coal belt west, the next chest north and south): no link's inserter and first belt
+        fit beside any but the end ones. Run 20261125-164938: columns 30 and 32, built before logistics, held
+        112 plates a minute each that no link could ever take, and the science factories were rebuilt next to
+        them four times in vain."""
         into = self._into(p)
         # steel stays in chests: the crew takes it from them for its own crafting (a line would carry it away)
-        if into == "furnace" and p["resource"] in ORES and p.get("line", True) \
-                and lines_ready(getattr(w, "kn", None)):
+        if into == "furnace" and p["resource"] in ORES and p.get("line", True):
             return "line"
         return into
 

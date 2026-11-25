@@ -210,6 +210,9 @@ def input_chain_alerts(crew) -> list[dict]:
     return out
 
 
+RELOCATE_SETTLE_MIN = 30.0      # game minutes a factory stands before it may be moved next to its plates
+
+
 def _strands(crew, q: dict) -> bool:
     """Is at least what this port wants of its item made and left in chests nobody links (nodes.stranded)? Only
     for a factory or research station, which the relocate builds next to its sources."""
@@ -217,8 +220,16 @@ def _strands(crew, q: dict) -> bool:
     if site is None or site.kind not in ("factory", "labs"):
         return False
     try:
+        if crew._minute() - float(site.built_minute or 0) < RELOCATE_SETTLE_MIN:
+            return False                              # just built (or moved): its links get their own tries
+    except Exception:  # noqa: BLE001 - stub crews in tests
+        pass
+    try:
         from .nodes import stranded
-        lost = sum(r["per_minute"] for r in stranded(crew) if r["item"] == q.get("item"))
+        # only plates on a line (one belt a link runs on from): boxed-in chests stay out of reach wherever the
+        # factory stands. Run 20261125-164938: red science moved 33 -> 39 -> 43 -> again next to such chests
+        lined = {s.id for s in crew.base.sites if s.params.get("line")}
+        lost = sum(r["per_minute"] for r in stranded(crew) if r["item"] == q.get("item") and r["site"] in lined)
     except Exception:  # noqa: BLE001 - stub crews in tests
         return False
     want = sum(float(pt.get("per_minute") or 0) for pt in site.params.get("ports", [])

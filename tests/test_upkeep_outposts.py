@@ -123,14 +123,16 @@ def test_an_outpost_needs_a_patch_nobody_works():
         outposts.Outpost().build(w, crew.base, {"resource": "iron-ore", "count": 6})
 
 
-def test_the_smelting_column_feeds_ore_and_coal_into_each_furnace_and_plates_into_chests():
+def test_the_smelting_column_feeds_ore_and_coal_into_each_furnace_and_plates_onto_one_line():
     crew, w, _ = _crew()
     _ore_world(w)
+    # an ore column is a line even before logistics: boxed-in chests no link reaches (run 20261125-164938)
     col = crew.base.add(outposts.SmelterColumn().build(w, crew.base, {"resource": "iron-ore", "count": 4,
                                                                        "toward": [60, 10]}))
     names = [e[0] for e in w.placed]
     assert names.count("stone-furnace") == 4 and names.count("long-handed-inserter") == 4
-    assert names.count("inserter") == 8 and len(col.chests) == 4 and col.chests[0][2] == "iron-plate"
+    assert names.count("inserter") == 8 and col.chests == [] and col.params["into"] == "line"
+    assert col.params["line"]["item"] == "iron-plate" and "iron-chest" not in names
     ore, coal = col.params["ports"]
     assert ore["trunk"] and coal["fuel"] and coal["item"] == "coal"
     assert (col, coal) in crew.item_ports() and (col, ore) not in crew.item_ports()   # the outpost feeds that one

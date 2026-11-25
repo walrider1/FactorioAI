@@ -441,10 +441,18 @@ def test_a_factory_whose_plates_sit_unlinked_in_chests_is_rebuilt_next_to_them(m
     fac = crew.base.add(Site("factory", {"item": "automation-science-pack", "per_minute": 15,
                                           "ports": [{"item": "iron-plate", "per_minute": 16.5, "fed": None,
                                                      "end": [75, -2], "approach": [75, -3]}]}, (73, 10)))
+    fac.built_minute = 0.0                                          # it has stood a while (now: minute 30)
+    col = crew.base.add(Site("smelter_column", {"resource": "iron-ore", "line": {"item": "iron-plate"}}, (0, 0)))
     q = {"at": [75, -2], "item": "iron-plate", "into_site": fac.id, "failed": 2, "why": "no belt route"}
-    monkeypatch.setattr(nodes, "stranded", lambda c: [{"site": 23, "item": "iron-plate", "chests": 13,
+    monkeypatch.setattr(nodes, "stranded", lambda c: [{"site": col.id, "item": "iron-plate", "chests": 0,
                                                         "per_minute": 244.0}])
     assert assess._strands(crew, q)
+    del col.params["line"]                                          # boxed-in chests: moving it cannot help
+    assert not assess._strands(crew, q)
+    col.params["line"] = {"item": "iron-plate"}
+    fac.built_minute = 20.0                                         # moved 10 minutes ago: its links get tries
+    assert not assess._strands(crew, q)
+    fac.built_minute = 0.0
     fix = assess.relocate_fix(crew, q)
     assert fix["do"] == "replace" and fix["site"] == fac.id and fix["with"]["item"] == "automation-science-pack"
     monkeypatch.setattr(nodes, "stranded", lambda c: [])            # nothing waiting in chests: retries as before
