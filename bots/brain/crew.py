@@ -4132,6 +4132,7 @@ class Crew:
     # A belt the game refuses half-way is taken up again (no half-built links narrowing the next try) and its
     # tile is avoided from then on.
     LINK_TAP_COST = 6.0            # a tap shares another link's flow: a chest of its own is preferred
+    LINK_SPLIT_COST = 2.0          # a splitter shares half of it: well ahead of an inserter tap, still not a chest
     LINK_RIP_COST = 15.0           # per tile of another link a route crosses by moving that link
 
     def _lay_link(self, src: tuple[float, float], port: dict, site: Site) -> int:
@@ -4192,6 +4193,109 @@ class Crew:
                          + ("" if ug else "; underground belts would help: research logistics") + ")")
 
     LINE_TAPS = 6                  # inserter taps one line may lend to (its tail feeds one link head-on)
+
+    def _split_spots(self, t, owner: dict) -> list[dict]:
+        """Where a splitter can be cut into the belt at tile t of a line or link (owner) for a new branch: t sits
+        in a straight run (the belt behind and the belt ahead face the same way, so the splitter's input and its
+        main output stay on the owner's belt), and beside it, on the left or right, the splitter's second tile
+        and the branch's first tile ahead of it are free, with no belt behind that second tile (it would feed the
+        splitter). Each spot: {t, side, side_behind, start, dir, behind, ahead, centre}."""
+        from . import belts
+        t = (int(t[0]), int(t[1]))
+        if owner.get("kind") == "trunk":
+            return []
+        if "tiles" in owner and "facing" in owner:                   # a site's line, in flow order
+            tiles = [tuple(q) for q in owner["tiles"]]
+            plain = set(tiles)
+        else:                                                        # a link: its plain belts only
+            steps = owner.get("steps") or []
+            tiles = [tuple(st[1]) for st in steps]
+            plain = {tuple(st[1]) for st in steps if st[0] == "belt"}
+        if t not in tiles or list(t) in owner.get("splitters", []):
+            return []
+        i = tiles.index(t)
+        if i == 0 or i >= len(tiles) - 1:
+            return []
+        behind, ahead = tiles[i - 1], tiles[i + 1]
+        v = (t[0] - behind[0], t[1] - behind[1])
+        # three plain belts in a straight run, in the owner's own flow order
+        if (ahead[0] - t[0], ahead[1] - t[1]) != v or not {behind, t, ahead} <= plain:
+            return []
+        d = next((k for k, q in belts.VEC.items() if q == v), None)
+        if d is None:
+            return []
+        vx, vy = v
+        belt_at = getattr(self.w, "belt_at", lambda q: False)
+        out = []
+        for turn in (belts.LEFT[d], belts.RIGHT[d]):
+            sx, sy = belts.VEC[turn]
+            side = (t[0] + sx, t[1] + sy)
+            side_behind, start = (side[0] - vx, side[1] - vy), (side[0] + vx, side[1] + vy)
+            if not (self._belt_free(side) and self._belt_free(start)) or belt_at(side_behind):
+                continue
+            centre = ((t[0] + side[0]) / 2 + 0.5, (t[1] + side[1]) / 2 + 0.5)
+            out.append({"t": t, "side": side, "side_behind": side_behind, "start": start, "dir": d,
+                        "behind": behind, "ahead": ahead, "centre": centre})
+        return out
+
+    @staticmethod
+    def _owner_lists(crew, owner) -> list:
+        """The entity lists the owner's belt is recorded in: a link's own and its site's, or a line's site's."""
+        lists = []
+        if isinstance(owner, dict) and "entities" in owner:
+            lists.append(owner["entities"])
+            site = crew.base.get(owner.get("to_site"))
+            if site is not None:
+                lists.append(site.entities)
+        else:
+            site = next((s for s, ln in crew.lines() if ln is owner), None)
+            if site is not None:
+                lists.append(site.entities)
+        return lists
+
+    def _cut_splitter(self, sp: dict, item: str, owner) -> tuple:
+        """Take the owner's belt at sp["t"] up and put a splitter in its place (facing the same way, its second
+        tile beside it). The splitter belongs to the owner's belt from then on: its main output carries on as
+        before, and with the branch gone it passes everything on. Returns the splitter's entity tuple. On a
+        refusal the belt goes back and BuildError is raised."""
+        from . import belts
+        t, d = sp["t"], sp["dir"]
+        bx, by = t[0] + 0.5, t[1] + 0.5
+        self.w.pickup("transport-belt", bx, by, d)
+        try:
+            with belts.job_for(self.w, [item], [t, sp["side"]], [sp["behind"], sp["ahead"]]):
+                self.w.place("splitter", sp["centre"][0], sp["centre"][1], d, {t, sp["side"]})
+        except BuildError:
+            with belts.job_for(self.w, [item], [t], [sp["behind"], sp["ahead"]]):
+                self.w.place("transport-belt", bx, by, d, {t})
+            raise
+        ent = ("splitter", sp["centre"][0], sp["centre"][1], d)
+        for lst in self._owner_lists(self, owner):
+            for k, e in enumerate(lst):
+                if e[0] == "transport-belt" and (math.floor(e[1]), math.floor(e[2])) == t:
+                    lst[k] = ent
+                    break
+        owner.setdefault("splitters", []).append(list(t))
+        return ent
+
+    def _uncut_splitter(self, sp: dict, ent: tuple, item: str, owner) -> None:
+        """Undo _cut_splitter: the splitter up, the owner's belt back on its tile and in its lists."""
+        from . import belts
+        t, d = sp["t"], sp["dir"]
+        belt = ("transport-belt", t[0] + 0.5, t[1] + 0.5, d)
+        try:
+            self.w.pickup(*ent)
+            with belts.job_for(self.w, [item], [t], [sp["behind"], sp["ahead"]]):
+                self.w.place("transport-belt", belt[1], belt[2], d, {t})
+        except BuildError as exc:
+            self.foreman.note(f"the splitter at {t} could not be swapped back for its belt: {str(exc)[:80]}")
+            return
+        for lst in self._owner_lists(self, owner):
+            for k, e in enumerate(lst):
+                if e == ent:
+                    lst[k] = belt
+        if list(t) in owner.get("splitters", []):
+            owner["splitters"].remove(list(t))
 
     def _belt_taps(self, item: str, consumer: Site | None,
                    need: float = 0.0) -> list[tuple[tuple[int, int], dict | Site]]:
@@ -4279,8 +4383,21 @@ class Crew:
                 facing = next(k for k, v in belts.VEC.items() if v == (-dx, -dy))   # it picks up from the source
                 if start not in starts or cost < starts[start][0]:
                     starts[start] = (cost, ins, facing, key, label, owner)
+        splits: dict = {}                             # a splitter cut into a belt of it: half its flow, not an
+        if "splitter" in (getattr(self.kn, "unlocked", None) or set()):   # inserter's 50 a minute
+            for c, key, label, cost, owner in cands:
+                if not isinstance(owner, dict):
+                    continue
+                for sp in self._split_spots(c, owner):
+                    st = sp["start"]
+                    if {st, sp["side"], sp["side_behind"]} & (others | mine | bad | set(block)) or st in resting:
+                        continue
+                    if st not in starts or self.LINK_SPLIT_COST < starts[st][0]:
+                        starts[st] = (self.LINK_SPLIT_COST, None, None, key, "a splitter on a belt of it", owner)
+                        splits[st] = sp
         if not starts:
             return None
+        split_side = {sp["side"] for sp in splits.values()}
         soft, owner_of = {}, {}
         if rip:                                       # another link may be crossed by moving it (see _movable)
             for ln in self.links:
@@ -4290,7 +4407,8 @@ class Crew:
                     for t in self.w.footprint(name, x, y, d):
                         if t not in others and t not in mine:
                             soft[t], owner_of[t] = self.LINK_RIP_COST, ln
-        free = lambda t: (t in mine or t in unblock or self._belt_free(t)) and t not in bad and t not in block
+        free = lambda t: (t in mine or t in unblock or self._belt_free(t)) and t not in bad and t not in block \
+            and t not in split_side
         ug = "underground-belt" in self.kn.unlocked
         skip: set = set()
         for _ in range(4):
@@ -4319,8 +4437,13 @@ class Crew:
                     moved.append(ln)
             if len(moved) > 1:                        # moving one link is a repair; moving several is churn
                 return None
+            split = splits.get(steps[0][1]) if cost == self.LINK_SPLIT_COST else None
+            if split is not None and len(steps) > 1 and steps[1][1] in (split["side"], split["behind"]):
+                skip.add(steps[0][1])                 # it would run back into the splitter: another start
+                continue
             plan = {"ins": ins, "facing": facing, "steps": steps, "source": key, "from": label,
-                    "tap": owner if cost == self.LINK_TAP_COST else None, "rip": moved, "relay": None}
+                    "tap": owner if cost in (self.LINK_TAP_COST, self.LINK_SPLIT_COST) else None, "rip": moved,
+                    "relay": None, "split": split}
             if moved:                                 # where the moved link goes, decided before anything is touched
                 ln = moved[0]
                 taken = tiles | ({ins} if ins is not None else set())
@@ -4457,16 +4580,24 @@ class Crew:
                  if ins is not None else None)
         ins_kind = "fast-inserter" if "fast-inserter" in self.kn.unlocked else "inserter"
         lift = {ins_kind: 1} if ins is not None else {}  # a line's own belt runs on: nothing lifts the items
+        split = plan.get("split")
+        if split is not None:
+            lift = {"splitter": 1}
         self.unlock_items([k for k, v in need.items() if v] + list(lift))
         self.make_for({**{k: v for k, v in need.items() if v}, **lift})
         ents: list = []
+        cut = None
+        if split is not None:                         # the splitter first: the branch runs on from its output
+            cut = self._cut_splitter(split, pack or port["item"], plan.get("tap"))
         self.w.recorder = ents
         try:
             if ins is not None:
                 self.w.place(ins_kind, ins[0] + 0.5, ins[1] + 0.5, facing, {ins})
-            with belts.job_for(self.w, [pack or port["item"]], belts.tiles_of(steps),
-                               belts.link_joins(steps, from_belt=ins is None,
-                                                tail=self.link_tail(plan) if ins is None else None)):
+            joins = belts.link_joins(steps, from_belt=ins is None,
+                                     tail=self.link_tail(plan) if ins is None and split is None else None)
+            if split is not None:                     # fed by the splitter (its tile is the side or the cut one)
+                joins = joins[:1] + [split["side"], split["t"]]
+            with belts.job_for(self.w, [pack or port["item"]], belts.tiles_of(steps), joins):
                 belts.lay_belt(self.w, steps)
             if ins is not None:
                 self._power_tile(ins, avoid=others | set(belts.tiles_of(steps)), plan=power)
@@ -4476,6 +4607,8 @@ class Crew:
             if bad is not None:
                 self.ban_tile(bad)
             self._undo(ents)
+            if cut is not None:                       # the owner's belt as it was: splitter out, belt back
+                self._uncut_splitter(split, cut, pack or port["item"], plan.get("tap"))
             if ents and bad is None:
                 self._note_rollback(plan, port, exc)
             raise

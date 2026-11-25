@@ -166,3 +166,49 @@ def test_plates_first_sizes_new_rows_by_rate_not_by_counting_chests():
     _line_row(crew, rate=112.5)                                           # a six-unit line nobody draws from
     assert crew.spare_rate("iron-plate") == 112.5
     assert Crew.spare_rate.__doc__
+
+
+def _split_setup(unlocked):                       # plain belts: undergrounds need the game itself
+    w = MineWorld()
+    crew = _link_crew(w, unlocked=unlocked)
+    row = _line_row(crew)
+    ln = row.params["line"]
+    row.entities = [("transport-belt", t[0] + 0.5, t[1] + 0.5, "west") for t in ln["tiles"]]
+    factory = crew.base.add(Site("factory", {"item": "x"}, (17, -20)))
+    port = {"item": "iron-plate", "end": [17, -15], "approach": [17, -14], "fed": None, "per_minute": 60.0}
+    taps = [(tuple(t), ln) for t in ln["tiles"][:-1]]
+    return w, crew, row, ln, factory, port, taps
+
+
+def test_a_splitter_cut_into_a_line_feeds_a_new_branch_with_half_its_flow():
+    w, crew, row, ln, factory, port, taps = _split_setup({"splitter"})
+    plan = crew._plan_link(port, [], taps, 30, False)
+    sp = plan["split"]
+    assert sp is not None and plan["ins"] is None and plan["tap"] is ln
+    assert sp["dir"] == "west" and sp["side"][1] == -1 and plan["steps"][0][1] == sp["start"]
+    assert sp["start"] == (sp["side"][0] - 1, -1)                     # the branch starts at its second output
+    rec = crew._build_link(plan, port, factory, "item", None)
+    t = sp["t"]
+    assert ("transport-belt", t[0] + 0.5, t[1] + 0.5, "west") in w.picked
+    assert ("splitter", t[0] + 0.5, 0.0, "west") in w.placed          # its two tiles: t and the one north
+    assert ("splitter", t[0] + 0.5, 0.0, "west") in row.entities     # it belongs to the line now
+    assert ("transport-belt", t[0] + 0.5, 0.5, "west") not in row.entities
+    assert port["fed"] and rec["tap_of"] is ln and ln["taps"] == 1 and list(t) in ln["splitters"]
+    assert all(s["t"] != t for s in crew._split_spots(t, ln))          # one splitter per tile
+
+
+def test_without_splitters_researched_the_tap_is_an_inserter_and_a_failed_branch_puts_the_belt_back():
+    w, crew, row, ln, factory, port, taps = _split_setup(set())
+    plan = crew._plan_link(port, [], taps, 30, False)
+    assert plan["split"] is None and plan["ins"] is not None          # the old inserter tap
+    w, crew, row, ln, factory, port, taps = _split_setup({"splitter"})
+    plan = crew._plan_link(port, [], taps, 30, False)
+    sp = plan["split"]
+    w.fail_at = plan["steps"][2][1]                                   # the game refuses a branch belt
+    from brain.world import BuildError
+    with pytest.raises(BuildError):
+        crew._build_link(plan, port, factory, "item", None)
+    t = sp["t"]
+    assert ("transport-belt", t[0] + 0.5, t[1] + 0.5, "west") in row.entities   # the line as it was
+    assert ("splitter", t[0] + 0.5, 0.0, "west") in w.picked and t in w.used
+    assert not ln.get("splitters")
