@@ -214,6 +214,12 @@ def input_chain_alerts(crew) -> list[dict]:
 RELOCATE_SETTLE_MIN = 30.0      # game minutes a factory stands before it may be moved next to its plates
 
 
+def failed_before_logistics(crew, q: dict) -> bool:
+    """Did this stuck link fail only for want of underground belts, which are researched now?"""
+    unlocked = getattr(getattr(crew, "kn", None), "unlocked", None) or set()
+    return "research logistics" in str(q.get("why") or "") and "underground-belt" in unlocked
+
+
 def _strands(crew, q: dict) -> bool:
     """Is at least what this port wants of its item made and left in chests nobody links (nodes.stranded)? Only
     for a factory or research station, which the relocate builds next to its sources."""
@@ -689,6 +695,14 @@ def detect(crew) -> list[dict]:
                         "what": f"the {q['item']} link into site {q['into_site']} is beyond a link's reach "
                                 f"({q['why'][:120]}): a trunk belt is laid as a goal of its own",
                         "fix": far})
+        elif q["failed"] >= 2 and failed_before_logistics(crew, q):
+            # it failed before belts could cross; they can now: lay the belt again (with undergrounds) before any
+            # move. Run 20261125-184025: red science was rebuilt for two pre-logistics failures, the overseer
+            # stopped the move half way, and a second red science factory stood unfed
+            out.append({"level": "urgent", "key": f"rebuild-relink-{q['at'][0]},{q['at'][1]}",
+                        "what": f"the {q['item']} link into site {q['into_site']} failed before underground belts "
+                                "were researched: laid again now, with undergrounds",
+                        "fix": {"do": "relink", "site": q["into_site"], "item": q["item"]}})
         elif q["failed"] >= 2 and _strands(crew, q):
             # the plates are there, only out of a belt's reach: the factory goes next to them (built first), not
             # a third try a half hour on. Run 20261125-154120: the red factory stood 80 tiles from a 13-furnace

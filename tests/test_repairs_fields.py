@@ -474,3 +474,15 @@ def test_field_poles_reach_every_drill_even_when_the_usual_spots_are_taken():
     assert not set(poles) & taken
     w.used |= {(x, y) for x in range(-4, 18) for y in range(47, 54)}     # nowhere left for a pole
     assert outposts.Outpost().field_poles(w, drills, belt, 46) is None
+
+
+def test_a_link_that_failed_before_logistics_is_laid_again_with_undergrounds_not_moved():
+    from brain import assess
+    crew, w, _ = _crew()
+    q = {"at": [5, 5], "item": "iron-plate", "into_site": 1, "failed": 2,
+         "why": "no belt route from the source to the port (...; underground belts would help: research logistics)"}
+    assert not assess.failed_before_logistics(crew, q)              # no undergrounds yet: a move may help
+    crew.kn.unlocked = set(crew.kn.unlocked) | {"underground-belt"}
+    assert assess.failed_before_logistics(crew, q)                  # now: lay it again before any move
+    q["why"] = "no belt route from the source to the port even with a wide detour"
+    assert not assess.failed_before_logistics(crew, q)              # it failed with undergrounds too
