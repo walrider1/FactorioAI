@@ -1,6 +1,7 @@
 """Repairs that fit the cause, mines rebuilt before they run dry, spare parts on hand, and dense ore fields set
 aside for big builds (run 20261121-140755: 300 of 570 game minutes went into rework)."""
 
+import math
 from types import SimpleNamespace
 
 from brain import outposts, triage, upkeep
@@ -448,3 +449,20 @@ def test_a_factory_whose_plates_sit_unlinked_in_chests_is_rebuilt_next_to_them(m
     assert fix["do"] == "replace" and fix["site"] == fac.id and fix["with"]["item"] == "automation-science-pack"
     monkeypatch.setattr(nodes, "stranded", lambda c: [])            # nothing waiting in chests: retries as before
     assert not assess._strands(crew, q)
+
+
+def test_field_poles_reach_every_drill_even_when_the_usual_spots_are_taken():
+    crew, w, _ = _crew()
+    # run 20261125-164938: four drills south of the belt, the row north of it taken by old burner mines
+    drills = [(x, 49, "north") for x in (1, 4, 8, 11)]
+    belt = [(x, 47) for x in range(0, 14)]
+    w.used |= {(x, y) for x in range(-4, 18) for y in range(40, 47)} | set(belt)
+    poles = outposts.Outpost().field_poles(w, drills, belt, 46)
+    assert poles
+    for cx, cy, _ in drills:                                   # each drill inside some pole's supply area
+        assert any(abs(p[0] - cx) <= 3 and abs(p[1] - cy) <= 3 for p in poles)
+    assert all(math.dist(a, b) <= 7.5 for a, b in zip(poles, poles[1:]))   # one net, pole to pole
+    taken = set(belt) | {t for cx, cy, _ in drills for t in outposts.Outpost.drill_tiles(cx, cy)}
+    assert not set(poles) & taken
+    w.used |= {(x, y) for x in range(-4, 18) for y in range(47, 54)}     # nowhere left for a pole
+    assert outposts.Outpost().field_poles(w, drills, belt, 46) is None

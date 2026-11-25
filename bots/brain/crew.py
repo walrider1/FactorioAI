@@ -2545,10 +2545,13 @@ class Crew:
             return 0
         placed = 0
         left = max(0, len(dark) - 6)
+        sizes = {(round(e[1], 2), round(e[2], 2)): e[0] for e in site.entities}
         for x, y in dark[:6]:
             t = (math.floor(x), math.floor(y))
+            name = sizes.get((round(x, 2), round(y, 2)))
+            half = (max(self.kn.size(name)) - 1) // 2 if name and hasattr(self.kn, "size") else 0
             try:
-                plan = self._pole_plan(t)
+                plan = self._pole_plan(t, half=half)    # a drill is powered from 3 tiles off its centre
             except BuildError as exc:
                 self.foreman.note(f"site {site.id}: no pole for the machine at ({x}, {y}): {str(exc)[:80]}")
                 left += 1
@@ -4980,7 +4983,8 @@ class Crew:
     # supply reach of each pole kind: a small pole powers the 5x5 around it, a medium one the 7x7
     POLE_SUPPLY = {POLE: 2, MEDIUM_POLE: 3}
 
-    def _pole_plan(self, t: tuple[int, int], avoid: set = frozenset()) -> list[tuple[str, tuple[int, int]]]:
+    def _pole_plan(self, t: tuple[int, int], avoid: set = frozenset(),
+                   half: int = 0) -> list[tuple[str, tuple[int, int]]]:
         """The poles that would power a lone electric building (a link's inserter) at t, as (kind, tile): [] when
         a pole already covers it, else one pole anywhere its supply area reaches t (a small pole up to 2 tiles
         away, a medium one up to 3 once unlocked) and the cheapest bridge of small poles to the network. Places
@@ -4989,17 +4993,22 @@ class Crew:
         poles = self.existing_poles()
         medium = {(math.floor(x), math.floor(y)) for (x, y), e in self.w.entities.items()
                   if e.get("name") == MEDIUM_POLE} if hasattr(self.w, "entities") else set()
-        if any(abs(p[0] - t[0]) <= self.POLE_SUPPLY[MEDIUM_POLE if p in medium else POLE]
-               and abs(p[1] - t[1]) <= self.POLE_SUPPLY[MEDIUM_POLE if p in medium else POLE] for p in poles):
+        # half: tiles from the building's centre to its edge (a 3x3 drill: 1), so a pole reaching its edge counts
+        if any(abs(p[0] - t[0]) <= self.POLE_SUPPLY[MEDIUM_POLE if p in medium else POLE] + half
+               and abs(p[1] - t[1]) <= self.POLE_SUPPLY[MEDIUM_POLE if p in medium else POLE] + half for p in poles):
             return []
         kinds = [POLE] + ([MEDIUM_POLE] if MEDIUM_POLE in (getattr(self.kn, "unlocked", None) or set()) else [])
         free = lambda q: q in self.w.seen and not self.w.blocked(q) and q not in self.w.keepout and q not in avoid
         anchors = self.base.powered_poles()
+        lanes = getattr(self.w, "lanes", None) or set()
         for kind in kinds:                            # a cheap small pole first, a medium one where none fits
-            r = self.POLE_SUPPLY[kind]
+            r = self.POLE_SUPPLY[kind] + half
             spots = sorted(((t[0] + dx, t[1] + dy) for dx in range(-r, r + 1) for dy in range(-r, r + 1)),
                            key=lambda q: abs(q[0] - t[0]) + abs(q[1] - t[1]))
             open_spots = [q for q in spots if q != t and q not in avoid and self.w.free({q})]
+            if not open_spots and half:               # a big machine boxed in: a belt lane may take a pole
+                open_spots = [q for q in spots if q in lanes and q not in avoid
+                              and getattr(self.w, "free_belt", lambda x: False)(q)]
             for spot in open_spots[:3]:               # the nearest few: each bridge search is a full route
                 bridge = route_poles([spot], anchors, poles, free, margin=16)
                 if bridge is not None:

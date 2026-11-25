@@ -236,6 +236,33 @@ class Outpost(Module):
     def drill_tiles(cx: int, cy: int) -> set:
         return {(cx + dx, cy + dy) for dx in (-1, 0, 1) for dy in (-1, 0, 1)}
 
+    WIRE = 7.5                  # a small pole's wire reach
+    SUPPLY = 2                  # a small pole's supply area: 5x5, two tiles each side
+
+    def field_poles(self, w, drills, belt, row: int) -> list | None:
+        """Poles that power every drill of a band, each within wire reach of the one before (so the band is one
+        net the power router joins at any pole): the free tile covering the most drills still dark, nearest the
+        row between the drill rows (the free column of each pair), the band walked from one end. None when some
+        drill cannot be reached. Run 20261125-164938: the fixed pole spots of a one-row field stood on an old
+        burner mine and a furnace, the poles were skipped, and 3 of its 4 drills never got power."""
+        taken = set(belt) | {t for cx, cy, _ in drills for t in self.drill_tiles(cx, cy)}
+        reach = self.SUPPLY + 1                        # a 5x5 supply area touching a 3x3 drill
+        dark = sorted(((cx, cy) for cx, cy, _ in drills), key=lambda d: (d[0], d[1]))
+        poles: list = []
+        while dark:
+            d = dark[0]
+            cands = [(d[0] + dx, d[1] + dy) for dx in range(-reach, reach + 1) for dy in range(-reach, reach + 1)]
+            cands = [q for q in cands if q not in taken and q not in poles and w.free({q})]
+            if poles:
+                cands = [q for q in cands if math.dist(q, poles[-1]) <= self.WIRE]
+            if not cands:
+                return None
+            best = max(cands, key=lambda q: (sum(abs(q[0] - e[0]) <= reach and abs(q[1] - e[1]) <= reach
+                                                 for e in dark), q[0], -abs(q[1] - row)))
+            poles.append(best)
+            dark = [e for e in dark if not (abs(best[0] - e[0]) <= reach and abs(best[1] - e[1]) <= reach)]
+        return poles
+
     def _dense_ok(self, w, ore: set, foreign: set, cx: int, cy: int, own) -> bool:
         area = sum((cx + dx, cy + dy) in ore for dx in range(-DRILL_REACH, DRILL_REACH + 1)
                    for dy in range(-DRILL_REACH, DRILL_REACH + 1))
@@ -259,10 +286,7 @@ class Outpost(Module):
         if len(starts) > 6000:                         # a huge patch: every other start is plenty
             starts = starts[::max(2, len(starts) // 6000)]
         for sx, sy in starts:
-            drills, belt, poles = [], [], []
-            pole0 = (sx - 2, sy + 1)
-            if w.free({pole0}):
-                poles.append(pole0)
+            drills, belt = [], []
             k = 0
             while len(drills) < n:
                 cx = self.drill_x(sx, k)
@@ -279,8 +303,6 @@ class Outpost(Module):
                     break
                 drills += here
                 belt += span + gap
-                if k % 2 and w.free({(cx + 2, sy + 1)}):
-                    poles.append((cx + 2, sy + 1))
                 k += 1
             if len(drills) < 2:
                 continue
@@ -291,6 +313,9 @@ class Outpost(Module):
             mid = ((x0 + x1) / 2, sy + 2)
             score = (-len(drills), math.dist(mid, home) if home else 0)
             if best_score is None or score < best_score:
+                poles = self.field_poles(w, drills, belt, sy + 1)
+                if poles is None:                      # a drill no pole can reach here: not this band
+                    continue
                 ordered = sorted(belt, key=lambda t: t[0] * flow)
                 best, best_score = {"y": sy, "sx": sx, "drills": drills, "belt": ordered, "poles": poles}, score
                 if len(drills) >= n:
@@ -342,10 +367,9 @@ class Outpost(Module):
         for cx, cy, facing in lay["drills"]:
             w.place("electric-mining-drill", cx + 0.5, cy + 0.5, facing, self.drill_tiles(cx, cy))
             site.params["count"] += 1
-        for t in lay["poles"]:
-            if w.free({t}):
-                w.place(POLE, t[0] + 0.5, t[1] + 0.5, "north", {t})
-                site.poles.append(t)
+        for t in lay["poles"]:                         # every one is needed: a refusal stops the build (and the
+            w.place(POLE, t[0] + 0.5, t[1] + 0.5, "north", {t})   # half-built site is retried), never a dark drill
+            site.poles.append(t)
         head = lay["belt"][-1]
         start = (head[0] + flow, head[1])
         xs = [t[0] for t in lay["belt"]]
