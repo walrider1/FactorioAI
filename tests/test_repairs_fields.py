@@ -501,3 +501,18 @@ def test_science_links_that_failed_before_logistics_never_build_another_research
     crew._link_fails = {key: {"n": 3, "item": "automation-science-pack", "site": 1, "minute": 25.0,
                               "reason": "no belt route even with a wide detour"}}          # failed with undergrounds
     assert "queued" in crew._move_labs(waiting) and crew.urgent[0]["module"] == "research_station"
+
+
+def test_every_link_that_failed_for_want_of_undergrounds_is_retried_once_they_are_researched():
+    crew, w, _ = _crew()
+    crew.all_ports = lambda: []
+    crew.science_sources = lambda: []
+    old = {"n": 2, "item": "iron-plate", "site": None, "minute": 20.0,
+           "reason": "no belt route (...; underground belts would help: research logistics)"}
+    new = {"n": 2, "item": "copper-plate", "site": None, "minute": 40.0, "reason": "no belt route even with undergrounds"}
+    crew._link_fails = {(1, 1): dict(old), (2, 2): dict(new)}
+    crew._prune_link_fails()
+    assert (1, 1) in crew._link_fails                                   # no undergrounds yet: it stays failed
+    crew.kn.unlocked = set(crew.kn.unlocked) | {"underground-belt"}
+    crew._prune_link_fails()
+    assert (1, 1) not in crew._link_fails                               # laid again on the next link step

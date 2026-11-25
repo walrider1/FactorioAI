@@ -3478,6 +3478,14 @@ class Crew:
         chest is left at that spot. Without this a removed site's links stayed "stuck" for good, and every link
         goal failed at once on them (run 20261119-202811: "nothing new to try: ... into site 15", 70 minutes
         after site 15 was removed)."""
+        if "underground-belt" in (getattr(self.kn, "unlocked", None) or set()):
+            # failures for want of underground belts are void once they are researched: the link step lays every
+            # such link again (with undergrounds) instead of "nothing new to try" until some site changes. Run
+            # 20261125-184025: links failed before logistics stayed failed after it, the planners saw only failing
+            # relinks, and rebuilt red science, green science and the research station instead
+            for key, f in list(self._link_fails.items()):
+                if "research logistics" in str(f.get("reason") or ""):
+                    self._link_fails.pop(key, None)
         ends = {tuple(pt["end"]) for _, pt in self.all_ports()}
         sources = {(x, y) for x, y, _ in self.science_sources()}
         for key, f in list(self._link_fails.items()):
