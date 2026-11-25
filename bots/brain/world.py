@@ -1005,7 +1005,8 @@ class FreeWorld(ab.World):
         return ent
 
     # ------------------------------------------------------------------ belt jobs
-    BELT_ENTITIES = ("transport-belt", "underground-belt", "splitter")
+    BELT_ENTITIES = ("transport-belt", "underground-belt", "splitter", "fast-transport-belt", "fast-underground-belt",
+                     "fast-splitter", "express-transport-belt", "express-underground-belt", "express-splitter")
     belt_guard = True               # off: belts are laid as before (no tags, no isolation), e.g. an older server
 
     @contextmanager

@@ -22,6 +22,30 @@ VEC = {"north": (0, -1), "east": (1, 0), "south": (0, 1), "west": (-1, 0)}
 LEFT = {"north": "west", "west": "south", "south": "east", "east": "north"}
 RIGHT = {v: k for k, v in LEFT.items()}
 UG_REACH = 5                        # underground-belt max_underground_distance (catalog)
+# Belt tiers: what a belt carries a minute (both lanes) and how far its undergrounds reach. A line picks the
+# cheapest tier that carries its flow with room (tier()); every check that looks for belts knows all tiers.
+TIERS = (
+    {"belt": "transport-belt", "ug": "underground-belt", "splitter": "splitter", "per_minute": 900.0, "ug_reach": 5},
+    {"belt": "fast-transport-belt", "ug": "fast-underground-belt", "splitter": "fast-splitter", "per_minute": 1800.0,
+     "ug_reach": 7},
+    {"belt": "express-transport-belt", "ug": "express-underground-belt", "splitter": "express-splitter",
+     "per_minute": 2700.0, "ug_reach": 9},
+)
+BELT_NAMES = tuple(t["belt"] for t in TIERS)
+UG_NAMES = tuple(t["ug"] for t in TIERS)
+SPLITTER_NAMES = tuple(t["splitter"] for t in TIERS)
+TIER_ROOM = 0.9                     # a line is planned to carry at most this share of its belt
+
+
+def tier(unlocked, per_minute: float = 0.0) -> dict:
+    """The cheapest researched belt tier that carries per_minute with room (the fastest researched one when
+    none does). Yellow belts are there from the start."""
+    have = [t for t in TIERS if t is TIERS[0] or t["belt"] in (unlocked or ())]
+    return next((t for t in have if per_minute <= TIER_ROOM * t["per_minute"]), have[-1])
+
+
+def tier_of(belt_name: str | None) -> dict:
+    return next((t for t in TIERS if t["belt"] == belt_name), TIERS[0])
 AXIS = {"north": "ns", "south": "ns", "east": "ew", "west": "ew"}
 # A link (inserter, belt, port) is a repair-sized job: its source within LINK_REACH tiles (Manhattan) of the port
 # and its route at most LINK_ROUTE_MAX belt tiles. Farther is a trunk, a goal of its own. Run 20261121-140755: a
@@ -66,7 +90,7 @@ def _add(t: Tile, d: str, k: int = 1) -> Tile:
 
 def route_belt(free, start, approach: Tile, end: Tile, avoid: set[Tile] = frozenset(),
                underground: bool = True, margin: int = 30, limit: int = 300_000,
-               soft: dict | None = None, ug_block: dict | None = None) -> list[tuple] | None:
+               soft: dict | None = None, ug_block: dict | None = None, ug_reach: int = UG_REACH) -> list[tuple] | None:
     """Belts from `start` to `approach`, arriving headed for `end`, then the end tile. free(t): may a belt go on t.
     None when no route exists inside the search box.
 
@@ -121,7 +145,7 @@ def route_belt(free, start, approach: Tile, end: Tile, avoid: set[Tile] = frozen
                 moves.append(((nxt, nd), 1.0 + turn + extra(nxt), [("belt", nxt, nd)]))
         if underground and inside(nxt) and ok(nxt):          # go under whatever is ahead
             cov = (ug_block or {}).get(AXIS[d]) or ()
-            for k in range(2, UG_REACH + 1):
+            for k in range(2, ug_reach + 1):
                 ex = _add(nxt, d, k)
                 if not inside(ex):
                     break
@@ -195,20 +219,24 @@ def job_for(world, items, route=(), joins=()):
     return job([i for i in items if i], list(route), list(joins)) if job is not None else nullcontext()
 
 
-def count(steps: list[tuple]) -> dict[str, int]:
-    return {"transport-belt": sum(1 for s in steps if s[0] == "belt"),
-            "underground-belt": sum(1 for s in steps if s[0] == "ug") // 2 * 2}
+def count(steps: list[tuple], t: dict | None = None) -> dict[str, int]:
+    t = t or TIERS[0]
+    return {t["belt"]: sum(1 for s in steps if s[0] == "belt"),
+            t["ug"]: sum(1 for s in steps if s[0] == "ug") // 2 * 2}
 
 
-def lay_belt(world, steps: list[tuple]) -> None:
-    """Place the link in travel order: plain belts facing along it, undergrounds as entrance/exit pairs."""
+def lay_belt(world, steps: list[tuple], t: dict | None = None) -> None:
+    """Place the link in travel order: plain belts facing along it, undergrounds as entrance/exit pairs (of the
+    tier t: yellow by default)."""
     from .world import BuildError
+    t = t or TIERS[0]
+    belt, ug = t["belt"], t["ug"]
     for s in steps:
         t = s[1]
         x, y = t[0] + 0.5, t[1] + 0.5
         if s[0] == "belt":
             try:
-                world.place("transport-belt", x, y, s[2], {t})
+                world.place(belt, x, y, s[2], {t})
             except BuildError as exc:
                 exc.tile = t                      # the caller rolls back and routes around this tile
                 raise
@@ -217,14 +245,14 @@ def lay_belt(world, steps: list[tuple]) -> None:
         world.near(x, y)
         if math.dist((x, y), world.pos) < 1.2:
             world.step_out({t})
-        opts = world.belt_opts("underground-belt") if hasattr(world, "belt_opts") else {}
-        r = world.run.place("underground-belt", x, y, s[2], s[3], **opts)
+        opts = world.belt_opts(ug) if hasattr(world, "belt_opts") else {}
+        r = world.run.place(ug, x, y, s[2], s[3], **opts)
         if not r.get("ok"):
             exc = BuildError(f"underground belt at {t}: {r.get('code')} {r.get('message', '')}")
             exc.tile = t
             raise exc
         world.used.add(t)
-        world.inventory["underground-belt"] = max(0, world.inventory.get("underground-belt", 0) - 1)
+        world.inventory[ug] = max(0, world.inventory.get(ug, 0) - 1)
         got = ((r.get("data") or {}).get("entity") or {})
         if got and (got.get("belt_type", s[3]) != s[3] or got.get("direction", s[2]) != s[2]):
             # the game paired it with another underground and turned it round: the belt would carry nothing.

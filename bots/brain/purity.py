@@ -20,14 +20,15 @@ from __future__ import annotations
 
 import math
 
-from .belts import VEC, job_for, lay_belt, link_joins
+from .belts import VEC, job_for, lay_belt, link_joins, tier_of
 from .world import BuildError
 
 CHECK_EVERY_MIN = 5.0       # game minutes between looks
 MIN_FOREIGN = 3             # foreign items on a link's last belts before it counts (one stray plate is noise)
 END_TILES = 4               # a link's last belts: where foreign items pile up, since nothing takes them
 CHUNK = 40                  # tiles across one observe covers when a whole link is looked at
-BELTS = ["transport-belt", "underground-belt"]
+BELTS = ["transport-belt", "underground-belt", "fast-transport-belt", "fast-underground-belt",
+         "express-transport-belt", "express-underground-belt"]           # every tier (belts.TIERS)
 
 
 def _tile(p) -> tuple[int, int]:
@@ -119,7 +120,7 @@ def _stop_leak(crew, q: tuple[int, int], own: set) -> str:
     if here is None:
         return f"the belt at {q} is gone"
     taken = {_tile((e["x"], e["y"])) for e in ents}
-    if here["name"] == "transport-belt":
+    if here["name"].endswith("transport-belt"):
         cur = here.get("direction", "north")
         for side in [k for k in VEC if k != cur and VEC[k] != (-VEC[cur][0], -VEC[cur][1])]:
             ahead = (q[0] + VEC[side][0], q[1] + VEC[side][1])
@@ -222,9 +223,10 @@ def purge(crew, site_id, item: str | None = None) -> str:
         with job_for(crew.w, [ln["item"]], list(own), list(joins)):
             for s in dirty:                          # upstream first: clean belts carry clean items on
                 t = s[1]
-                name = "underground-belt" if s[0] == "ug" else "transport-belt"
+                bt = tier_of(ln.get("belt_tier"))     # the tier the line was laid in (yellow if unsaid)
+                name = bt["ug"] if s[0] == "ug" else bt["belt"]
                 if crew.w.pickup(name, t[0] + 0.5, t[1] + 0.5, s[2]):
-                    lay_belt(crew.w, [s])
+                    lay_belt(crew.w, [s], bt)
         cause = "" if done else "; no cause found (no side join, no other inserter, a clean source)"
         notes.append(f"{ln['item']} into site {site_id}: " + "; ".join(
             done + [f"{len(dirty)} belt(s) cleaned" if dirty else "no foreign items left on it"]) + (

@@ -42,6 +42,10 @@ POLE = "small-electric-pole"
 MEDIUM_POLE = "medium-electric-pole"
 POLES = (POLE, MEDIUM_POLE)
 LONG_LINE = 40               # tiles: a bridge this long uses medium poles once they can be made
+BIG_POLE = "big-electric-pole"
+BIG_LINE = 60                # tiles: a line this long goes over big poles once they can be made (30-tile wires)
+BIG_STEP = 26.0              # tiles between big poles aimed for (the wire spans 30: room to dodge an obstacle)
+BIG_WIRE = 29.0              # tiles between two big poles' centres at most
 PLATE_OF = {"iron-ore": "iron-plate", "copper-ore": "copper-plate", "stone": "stone-brick"}
 INVENTORY_SLOTS = 80       # the character's main inventory
 KEEP_ON_HAND = {"iron-plate": 400, "copper-plate": 300, "stone-brick": 100, "coal": 200, "wood": 100, "stone": 100,
@@ -63,6 +67,7 @@ PLACE_GRACE_MIN = 8.0
 # 20261119-202811: five goals took 86% of 114 game minutes (a pumpjack 34+, a mine replacement 28, a link pass 18).
 EXPECTED_LOAD = 0.7     # share of their full load the sites with every input fed draw once they run (power_status)
 GOAL_BUDGET_MIN = {"build": 25.0, "replace": 30.0, "remove": 8.0, "link": 10.0, "link_science": 10.0, "stock": 8.0,
+                   "modules": 15.0,
                    "feed": 4.0, "connect": 6.0, "upgrade": 20.0, "repair": 8.0, "repipe": 8.0, "scout": 10.0, "design": 4.0,
                    "priority": 1.0, "purge": 10.0, "relink": 12.0, "trunk": 40.0}
 RESEARCH_BUDGET_MIN = 25.0
@@ -373,6 +378,8 @@ class Crew:
             return self.repair(goal.get("site"))
         if do == "repipe":
             return self.repipe(goal.get("site"))
+        if do == "modules":
+            return self.fit_modules(goal.get("site"))
         raise BuildError(f"unknown goal {do}")
 
     def _clear_and_build(self, old: Site, new: dict) -> str:
@@ -408,6 +415,58 @@ class Crew:
                 again = f"putting it back failed too: {str(exc2)[:120]}"
             raise BuildError(f"cleared site {old.id} for a dense {r} field, which did not fit "
                              f"({str(exc)[:160]}); {again}") from None
+
+    def fit_modules(self, site_id=None) -> str:
+        """Productivity modules into a site's machines (modfit.py): the silo first, then science and rocket
+        intermediates. Makes what is missing (from advanced circuits), then inserts them machine by machine. A
+        machine that refuses (its recipe allows no productivity) is passed over; the site is done either way."""
+        from . import modfit
+        item = modfit.module_item(self.kn)
+        if item is None:
+            raise BuildError("no productivity module is researched yet")
+        todo = [t for t in modfit.targets(self) if site_id is None or t[0].id == site_id]
+        if not todo:
+            raise BuildError(f"site {site_id} takes no modules (or has them already)" if site_id is not None
+                             else "no site takes modules now")
+        site, machines, slots = todo[0]
+        need = min(modfit.MAX_PER_GOAL, sum(slots))
+        have = self.w.inventory.get(item, 0)
+        if have < need:
+            try:
+                with self.w.step("make"):
+                    self.make_for({item: need})
+            except BuildError as exc:
+                if not self.w.inventory.get(item, 0):
+                    raise BuildError(f"no {item} to fit: {str(exc)[:160]}") from None
+        fitted, refused, ran_out = 0, 0, False
+        fill = site.params.setdefault("modules_in", {})   # "x,y" -> modules in it; -1: its recipe takes none
+        with self.w.step("build"):
+            for (name, x, y, d), n in zip(machines, slots):
+                key = f"{x},{y}"
+                have_in = int(fill.get(key, 0))
+                if have_in < 0 or have_in >= n:
+                    continue                          # full (or refused) on an earlier goal
+                left = self.w.inventory.get(item, 0)
+                if left <= 0:
+                    ran_out = True
+                    break
+                self.w.doing(f"fitting {item} into the {name} at ({x:.0f}, {y:.0f})")
+                got = self.w.insert(x, y, item, min(n - have_in, left))
+                if got == 0 and have_in == 0:
+                    fill[key] = -1                    # its recipe allows no productivity
+                    refused += 1
+                    continue
+                fill[key] = have_in + got
+                fitted += got
+                if have_in + got < n:                 # part filled: out of modules, the rest next time
+                    ran_out = True
+                    break
+        site.params["modules"] = int(site.params.get("modules") or 0) + fitted
+        if not ran_out:                               # every machine filled or refused: nothing more to do here
+            site.params["modules_done"] = True
+        return (f"fitted {fitted} {item} into site {site.id}" + (f" ({refused} machine(s) take none)" if refused
+                                                                 else "")
+                + ("" if site.params.get("modules_done") else "; the rest once more modules are made"))
 
     def repipe(self, site_id) -> str:
         """A workshop machine piped on the wrong connection (a refinery's crude on its water input): the right
@@ -2455,6 +2514,12 @@ class Crew:
                         self.w.look(x, y, radius=32)
                     except BuildError:
                         pass
+                big = self._big_line(group, net, free) if math.dist(a, s0) >= BIG_LINE else None
+                if big is not None:                         # big poles: a fifth of the poles a long line needs
+                    self._place_big_line(site, big)
+                    path += [q for _, q in big]
+                    net |= set(group) | {q for _, q in big}
+                    continue
                 kind = self._line_pole(math.dist(a, s0))
                 reach = {"reach": MEDIUM_REACH, "old_reach": REACH} if kind == MEDIUM_POLE else {}
                 hop = route_poles(group, list(net), self.existing_poles() | set(path), free, margin=24,
@@ -2574,6 +2639,73 @@ class Crew:
                 self.w.recorder = None
         self._cover_left = left
         return placed
+
+    def _big_line(self, group: list, net: set, free) -> list[tuple[str, tuple[int, int]]] | None:
+        """A straight line of big poles from beside the network to beside a far group of the site's poles, or
+        None (not unlocked, no steel, or a stretch with no free 2x2 spot). Each big pole stands on the free 2x2
+        spot nearest its point on the line, within wire reach of the one before; the end poles stand within a
+        small pole's wire of the network pole and of the site's pole (a wire spans the shorter reach of its two
+        poles). Planned in straight steps, not searched tile by tile: a 30-tile reach makes that search crawl.
+        Returns [(kind, top-left tile)] in order from the network."""
+        unlocked = getattr(self.kn, "unlocked", None) or set()
+        if BIG_POLE not in unlocked:
+            return None
+        s0 = min(group, key=lambda q: min(math.dist(q, a) for a in net))
+        a = min(net, key=lambda q: math.dist(q, s0))
+        length = math.dist(a, s0)
+        n = max(2, math.ceil((length - 12) / BIG_STEP) + 1)
+        steel = self.w.inventory.get("steel-plate", 0) + self.stored("steel-plate")
+        if self.w.inventory.get(BIG_POLE, 0) < n and steel < 5 * n and "steel-plate" not in self.ready_items():
+            return None
+        ux, uy = (s0[0] - a[0]) / length, (s0[1] - a[1]) / length
+        first = (a[0] + 5 * ux, a[1] + 5 * uy)
+        last = (s0[0] - 5 * ux, s0[1] - 5 * uy)
+        points = [(first[0] + (last[0] - first[0]) * k / (n - 1), first[1] + (last[1] - first[1]) * k / (n - 1))
+                  for k in range(n)]
+        taken: set = set()
+        out: list = []
+        prev = None
+        for k, (px, py) in enumerate(points):
+            spot = None
+            for r in range(0, 7):
+                ring = sorted(((int(px) + dx, int(py) + dy) for dx in range(-r, r + 1) for dy in range(-r, r + 1)
+                               if max(abs(dx), abs(dy)) == r), key=lambda q: math.dist(q, (px, py)))
+                for q in ring:
+                    tiles = {(q[0] + i, q[1] + j) for i in (0, 1) for j in (0, 1)}
+                    c = (q[0] + 1.0, q[1] + 1.0)
+                    if tiles & taken or not all(free(t) for t in tiles):
+                        continue
+                    if prev is not None and math.dist(c, prev) > BIG_WIRE:
+                        continue
+                    if k == 0 and math.dist(c, (a[0] + 0.5, a[1] + 0.5)) > REACH:
+                        continue
+                    if k == n - 1 and math.dist(c, (s0[0] + 0.5, s0[1] + 0.5)) > REACH:
+                        continue
+                    spot = q
+                    break
+                if spot is not None:
+                    break
+            if spot is None:
+                return None
+            taken |= {(spot[0] + i, spot[1] + j) for i in (0, 1) for j in (0, 1)}
+            prev = (spot[0] + 1.0, spot[1] + 1.0)
+            out.append((BIG_POLE, spot))
+        return out
+
+    def _place_big_line(self, site: Site, line: list) -> None:
+        """Make and place a big pole line (_big_line), recorded as the site's poles."""
+        need = sum(1 for kind, _ in line if kind == BIG_POLE)
+        if self.w.inventory.get(BIG_POLE, 0) < need:
+            self.unlock_items([BIG_POLE])
+            self.make({BIG_POLE: need})
+        self.w.recorder = site.entities
+        try:
+            for kind, q in line:
+                tiles = {(q[0] + i, q[1] + j) for i in (0, 1) for j in (0, 1)}
+                self.w.place(kind, q[0] + 1.0, q[1] + 1.0, "north", tiles)
+                site.poles.append(q)
+        finally:
+            self.w.recorder = None
 
     def _line_pole(self, length: float) -> str:
         """Medium poles for a long line once their recipe is in and steel is at hand or made by our automation
@@ -4673,7 +4805,8 @@ class Crew:
         while todo:
             cx, cy = min(todo)
             d = self.w.observe(self.AUDIT_RADIUS, x=cx, y=cy, include=["entities"],
-                               names=["transport-belt", "underground-belt"])
+                               names=["transport-belt", "underground-belt", "fast-transport-belt",
+                                      "fast-underground-belt", "express-transport-belt", "express-underground-belt"])
             for e in d.get("entities") or []:
                 have[(round(e["x"], 2), round(e["y"], 2))] = e
             reach = min(self.AUDIT_RADIUS, int(d.get("radius") or self.AUDIT_RADIUS)) - 1

@@ -705,7 +705,7 @@ def _near_line(t, a, b, width: float) -> bool:
 TRUNK_WIDTHS = (12, 28, 56)     # corridor half-widths tried in turn
 
 
-def plan_trunk(crew, start: tuple, port: dict, block: set = frozenset()) -> list | None:
+def plan_trunk(crew, start: tuple, port: dict, block: set = frozenset(), ug_reach: int | None = None) -> list | None:
     """The trunk's route: belts from `start` into the port, inside a corridor along the straight line, never over
     `block` (the inserter that loads it, say)."""
     from . import belts
@@ -717,7 +717,8 @@ def plan_trunk(crew, start: tuple, port: dict, block: set = frozenset()) -> list
         free = lambda t, wd=width: ((t in mine or crew._belt_free(t)) and t not in crew._bad_belt
                                     and t not in block and _near_line(t, start, appr, wd))
         steps = belts.route_belt(free, start, appr, end, avoid=others - mine, underground=ug, margin=width,
-                                 limit=600_000, ug_block=crew.ug_cover() if ug and hasattr(crew, "ug_cover") else None)
+                                 limit=600_000, ug_block=crew.ug_cover() if ug and hasattr(crew, "ug_cover") else None,
+                                 ug_reach=ug_reach or belts.UG_REACH)
         if steps:
             return steps
     return None
@@ -740,13 +741,16 @@ def lay_trunk(crew, outpost: Site, column: Site) -> dict:
             crew.w.look(x, y, radius=32)
         except BuildError:
             pass
-    steps = plan_trunk(crew, start, port)
+    # the belt tier its flow needs: yellow carries 900 a minute; a bigger field's trunk gets a faster belt (whose
+    # undergrounds also reach farther) once researched
+    bt = belts.tier(getattr(crew.kn, "unlocked", None), float(outpost.params.get("per_minute") or 0))
+    steps = plan_trunk(crew, start, port, ug_reach=bt["ug_reach"])
     if not steps:
         raise BuildError(f"no trunk route from outpost {outpost.id} to site {column.id} "
                          f"({round(math.dist(start, appr))} tiles"
                          + ("" if "underground-belt" in crew.kn.unlocked else "; research logistics for undergrounds")
                          + ")")
-    need = belts.count(steps)
+    need = belts.count(steps, bt)
     crew.unlock_items([k for k, v in need.items() if v])
     make_for = getattr(crew, "make_for", None)        # what is on hand counts (no kit on top of a hoard)
     (make_for or (lambda k: crew.make(k, extra=True)))({k: v for k, v in need.items() if v})
@@ -755,7 +759,7 @@ def lay_trunk(crew, outpost: Site, column: Site) -> dict:
     try:
         with belts.job_for(crew.w, [port.get("item") or outpost.params.get("resource")], belts.tiles_of(steps),
                            belts.link_joins(steps, from_belt=True, tail=head)):   # it runs on from the head
-            belts.lay_belt(crew.w, steps)
+            belts.lay_belt(crew.w, steps, bt)
     except BuildError as exc:
         crew.w.recorder = None
         bad = getattr(exc, "tile", None)
@@ -767,7 +771,7 @@ def lay_trunk(crew, outpost: Site, column: Site) -> dict:
         crew.w.recorder = None
     rec = {"source": head, "to_site": column.id, "item": port["item"], "belts": len(steps), "kind": "trunk",
            "port": port, "steps": steps, "ins": None, "entities": ents, "from": f"outpost site {outpost.id}",
-           "minute": crew._minute(), "outpost": outpost.id}
+           "minute": crew._minute(), "outpost": outpost.id, "belt_tier": bt["belt"]}
     crew._register(rec)
     outpost.params["trunk_to"] = column.id
     column.params["outpost"] = outpost.id

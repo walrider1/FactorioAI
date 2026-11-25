@@ -116,7 +116,7 @@ def holes(w, site, entities: list[dict]) -> list[dict]:
             occupied |= w.footprint(e["name"], e["x"], e["y"], e.get("direction", "north"))
         except Exception:  # noqa: BLE001 - an entity the catalog does not size: its own tile at least
             occupied.add(_tile((e["x"], e["y"])))
-        if e["name"] == "transport-belt":
+        if e["name"].endswith("transport-belt"):                    # any tier
             belts[_tile((e["x"], e["y"]))] = e
         if e["name"] in INSERTERS and e.get("drop"):
             drops.add(_tile(e["drop"]))
@@ -179,7 +179,7 @@ def holes(w, site, entities: list[dict]) -> list[dict]:
                 q.append((n, path + [n]))
         return None
 
-    unders = {_tile((e["x"], e["y"])): e for e in entities if e["name"] == "underground-belt"}
+    unders = {_tile((e["x"], e["y"])): e for e in entities if e["name"].endswith("underground-belt")}
 
     def downstream(start: Tile, limit: int = 600) -> set[Tile]:
         """Every belt tile items from `start` pass (through undergrounds too)."""
@@ -189,7 +189,7 @@ def holes(w, site, entities: list[dict]) -> list[dict]:
             e = belts.get(t) or unders.get(t)
             if e is None:
                 break
-            if e["name"] == "underground-belt" and e.get("belt_type") == "input" and e.get("pairs_with"):
+            if e["name"].endswith("underground-belt") and e.get("belt_type") == "input" and e.get("pairs_with"):
                 t = _tile(e["pairs_with"])
                 continue
             t = ahead(t, e.get("direction", "north"))

@@ -33,11 +33,11 @@ from .belts import LINK_REACH
 
 FUELS = ("coal", "wood")
 CRITICAL = ("coal", "boiler", "power", "fuel", "pipe", "belt-foreign", "gap-")   # keys the rule floor fixes itself
-SOON = ("rebuild-", "swap-", "ore-soon-", "trunk-")  # keys it queues by itself without pausing the goal in hand (planned)
+SOON = ("rebuild-", "swap-", "ore-soon-", "trunk-", "modules-")  # keys it queues by itself without pausing the goal in hand (planned)
 FAR_LINK = "a link reaches"     # in a link failure: only the distance stopped it (Crew._link_port), a trunk fixes it
 TRUNK_AUTO_MAX = 600            # Manhattan tiles: a farther source is better made next to the site than belted over
 GOAL_DOS = ("build", "research", "stock", "remove", "replace", "connect", "feed", "priority", "wait",
-            "link", "link_science", "scout", "upgrade", "repair", "repipe", "relink", "purge", "trunk")
+            "link", "link_science", "scout", "upgrade", "repair", "repipe", "relink", "purge", "trunk", "modules")
 LONG_GOAL_MIN = 8.0
 
 
@@ -657,6 +657,11 @@ def detect(crew) -> list[dict]:
     out += ore_alerts(crew)
     out += input_chain_alerts(crew)
     out += oil_alerts(crew)
+    try:
+        from .modfit import alerts as module_alerts
+        out += module_alerts(crew)
+    except Exception:  # noqa: BLE001 - a look that failed: no verdict this time
+        pass
     out += pipe_alerts(crew)
     out += station_alerts(crew)
 
