@@ -41,10 +41,10 @@ def test_any_plate_ore_or_steel_gap_gets_a_build_sized_to_it(kn):
     assert supply.supply_goal(crew, "copper-plate", 150)["count"] == 7         # 195 ore a minute
     assert supply.supply_goal(crew, "coal", 40) == {"do": "build", "module": "outpost", "resource": "coal",
                                                     "count": 4, "near_base": True}
-    raw = supply.supply_goal(crew, "copper-ore", 40)                         # raw ore: depot chests at the base
-    assert raw["module"] == "outpost" and raw["into"] == "chest" and raw["near_base"]
-    assert supply.supply_goal(crew, "stone", 50) == {"do": "build", "module": "outpost", "resource": "stone",
-                                                     "count": 4, "near_base": True, "into": "chest"}
+    raw = supply.supply_goal(crew, "copper-ore", 40)                         # raw ore: a compact row into chests
+    assert raw["module"] == "electric_mine" and raw["into"] == "chest"
+    assert supply.supply_goal(crew, "stone", 50) == {"do": "build", "module": "electric_mine", "resource": "stone",
+                                                     "count": 3, "into": "chest"}
     assert supply.supply_goal(crew, "stone-brick", 20)["module"] == "outpost"  # bricks smelted beside the field
     assert supply.supply_goal(crew, "uranium-ore", 20)["module"] == "electric_mine"   # no acid pipes in a field
     assert supply.supply_goal(crew, "steel-plate", 10) == {"do": "build", "module": "smelter_column",

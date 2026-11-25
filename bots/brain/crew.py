@@ -667,7 +667,7 @@ class Crew:
             out = dict(MODULES["smelter_column"].kit(self.w, self.base, {"resource": r, "count": n, "into": into}))
         except Exception:  # noqa: BLE001 - an estimate: the column's own build makes what is missing
             out = {}
-        beside = (params.get("field") or params.get("near_base") or d <= outposts.FIELD_SMELT_MAX) and into == "furnace"
+        beside = params.get("near_base") or ((params.get("field") or d <= outposts.FIELD_SMELT_MAX) and into == "furnace")
         out["transport-belt"] = out.get("transport-belt", 0) + (24 if beside else int(d * 1.25) + 10)
         kind = self._line_pole(d)
         out[kind] = out.get(kind, 0) + math.ceil(d / (MEDIUM_REACH if kind == MEDIUM_POLE else REACH)) + 4
@@ -705,7 +705,8 @@ class Crew:
             beside = site.params.get("field") or math.dist(tuple(site.params["head"]), home) <= outposts.FIELD_SMELT_MAX
             col_goal = {"do": "build", "module": "smelter_column", "resource": r, "count": n,
                         "toward": site.params["head"], **({"into": "chest"} if into == "chest" else {})}
-            if beside and into == "furnace":
+            if site.params.get("near_base") or (beside and into == "furnace"):
+                # near the base its column (depot chests too) stands beside the field: no trunk across the base
                 col_goal["near"] = list(site.params["head"])
             if site.params.get("column_at"):           # the spot its trunk route was checked into (outpost_probe)
                 col_goal["at"] = list(site.params["column_at"])
@@ -780,7 +781,8 @@ class Crew:
         n = max(1, min(24, math.ceil(per / rate)))
         home = self.base.centre or self.w.pos
         cp = {"resource": r, "count": n, "toward": list(head), **({"into": "chest"} if into == "chest" else {})}
-        if (p.get("field") or math.dist(head, home) <= outposts.FIELD_SMELT_MAX) and into == "furnace":
+        if p.get("near_base") or ((p.get("field") or math.dist(head, home) <= outposts.FIELD_SMELT_MAX)
+                                  and into == "furnace"):
             cp["near"] = list(head)
         skip: list = []
         for _ in range(3):

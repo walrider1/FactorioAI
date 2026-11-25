@@ -103,7 +103,9 @@ def near_field(crew, resource: str, want: float, into: str, cleared: bool = Fals
     """A dense field on the patch near the base (outposts.Outpost with near_base): drills on both sides of one
     belt, smelted in a column beside it (plates, bricks), or into depot chests at the base (coal, and any ore or
     stone wanted raw: into chest)."""
-    if resource not in FIELD_ORES:
+    if resource not in FIELD_ORES or (into == "chest" and resource != "coal"):
+        # raw ore or stone into chests: a row of drills into chests is already compact, and a field would add a
+        # column and a trunk for nothing (run 20261125-184025: an iron field with a chest column for raw ore)
         return None
     unlocked = getattr(getattr(crew, "kn", None), "unlocked", None)
     if unlocked is not None and not {"underground-belt", "long-handed-inserter"} <= set(unlocked):
