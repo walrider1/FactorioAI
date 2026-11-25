@@ -6038,6 +6038,10 @@ class Foreman:
                 # minutes (run 20261119-202811), since only the full patrol below queued research
                 w.foreman("labs")
                 self._keep_labs_busy(quiet=True)
+                if self._labs_starving():
+                    # labs out of packs while the crew holds some: the trip is worth it even mid-build. Run
+                    # 20261125-184025: 20 red packs on hand, logistics at 0% for 15 minutes, every patrol lean
+                    self._labs(False)
             else:
                 w.foreman("power")
                 self._rewire()
@@ -6305,6 +6309,18 @@ class Foreman:
             crew.log(f"[foreman] {n}")
         if notes and not any(g.get("do") == "link" for g in crew.urgent):
             crew.urgent.append({"do": "link", "reflex": "foreman: a broken belt link was taken up"})
+
+    def _labs_starving(self) -> bool:
+        """Do labs report missing packs while the crew holds (or its chests hold) packs the research takes?"""
+        base, w = self.crew.base, self.crew.w
+        labs = base.of("labs")
+        if not labs or not any(s.health.get("missing_science_packs", 0) for s in labs):
+            return False
+        cur = (w.research or {}).get("current")
+        need = {i["name"] for i in (self.crew.kn.techs.get(cur, {}) or {}).get("unit_ingredients", [])} if cur else set()
+        have = {k for k, v in w.inventory.items() if v > 0 and k.endswith("science-pack")}
+        stored = {what for s in base.sites for *_, what in s.chests if what.endswith("science-pack")}
+        return bool(need & (have | stored)) if need else bool(have)
 
     def _keep_labs_busy(self, quiet: bool = False) -> str | None:
         """The technology the labs are on, after queueing the next one if they had none. None: nothing to do."""

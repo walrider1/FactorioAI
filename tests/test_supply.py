@@ -134,8 +134,8 @@ def test_no_field_before_its_column_can_lift_coal_and_early_rows_are_swapped_lat
     crew = _crew(kn)
     crew.kn = type("K", (), {"unlocked": set(kn.unlocked) - {"long-handed-inserter"}, "recipes": kn.recipes,
                              "researched": kn.researched})()
-    assert supply.near_field(crew, "iron-ore", 60, "furnace") is None      # a row until automation
-    assert supply.near_field(crew, "coal", 60, "chest")["module"] == "outpost"   # depot chests need none
+    assert supply.near_field(crew, "iron-ore", 60, "furnace") is None      # a row until automation...
+    assert supply.near_field(crew, "coal", 60, "chest") is None             # ...and logistics: belts are walls till then
     crew.kn = kn
     row = crew.base.add(Site("electric_mine", {"resource": "iron-ore", "count": 6, "into": "furnace"}, (0, 0)))
     assert [s.id for s in supply.small_mines(crew, "iron-ore")] == [row.id]

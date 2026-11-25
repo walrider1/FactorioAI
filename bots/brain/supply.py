@@ -106,10 +106,11 @@ def near_field(crew, resource: str, want: float, into: str, cleared: bool = Fals
     if resource not in FIELD_ORES:
         return None
     unlocked = getattr(getattr(crew, "kn", None), "unlocked", None)
-    if into == "furnace" and resource != "coal" and unlocked is not None \
-            and "long-handed-inserter" not in unlocked:
-        # its smelting column lifts coal with long-handed inserters (automation): until then a row, swapped for a
-        # field later (small_mines). Run 20261125-154120: the copper field failed at minute 39 on just that
+    if unlocked is not None and not {"underground-belt", "long-handed-inserter"} <= set(unlocked):
+        # a field's trunk and its column's coal and plate belts are walls until belts can cross (logistics), and
+        # its column lifts coal with long-handed inserters (automation): until both, rows, swapped for fields later
+        # (small_mines). Run 20261125-184025: two fields and a coal field before logistics walled red science off
+        # its iron (no belt route), so its packs starved logistics itself
         return None
     failed = (getattr(crew, "__dict__", {}).get("_field_failed") or {}).get(resource)
     if not cleared and failed is not None and getattr(crew, "_minute", lambda: 0.0)() - failed < FIELD_RETRY_MIN:

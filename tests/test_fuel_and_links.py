@@ -73,7 +73,7 @@ def test_a_row_built_before_logistics_gets_its_coal_belt_where_it_stands():
 class FuelCrew:
     def __init__(self, sites, links=(), minute=50.0):
         self.base = SimpleNamespace(sites=list(sites), powered_poles=lambda: [(0, 0)])
-        self.kn = SimpleNamespace(unlocked={"electric-mining-drill"})
+        self.kn = SimpleNamespace(unlocked={"electric-mining-drill", "underground-belt", "long-handed-inserter"})   # logistics in: fields
         self.links, self.minute = list(links), minute
 
     def coal_mines(self):
@@ -337,7 +337,7 @@ def test_short_coal_belts_raise_the_alert_with_the_fix_for_the_cause():
     from brain.assess import coal_chain_alerts, coal_fix
     w = GridWorld()
     crew, mine, b1, b2, first = _coal_crew(w)
-    crew.kn.unlocked = {"electric-mining-drill"}
+    crew.kn.unlocked = {"electric-mining-drill", "underground-belt", "long-handed-inserter"}
     crew.base.powered_poles = lambda: [(0, 0)]
     crew._register({"source": (12, 0), "to_site": b2.id, "item": "coal", "kind": "item", "steps": [],
                     "entities": [], "tap_of": first, "port": {"item": "coal", "end": [12, 19], "approach": [12, 18],

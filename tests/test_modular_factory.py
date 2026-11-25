@@ -128,7 +128,7 @@ def test_plates_first_builds_the_mines_a_plate_fed_factory_lacks():
     iron = next(g for g in crew.built if g["resource"] == "iron-ore")
     assert iron["module"] == "electric_mine"                       # no long-handed inserters yet: a row
     crew.built.clear()
-    kn.unlocked = set(kn.unlocked) | {"long-handed-inserter"}     # automation in: a dense field near the base
+    kn.unlocked = set(kn.unlocked) | {"long-handed-inserter", "underground-belt"}   # logistics in: a dense field
     note = crew._plates_first("factory", {"item": "logistic-science-pack", "per_minute": 15})
     iron = next(g for g in crew.built if g["resource"] == "iron-ore")
     assert iron["module"] == "outpost" and iron["near_base"]
