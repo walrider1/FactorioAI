@@ -77,6 +77,7 @@ def test_the_upkeep_lane_feeds_coal_inside_a_long_build():
     crew.urgent = [{"do": "feed", "site": 61, "item": "coal", "count": 80, "reflex": "rules: out of fuel"},
                    {"do": "relink", "site": 9, "reflex": "assessor: x"}]
     w.steps, w.recorder = ["make"], ["build's own"]
+    w.inventory = {"coal": 500}
     fed = []
     crew.feed = lambda site, item, n: fed.append((site, item, n)) or f"fed {n} {item} into site {site}"
     crew.log = lambda m: None
@@ -115,3 +116,18 @@ def test_research_without_labs_builds_the_labs_first():
     except RuntimeError:
         pass
     assert built == [{"do": "build", "module": "labs", "count": 2}]
+
+
+def test_the_lane_never_goes_fetching_coal():
+    crew, w, minute = _crew()
+    crew.current = {"goal": {"do": "build", "module": "factory", "item": "advanced-circuit"}, "tick": 0}
+    crew.urgent = [{"do": "feed", "site": 61, "item": "coal", "count": 80, "reflex": "rules: out of fuel"}]
+    w.steps, w.recorder, w.inventory = ["make"], None, {"coal": 2}
+    fed = []
+    crew.feed = lambda site, item, n: fed.append(n) or "fed"
+    crew.log = lambda m: None
+    crew._upkeep_lane()
+    assert fed == [] and len(crew.urgent) == 1                   # too little on hand: it waits for the goal to end
+    w.inventory = {"coal": 30}
+    crew._upkeep_lane()
+    assert fed == [30]                                           # what it carries, not a trip for the rest

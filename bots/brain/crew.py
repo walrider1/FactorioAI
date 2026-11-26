@@ -226,6 +226,7 @@ class Crew:
     LANE_WINDOW_MIN = 10.0
 
     LANE_BATCH = 4                 # feeds one safe point may do (all that are due, so the old pause is not needed)
+    LANE_MIN_HELD = 5              # a feed runs in the lane only with at least this much of its item on hand
 
     def _upkeep_lane(self) -> None:
         for _ in range(self.LANE_BATCH):
@@ -237,8 +238,11 @@ class Crew:
         cur = self.current or {}
         if not cur or cur.get("urgent") or not self.urgent or not self._safe_now():
             return False
+        held = lambda g: self.w.inventory.get(g.get("item", "coal"), 0)
+        # only what the crew carries: gathering it is a trip of its own (the test game, seed 515151: one feed in
+        # the lane took 4.9 minutes fetching coal), which waits for the goal to end like any other fix
         i = next((k for k, g in enumerate(self.urgent) if g.get("do") in self.LANE_DOS
-                  and str(g.get("reflex", "")).startswith("rules:")), None)
+                  and str(g.get("reflex", "")).startswith("rules:") and held(g) >= self.LANE_MIN_HELD), None)
         if i is None:
             return False
         now = self._minute()
@@ -251,7 +255,8 @@ class Crew:
         self._in_lane = True
         try:
             with self.w.step("upkeep"):                 # the feed itself only: no tidying, no other repairs
-                msg, ok = self.feed(g.get("site"), g.get("item", "coal"), g.get("count", 50)), True
+                n = min(int(g.get("count", 50)), held(g))
+                msg, ok = self.feed(g.get("site"), g.get("item", "coal"), n), True
         except BuildError as exc:
             msg, ok = str(exc)[:160], False
         finally:
