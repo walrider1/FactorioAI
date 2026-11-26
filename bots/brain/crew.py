@@ -1128,7 +1128,7 @@ class Crew:
         try:
             while True:
                 # a big chain gets two tries as one block, then it is split (Modules.Factory.quick)
-                fac.quick = len(split) < self.SPLIT_MAX and self._big_chain(goal)
+                fac.quick = len(split) < self.SPLIT_MAX and (self._big_chain(goal) or any(split))
                 try:
                     out = self._build(goal)
                     if split:
@@ -1449,7 +1449,9 @@ class Crew:
                     MODULE_BUDGET_MIN.get("factory", GOAL_BUDGET_MIN["build"])
             self._intermediate_depth = depth + 1
             try:
-                notes.append(self.build({"do": "build", "module": "factory", "item": it, "per_minute": rate}))
+                others = sorted(q for q in supplied if q not in (it, item) and q not in self.PLATE_ORE)
+                notes.append(self.build({"do": "build", "module": "factory", "item": it, "per_minute": rate,
+                                         **({"for_inputs": others} if others else {})}))
             except BuildError as exc:
                 raise BuildError(f"not building {item}: its {it} input ({want:.0f}/min) has no supplier, and the "
                                  f"{rate}/min {it} factory it needs first failed: {str(exc)[:160]}") from None
@@ -1509,7 +1511,8 @@ class Crew:
             return []
         want = {p: float(getattr(pl, "supplied", {}).get(p, 0)) for p in self.PLATE_ORE if p in supplied}
         want = {p: r for p, r in want.items() if r > 0}
-        if not want and not (set(supplied) - set(self.PLATE_ORE) - {params.get("item")}):
+        if not want and not ((set(supplied) | set(params.get("for_inputs") or ())) - set(self.PLATE_ORE)
+                             - {params.get("item")}):
             return []
         # every plate it takes, not only the one it needs most: a circuit factory placed beside copper had its
         # iron walled off behind the base core, four times (run 20261122-133537). And the port that waits for
@@ -1529,7 +1532,11 @@ class Crew:
         # inputs other than plates (plastic, circuits, cable from a feeder...): their sources count where the
         # factory goes too (run 20261125-214645: advanced circuits were placed by the plates near the base, with
         # plastic 223-354 tiles off at the oil field; no design there could ever be linked)
-        for it in sorted(set(supplied) - set(want) - set(self.PLATE_ORE) - {params.get("item")}):
+        # a feeder built for a consumer (Crew._intermediates_first): beside that consumer's other inputs as well,
+        # so the consumer can stand within reach of both (run 20261125-214645: the cable feeder for advanced
+        # circuits went to the far copper patch, 250+ tiles from the plastic they also take)
+        extra = set(params.get("for_inputs") or ())
+        for it in sorted((set(supplied) | extra) - set(want) - set(self.PLATE_ORE) - {params.get("item")}):
             srcs = [(x, y) for x, y, _s in self._free_outputs(it, None)]
             if srcs:
                 home = self.base.centre or self.w.pos
@@ -1602,7 +1609,9 @@ class Crew:
             near = [c for c in cands if self._manhattan(c[1], end) <= belts.LINK_REACH]
             if not near:
                 gap = min(self._manhattan(c[1], end) for c in cands)
-                return f"its nearest spare source is {gap:.0f} tiles away (a link reaches {belts.LINK_REACH})"
+                if gap <= self.FACTORY_INPUT_REACH:
+                    return None                       # a trunk goal belts it in (far-link alert): no reason to refuse
+                return f"its nearest spare source is {gap:.0f} tiles away (a trunk reaches {self.FACTORY_INPUT_REACH})"
             starts: dict = {}
             for kind, c in sorted(near, key=lambda q: self._manhattan(q[1], end))[:12]:
                 if kind == "line":
@@ -1660,16 +1669,25 @@ class Crew:
             return out
 
         def reach_at(focus) -> list[str]:
-            """Inputs with spare sources none of which is within a link's reach of this place (its ports stand
-            around it: REACH_SLACK tiles of room)."""
+            """Inputs with spare sources none of which a trunk could bring to this place (FACTORY_INPUT_REACH)."""
             out = []
             for it, cands in sources.items():
                 gap = min(self._manhattan(c[1], focus) for c in cands)
-                if gap > belts.LINK_REACH - self.REACH_SLACK:
+                if gap > self.FACTORY_INPUT_REACH - self.REACH_SLACK:
                     out.append(f"{it} {gap:.0f} tiles off")
             return out
-        probe.reach = reach_at
+
+        def far_at(focus) -> float:
+            """Tiles of trunk this place needs beyond a link's reach, over every input: places are tried least first."""
+            return sum(max(0.0, min(self._manhattan(c[1], focus) for c in cands) - (belts.LINK_REACH - self.REACH_SLACK))
+                       for cands in sources.values())
+        probe.reach, probe.far = reach_at, far_at
         return probe
+
+    # A factory's input from a source beyond a link's reach is a trunk's job (a goal of its own, queued by the
+    # far-link alert once the factory stands): it never rules a place out. Run 20261125-214645: advanced circuits
+    # were refused at every place 220+ tiles from plastic or cable, and the design ran on for an hour.
+    FACTORY_INPUT_REACH = 600
 
     REACH_SLACK = 15               # tiles from a factory's centre to its farthest port, about
 

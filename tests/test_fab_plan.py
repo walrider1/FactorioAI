@@ -63,7 +63,7 @@ def test_a_big_factory_is_split_after_its_quick_try_and_the_split_is_remembered(
     crew._build = build
     goal = {"do": "build", "module": "factory", "item": "advanced-circuit", "per_minute": 18}
     assert crew.build(goal) == "built factory"
-    assert calls == [([], True), (["copper-cable"], False)] and fac.quick is False
+    assert calls == [([], True), (["copper-cable"], True)] and fac.quick is False   # split once: quick on
     assert (tmp_path / "local" / "fab_memory.json").exists()
     # the next run plans the split from the start
     crew2, _, _ = _crew()
@@ -72,7 +72,7 @@ def test_a_big_factory_is_split_after_its_quick_try_and_the_split_is_remembered(
     crew2._big_chain = lambda goal: False
     calls.clear()
     assert crew2.build({**goal, "per_minute": 15}) == "built factory"
-    assert calls == [(["copper-cable"], False)]
+    assert calls == [(["copper-cable"], True)]
     calls.clear()
     try:                                                    # much smaller: tried as one block again
         crew2.build({**goal, "per_minute": 5})
@@ -136,3 +136,35 @@ def test_a_quick_try_skips_the_own_mines_fallback(monkeypatch):
     except BuildError as exc:
         assert "no advanced-circuit factory fits" in str(exc)
     assert own == [] and len(tried) == 2
+
+
+def test_a_far_input_is_a_trunk_job_and_never_rules_a_place_out(monkeypatch):
+    fac, w, tried = _fac(monkeypatch)
+    far = {(0, 0): 300.0, (50, 0): 0.0}
+    reach = lambda f: []                                      # every input within a trunk's reach
+    reach.far = lambda f: far[tuple(f)]
+    monkeypatch.setattr(fac, "reach", reach)
+    monkeypatch.setattr(fac, "quick", True)
+    fac._ladder(w, None, "advanced-circuit", 18.0, set(), [(0, 0), (50, 0)], 10, ("advanced-circuit", 18.0),
+                off_ore=True)
+    assert [f for f, _ in tried] == [(50, 0), (0, 0)]          # the link-only place first, the far one still tried
+
+
+def test_after_one_split_the_next_try_is_quick_too(monkeypatch):
+    crew, w, _ = _crew()
+    crew.log = lambda m: None
+    fac = MODULES["factory"]
+    monkeypatch.setattr(fac, "case_dir", None)
+    crew._big_chain = lambda goal: len(goal.get("inputs") or []) == 0
+    parts = iter(["copper-cable", "electronic-circuit"])
+    crew._split_candidate = lambda goal: next(parts)
+    seen = []
+
+    def build(goal):
+        seen.append((list(goal.get("inputs") or []), fac.quick))
+        if len(goal.get("inputs") or []) < 2:
+            raise BuildError("no advanced-circuit factory fits. plate-fed: no belt route")
+        return "built"
+    crew._build = build
+    assert crew.build({"do": "build", "module": "factory", "item": "advanced-circuit", "per_minute": 18}) == "built"
+    assert seen == [([], True), (["copper-cable"], True), (["copper-cable", "electronic-circuit"], False)]

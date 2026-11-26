@@ -1135,7 +1135,10 @@ class Factory(Module):
                         f"({f0[0]:.0f}, {f0[1]:.0f})): build that input next to here, or this factory next to it")
             if len(ok) < len(places):
                 w.log(f"[fab] {len(places) - len(ok)} of {len(places)} places for the {item} factory are beyond a "
-                      f"link's reach of an input ({'; '.join(next(v for v in far.values() if v)[:1])}): skipped")
+                      f"trunk's reach of an input ({'; '.join(next(v for v in far.values() if v)[:1])}): skipped")
+            gap = getattr(self.reach, "far", None) or getattr(self.probe, "far", None)
+            if gap is not None:                   # the least trunk first (a link-only place before any)
+                ok = sorted(ok, key=lambda f: gap(f) > 0)
             places = ok
         wide = places if w.blocking else places[:3]
         # Room first: replays of failed runs show the roomy rung (margin 24, 20 underground pairs) designs green
