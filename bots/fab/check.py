@@ -10,6 +10,7 @@ import math
 
 from .cells import DIRS, mining_area
 from .grid import Grid
+from .route import OUT_CELL
 from .power import SUPPLY, WIRE, _components
 
 Tile = tuple[int, int]
@@ -50,13 +51,19 @@ def check(design, grid: Grid) -> list[str]:
             s = p.site
             claim(s.inserter, f"inserter {r.item}->{p.cell}")
             ins_tiles.append(s.inserter)
+            if p.cell == OUT_CELL:                   # the product belt's end: belt tile, inserter, chest in a line
+                line = (s.machine[0] - s.inserter[0], s.machine[1] - s.inserter[1])
+                if not r.path or s.machine != r.path[-1] or abs(line[0]) + abs(line[1]) != 1 or \
+                        (s.inserter[0] - s.outer[0], s.inserter[1] - s.outer[1]) != line or s.outer not in r.chests:
+                    errs.append(f"{r.item}: the output chest is not fed from the end of its belt")
+                continue
             c = cells[p.cell]
             if s.machine not in c.footprint():
                 errs.append(f"pin of {p.cell} does not reach the cell")
             line = (s.machine[0] - s.inserter[0], s.machine[1] - s.inserter[1])
             if (s.inserter[0] - s.outer[0], s.inserter[1] - s.outer[1]) != line or abs(line[0]) + abs(line[1]) != 1:
                 errs.append(f"pin of {p.cell} is not a straight machine-inserter-belt line")
-            if r.chests:
+            if r.chests and not r.path:
                 if s.outer not in r.chests:
                     errs.append(f"{p.cell}: product pin does not end at a chest")
             elif belt_of.get(s.outer, ("",))[0] != r.item or belt_of[s.outer][1] != "belt":

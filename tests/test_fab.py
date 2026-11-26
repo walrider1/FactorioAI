@@ -170,3 +170,30 @@ def test_chiplet_bench_scores_a_model_against_search(tmp_path):
             raise RuntimeError("no network")
     rep = run_bench(cases, ["llm"], Down(), log=lambda *a: None)
     assert rep["summary"]["llm"]["pass"] == 0 and "fell back" in rep["rows"][0]["problems"][0]
+
+
+# ------------------------------------------------------------------ one output belt, one chest (route.OUT_CELL)
+@pytest.mark.parametrize("item,rate,supplied,seed", [
+    ("electronic-circuit", 30, {"iron-plate", "copper-plate"}, 7),
+    ("electronic-circuit", 30, {"iron-plate", "copper-plate"}, 5),
+    ("iron-gear-wheel", 30, {"iron-plate"}, 1),
+    ("automation-science-pack", 15, {"iron-plate", "copper-plate"}, 2)])
+def test_the_product_of_several_machines_rides_one_belt_into_one_chest(item, rate, supplied, seed):
+    from fab.route import OUT_CELL
+    g = synth(seed)
+    d = design_factory(g, item, rate, near=(0, 0), seed=seed, supplied=frozenset(supplied))
+    assert d.ok, d.problems
+    makers = [c for c in d.cells if c.kind == "asm" and c.product == item]
+    out = next(r for r in d.routes if r.item == item)
+    assert len(makers) > 1 and len(out.chests) == 1 and out.path          # every machine's output in one chest
+    assert sum(p.cell == OUT_CELL for p in out.pins) == 1
+    assert {p.cell for p in out.pins} >= {c.id for c in makers}
+    errs = [e for e in check(d, g) if "has no power" not in e]           # input ports' power: checked elsewhere
+    assert errs == []
+
+
+def test_a_fast_factory_keeps_a_chest_per_machine():
+    g = synth(3)
+    d = design_factory(g, "copper-cable", 120, near=(0, 0), seed=3, supplied=frozenset({"copper-plate"}))
+    out = next(r for r in d.routes if r.item == "copper-cable")
+    assert not out.path and len(out.chests) > 1                      # one inserter could not fill one chest fast enough

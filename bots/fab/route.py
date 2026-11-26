@@ -21,6 +21,13 @@ from .place import Net
 
 Tile = tuple[int, int]
 UG_MAX = 5                 # an underground exit at most 5 tiles past its entrance (yellow belts)
+# The final product of a factory with several machines making it rides one belt past all of them into ONE output
+# chest (its "out" pin: an inserter from the belt's last tile into the chest), not a chest per machine. A link
+# takes from one chest, so with a chest per machine it got one machine's share: run 20261125-214645's circuit
+# factory made 45/min and its consumer got 8. Up to COLLECT_MAX_PER_MIN (what one inserter moves into the chest);
+# above that, and wherever the belt finds no route, a chest per machine as before.
+OUT_CELL = "__out__"
+COLLECT_MAX_PER_MIN = 45.0
 
 
 @dataclass
@@ -41,8 +48,10 @@ class Route:
 
 
 class Router:
-    def __init__(self, grid: Grid, cells: list[Cell], box: tuple[int, int, int, int], max_ug_pairs: int = 10):
+    def __init__(self, grid: Grid, cells: list[Cell], box: tuple[int, int, int, int], max_ug_pairs: int = 10,
+                 collect: bool = False):
         self.grid, self.box = grid, box
+        self.collect = collect                  # the final product onto one belt into one chest (see OUT_CELL)
         self.cells = {c.id: c for c in cells}
         self.occ: dict[Tile, str] = {}
         for c in cells:
@@ -169,6 +178,10 @@ class Router:
     def route_net(self, net: Net) -> tuple[Route | None, str | None]:
         foreign = {t for t, it in self.claimed.items() if it != net.item}
         if not net.sinks:
+            if self.collect and len(net.sources) > 1:
+                r, _ = self._collect(net, foreign)
+                if r is not None:
+                    return r, None
             return self._chests(net, foreign)
         order = _chain_order(net, self.cells)
         r = Route(net.item)
@@ -216,6 +229,67 @@ class Router:
                 return None, f"{net.item}: chain crossed its own inserter near {cid}"
         self._commit(r)
         return r, None
+
+    def _collect(self, net: Net, foreign: set[Tile]) -> tuple[Route | None, str | None]:
+        """The product's belt past every machine making it, ending in one chest (nothing is kept on failure)."""
+        order = _source_order(net, self.cells)
+        r = Route(net.item)
+        self.pending = []
+        reserved: set[Tile] = set(foreign)
+        first = self.cells[order[0]]
+        start_sites = {s.outer: s for s in self._sites(first, foreign)}
+        if not start_sites:
+            return None, f"{net.item}: no free pin on {first.id}"
+        cur_starts, cur_dir = list(start_sites), None
+        if len(order) == 1:
+            return None, "one machine"
+        for k, cid in enumerate(order[1:], start=1):
+            path_set = set(r.path)
+            targets = {s.outer: s for s in self._sites(self.cells[cid], path_set | reserved)}
+            if not targets:
+                return None, f"{net.item}: no free pin on {cid}"
+
+            def valid(tiles, targets=targets, first_leg=(k == 1)):
+                if targets[tiles[-1]].inserter in tiles:
+                    return False
+                return not (first_leg and start_sites[tiles[0]].inserter in tiles)
+            leg = self._astar(cur_starts, cur_dir, targets, path_set | reserved, valid)
+            if leg is None:
+                return None, f"{net.item}: no belt route from {order[k - 1]} to {cid}"
+            if k == 1:
+                s0 = start_sites[leg[0][0]]
+                r.pins.append(Pin(first.id, s0, into_cell=False))
+                reserved.add(s0.inserter)
+                r.path.append(leg[0][0])
+                r.kinds[leg[0][0]] = "belt"
+            for t, how in leg[1:]:
+                r.path.append(t)
+                r.kinds[t] = {"step": "belt", "ug_in": "ug_in", "ug_out": "ug_out"}[how]
+            for a, b in zip([t for t, _ in leg], [t for t, _ in leg][1:]):
+                if r.kinds.get(a) == "ug_in" and r.kinds.get(b) == "ug_out":
+                    if not self._span_ok(a, b) and (a, b) not in self.pending:
+                        return None, f"{net.item}: underground pairs overlap near {cid}"
+                    self.pending.append((a, b))
+            site = targets[leg[-1][0]]
+            r.pins.append(Pin(cid, site, into_cell=False))
+            reserved.add(site.inserter)
+            cur_starts, cur_dir = [leg[-1][0]], dir_between(leg[-2][0], leg[-1][0]) if len(leg) > 1 else None
+            if any(p.site.inserter in set(r.path) for p in r.pins):
+                return None, f"{net.item}: chain crossed its own inserter near {cid}"
+        last = r.path[-1]
+        if r.kinds[last] != "belt":
+            return None, f"{net.item}: the belt ends under ground"
+        path_set = set(r.path)
+        for d, (dx, dy) in DIRS.items():         # the out pin: an inserter beside the last belt, the chest beyond
+            ins, chest = (last[0] + dx, last[1] + dy), (last[0] + 2 * dx, last[1] + 2 * dy)
+            if {ins, chest} & (path_set | reserved | self.nobelt) or not (self.usable(ins) and self.usable(chest)):
+                continue
+            r.pins.append(Pin(OUT_CELL, PinSite(inserter=ins, outer=chest, machine=last), into_cell=False))
+            r.chests.append(chest)
+            self.occ[chest] = "chest"
+            self._commit(r)
+            return r, None
+        return None, f"{net.item}: no room for the output chest at the end of its belt"
 
     def _chests(self, net: Net, foreign: set[Tile] = frozenset()) -> tuple[Route | None, str | None]:
         r = Route(net.item)
@@ -285,6 +359,20 @@ def _between(a: Tile, b: Tile) -> set[Tile]:
     return set()
 
 
+def _source_order(net: Net, cells: dict[str, Cell]) -> list[str]:
+    """The product's machines, furthest from their middle first, then each next the nearest to the last."""
+    pts = [cells[s].centre() for s in net.sources]
+    mid = (sum(p[0] for p in pts) / len(pts), sum(p[1] for p in pts) / len(pts))
+    left = sorted(net.sources, key=lambda s: -math.dist(cells[s].centre(), mid))
+    order = [left.pop(0)]
+    while left:
+        last = cells[order[-1]].centre()
+        nxt = min(left, key=lambda s: math.dist(cells[s].centre(), last))
+        left.remove(nxt)
+        order.append(nxt)
+    return order
+
+
 def _chain_order(net: Net, cells: dict[str, Cell]) -> list[str]:
     """Sources first, then sinks; each next cell the nearest to the previous one."""
     sink_c = [cells[s].centre() for s in net.sinks]
@@ -302,7 +390,7 @@ def _chain_order(net: Net, cells: dict[str, Cell]) -> list[str]:
 
 
 def route_all(grid: Grid, cells: list[Cell], nets: list[Net], box: tuple[int, int, int, int],
-              max_ug_pairs: int = 10, passes: int = 5) -> tuple[Router, list[str]]:
+              max_ug_pairs: int = 10, passes: int = 5, collect: bool = False) -> tuple[Router, list[str]]:
     """Route every net. Rip-up and reroute: nets that failed go first on the next pass (as chip routers do)."""
     by_id = {c.id: c for c in cells}
 
@@ -312,6 +400,25 @@ def route_all(grid: Grid, cells: list[Cell], nets: list[Net], box: tuple[int, in
 
     order = sorted([n for n in nets if n.sinks], key=lambda n: (-len(n.cells), -span(n)))
     chests = [n for n in nets if not n.sinks]
+    if collect and any(len(n.sources) > 1 for n in chests):
+        # the product's belt first (laid last, the input belts had boxed its machines in), then every other
+        # net; kept only when everything still routes and the product really got its one chest. Otherwise
+        # the usual passes, a chest per machine
+        for k in range(min(3, passes)):          # a short try: a failing layout must not cost double
+            router = Router(grid, cells, box, max_ug_pairs, collect=True)
+            fails, failed_nets = [], []
+            for net in chests + order:
+                _, err = router.route_net(net)
+                if err:
+                    fails.append(err)
+                    failed_nets.append(net)
+            got = all(len(r.chests) == 1 for r in router.routes if r.chests and r.path) and                 any(r.chests and r.path for r in router.routes)
+            if not fails and got:
+                return router, []
+            if not fails:
+                break                              # it all routed, but the product fell back to chests anyway
+            order = [n for n in order if n in failed_nets] + [n for n in order if n not in failed_nets]
+        order = sorted([n for n in nets if n.sinks], key=lambda n: (-len(n.cells), -span(n)))
     best: tuple[Router, list[str]] | None = None
     for _ in range(passes):
         router = Router(grid, cells, box, max_ug_pairs)

@@ -309,7 +309,9 @@ def design_factory(grid: Grid, target: str, per_minute: float, near: tuple[float
         if probs:
             cand.problems = probs
         else:
-            router, fails = route_all(grid, cand.cells, nets, box, max_ug_pairs)
+            from .route import COLLECT_MAX_PER_MIN
+            router, fails = route_all(grid, cand.cells, nets, box, max_ug_pairs,
+                                      collect=float(per_minute) <= COLLECT_MAX_PER_MIN)
             cand.routes = router.routes
             cand.problems = fails
             if not fails:
