@@ -189,8 +189,11 @@ class Crew:
         20261119-202811: 66 game minutes of walking between coal chests with a full inventory)."""
         if getattr(self, "supervisor", None) is not None:
             self.supervisor.tick(self)
+        if getattr(self, "_in_lane", False):            # an upkeep job inside a goal: no pause, no lane in a lane
+            return
         if not getattr(self, "current", None):          # between goals (or a bare crew in a test): no pause
             return
+        self._upkeep_lane()
         if self.preempt and self.preempt_for is not None and self.current.get("tick") != self.preempt_for:
             self.clear_pause()                        # asked for a goal that has ended: not for this one
         if self._stalled():
@@ -204,6 +207,54 @@ class Crew:
         if self.preempt and (self.can_pause() or (self.preempt_force and self._safe_now())):
             why, self.preempt, self.preempt_force, self.preempt_for = self.preempt, None, False, None
             raise Preempted(why)
+
+    # The upkeep lane (docs/hybrid-plan.md, section 4): the rule floor's fuel feeds run inside a long goal at its
+    # safe points, within a time slice, instead of waiting for the goal to end or pausing it. Run 20261125-214645:
+    # two iron columns and two copper rows ran out of coal behind a 96-minute build, iron fell to 95/min, research
+    # stalled.
+    LANE_DOS = ("feed",)
+    LANE_SHARE_MIN = 2.0           # game minutes of upkeep allowed per LANE_WINDOW_MIN inside one goal
+    LANE_WINDOW_MIN = 10.0
+
+    def _upkeep_lane(self) -> None:
+        cur = self.current or {}
+        if not cur or cur.get("urgent") or not self.urgent or not self._safe_now():
+            return
+        i = next((k for k, g in enumerate(self.urgent) if g.get("do") in self.LANE_DOS
+                  and str(g.get("reflex", "")).startswith("rules:")), None)
+        if i is None:
+            return
+        now = self._minute()
+        log = [x for x in (self.__dict__.get("_lane_log") or []) if now - x[0] < self.LANE_WINDOW_MIN]
+        if sum(x[1] for x in log) >= self.LANE_SHARE_MIN:
+            self._lane_log = log
+            return
+        g = self.urgent.pop(i)
+        rec, self.w.recorder = self.w.recorder, None   # nothing it does belongs to the goal's site
+        self._in_lane = True
+        try:
+            with self.w.step("upkeep"):                 # the feed itself only: no tidying, no other repairs
+                msg, ok = self.feed(g.get("site"), g.get("item", "coal"), g.get("count", 50)), True
+        except BuildError as exc:
+            msg, ok = str(exc)[:160], False
+        finally:
+            self._in_lane = False
+            self.w.recorder = rec
+        spent = max(0.0, self._minute() - now)
+        self._lane_log = log + [(now, spent)]
+        main = cur.get("goal") or {}
+        self.log(f"[crew] upkeep lane, inside {main.get('do')} {main.get('module') or main.get('site') or ''}: "
+                 f"{g.get('do')} site {g.get('site')} {g.get('item') or ''}: {'ok' if ok else 'FAILED'} - "
+                 f"{str(msg)[:160]} ({spent:.1f} min)")
+        try:
+            from .agenda import agenda_of
+            ag = agenda_of(self)
+            ag.note_done(now, g) if ok else ag.record(now, "rules", "failed", g, str(msg)[:120])
+        except Exception:  # noqa: BLE001 - bookkeeping never stops a goal
+            pass
+        if self.preempt and str(self.preempt).startswith("rules") and not any(
+                str(q.get("reflex", "")).startswith("rules:") for q in self.urgent):
+            self.clear_pause()                        # what the pause was for is done: the goal goes on
 
     def request_pause(self, why: str, force: bool = False, drop: bool = False) -> None:
         """Pause (drop: and discard) the goal in hand at its next safe point. Tied to that goal: when it ends
@@ -4169,9 +4220,15 @@ class Crew:
         if fix is not None and fix.get("skip"):
             return f"{note}; no relink"
         if fix is not None:
-            if not any(same_target(g) == same_target(fix) for g in self.urgent):
-                self.urgent.insert(0, {**fix, "reflex": f"triage: {note}"[:160]})
-            return f"{note}; a relink would not fix that, so {triage._short(fix)} goes first instead"
+            from .agenda import agenda_of
+            queued, why = agenda_of(self).propose(self, {**fix, "reflex": f"triage: {note}"[:160]}, "triage",
+                                                  front=True)
+            if queued or why.startswith("already"):
+                return f"{note}; a relink would not fix that, so {triage._short(fix)} goes first instead"
+            # the overseer refused that fix (run 20261125-214645: an iron outpost it dropped as "a routing
+            # failure, not a shortage" came back from triage four times): the relink it asked for runs instead
+            note = f"{note}; its fix ({triage._short(fix)}) is {why[len('not queued: '):]}: relinking as asked"
+            return f"{note}. " + self.relink(goal.get("site"), goal.get("item"), avoid=avoid)
         return f"{note}. " + self.relink(goal.get("site"), goal.get("item"), avoid=avoid)
 
     def relink(self, site_id, item: str | None = None, avoid=()) -> str:
@@ -4582,7 +4639,17 @@ class Crew:
         goal = {"do": "build", "module": "research_station", "count": 6,
                 "reflex": f"labs: {', '.join(packs)} failed {self.LAB_MOVE_FAILS}+x into the labs: labs beside "
                           "the science"}
-        self.urgent.append(goal)
+        building = [g for g in self.urgent + self.plan_queue + ([self.current["goal"]] if self.current else [])
+                    if g.get("module") == "research_station" or (g.get("with") or {}).get("module") == "research_station"]
+        if building:
+            # run 20261125-214645: stations 21, 24, 25, 38, 47, 50 and 66, ordered by the labs, the rule floor and
+            # the overseer at once; most were removed again
+            return (f"{', '.join(packs)} failed {self.LAB_MOVE_FAILS}+x into the labs, but a research station is "
+                    "already queued: no second one")
+        from .agenda import agenda_of
+        queued, why = agenda_of(self).propose(self, goal, "labs")
+        if not queued:
+            return f"{', '.join(packs)} failed {self.LAB_MOVE_FAILS}+x into the labs; no new station: {why}"
         self.log(f"[crew] {', '.join(packs)} link(s) failed {self.LAB_MOVE_FAILS}+ times: a research station "
                  "beside the science factories is queued instead of retrying the same port")
         return (f"{', '.join(packs)} failed {self.LAB_MOVE_FAILS}+x into the labs: a research station beside the "
@@ -5424,8 +5491,8 @@ class Crew:
                 s.powered = False
                 self.foreman.note(f"site {s.id}: cut off from the grid after poles were taken up nearby")
                 g = {"do": "connect", "site": s.id, "reflex": "rules: power cut by a pole taken up nearby"}
-                if not any(q.get("do") == "connect" and q.get("site") == s.id for q in self.urgent):
-                    self.urgent.insert(0, g)
+                from .agenda import agenda_of
+                agenda_of(self).propose(self, g, "rules", front=True)
 
     def _restore(self, rec: dict) -> None:
         """Put a taken-up link back exactly where it was."""
@@ -6816,7 +6883,9 @@ class Foreman:
             self.note(n)
             crew.log(f"[foreman] {n}")
         if notes and not any(g.get("do") == "link" for g in crew.urgent):
-            crew.urgent.append({"do": "link", "reflex": "foreman: a broken belt link was taken up"})
+            from .agenda import agenda_of
+            agenda_of(crew).propose(crew, {"do": "link", "reflex": "foreman: a broken belt link was taken up"},
+                                    "foreman")
 
     def _labs_starving(self) -> bool:
         """Do labs report missing packs while the crew holds (or its chests hold) packs the research takes?"""

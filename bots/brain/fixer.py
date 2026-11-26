@@ -192,11 +192,12 @@ def apply(crew, fixes: list[dict], goals: list[dict], skipped: dict[str, float],
             elif kind == "remove_site":
                 done.append(crew.remove(f.get("site"), force=bool(f.get("force"))))
             elif kind == "retry" and isinstance(f.get("goal"), dict) and f["goal"].get("do"):
-                from .overseer import forbidden
-                hold = forbidden(crew, f["goal"])
-                if hold is not None:                   # the overseer's forbid stands for the fixer too
-                    done.append(f"retry not queued: forbidden ({str(hold.get('why') or '')[:80]})")
+                from .agenda import agenda_of, now_of
+                hold = agenda_of(crew).holds(crew, f["goal"], "fixer")
+                if hold is not None:                   # the overseer's veto or drop stands for the fixer too
+                    done.append(f"retry not queued: {hold[:100]}")
                     continue
+                agenda_of(crew).record(now_of(crew), "fixer", "retry", f["goal"])
                 goals.insert(0, f["goal"])
                 from .overseer import _bare            # a new plan keeps it unless it covers it (carry_over)
                 crew.carry_keys = (set(getattr(crew, "carry_keys", None) or set()) | {_bare(f["goal"])})

@@ -393,8 +393,14 @@ def play(run: Run, client: ArenaClient, task: dict, strategist=None, log=print, 
                     if resume == goal:
                         resume = None
                 elif goal.get("do") != "wait" and forbidden(crew, goal) is None:   # a pause is pointless to
-                    goals.insert(0, goal)                                         # resume, a forbidden goal too
-                    resume = goal
+                    if urgent:                                                    # resume, a forbidden goal too
+                        # a fix goes back among the fixes, never to the front of the plan, where it aged into a
+                        # protected goal (run 20261125-214645: an iron outpost the overseer paused came back
+                        # "protected" and ran 14 more minutes)
+                        crew.urgent.append(goal)
+                    else:
+                        goals.insert(0, goal)
+                        resume = goal
             except BuildError as exc:
                 msg, ok = str(exc)[:240], False
                 fails_in_row += 1
@@ -422,6 +428,11 @@ def play(run: Run, client: ArenaClient, task: dict, strategist=None, log=print, 
             if not ok:                                  # structural failures are held whoever asks (futile_block)
                 note_failure(crew, goal, msg)
             elif not paused:                            # done: its copies waiting in the queues go (one job)
+                try:
+                    from .agenda import agenda_of
+                    agenda_of(crew).note_done(world.now_tick() / 3600, goal)
+                except Exception:  # noqa: BLE001 - bookkeeping never stops the run
+                    pass
                 for where, q in (("plan", goals), ("urgent", crew.urgent), ("close-out", crew.closeout_queue)):
                     for g in drop_done_copies(goal, q):
                         tel.event("dropped", goal=_short(g), why=f"the same job just finished: {_short(goal)}"[:160],

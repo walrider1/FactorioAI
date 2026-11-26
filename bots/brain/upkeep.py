@@ -36,6 +36,9 @@ NEUTRAL_KINDS = {"poles", "storage"}           # nothing to sustain
 PLAN_STARVE_MIN = 8.0          # progress first: upkeep gets a few minutes, then the plan goes (was 20)
 QUICK_FIX_DOS = ("feed", "connect")            # rule-floor fuel/power fixes (seconds each): still before an aged goal
 NO_RESET_DOS = ("wait", "research")            # plan goals that take no crew time: they do not end the wait
+# plan goals of a minute or less: they neither end the wait nor take an aged turn (run 20261125-214645: 5 of 11
+# aged turns went to feeds, removes and links, and the plan's real next build waited 13 minutes each time)
+SMALL_DOS = NO_RESET_DOS + ("feed", "remove", "connect", "link")
 
 
 def coal_belts_ready(kn) -> bool:
@@ -555,8 +558,10 @@ def next_goal(crew, goals: list[dict], now: float) -> tuple[dict, str, float]:
                 return crew.urgent.pop(quick), "urgent", waited
             while goals[0].get("do") == "wait":
                 goals.pop(0)
-            goal = goals.pop(0)
-            if goal.get("do") not in NO_RESET_DOS:
+            # research passes through (no crew time); feeds, removes and links never take the aged turn
+            k = 0 if goals[0].get("do") in NO_RESET_DOS else                 next((i for i, g in enumerate(goals) if g.get("do") not in SMALL_DOS), 0)
+            goal = goals.pop(k)
+            if goal.get("do") not in SMALL_DOS:
                 crew.plan_starved_since = None
             return goal, "aged", waited
         if crew.urgent:
@@ -564,7 +569,7 @@ def next_goal(crew, goals: list[dict], now: float) -> tuple[dict, str, float]:
         return crew.closeout_queue.pop(0), "closeout", waited
     if goals:
         goal = goals.pop(0)
-        if goal.get("do") not in NO_RESET_DOS:
+        if goal.get("do") not in SMALL_DOS:
             crew.plan_starved_since = None
         return goal, "plan", waited
     return {"do": "wait", "seconds": 15}, "idle", waited

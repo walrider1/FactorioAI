@@ -66,6 +66,12 @@ fuel and power alerts, a fixer troubleshoots repeated failures, a foreman refuel
 carries out one goal at a time. Each is narrow and none sees the others' mistakes. You see everything, every few
 game minutes, and you think it through properly before you act.
 
+One agenda, shared by every decider ("agenda" in the report): every queued goal with who asked for it, the
+overseer's vetoes, the goals the overseer dropped recently and why, and the latest decisions with their authors.
+Read it before you act. Do not ask again for something already queued or running (it is merged, not done twice),
+never re-queue what the overseer vetoed or dropped (it is refused), and build on the others' decisions instead of
+undoing them. The overseer has the final word.
+
 Your job: find what is wrong, wasted or stupid in the base and in what the bot is doing, and fix it now.
 Look hard at, among others:
 - machines that stand still, and the real cause behind them. "machines" gives every site's buildings by name and
@@ -533,6 +539,32 @@ def _guard_force(crew, g: dict) -> tuple[dict, str | None]:
     return {k: v for k, v in g.items() if k != "force"}, f"force refused on site {g.get('site')}: {why}"[:160]
 
 
+PROTECT_MAX_MIN = 20.0         # an aged goal (the plan waited too long for it) is safe from pauses this long only
+BUILD_KINDS = ("research_station", "labs", "steam_power", "pumpjack")   # one of these at a time is plenty
+
+
+def _same_build(crew, g: dict) -> dict | None:
+    """A goal already queued or running that builds the same thing: the same factory/workshop item, or one of
+    BUILD_KINDS (research stations, labs, power, pumpjacks) whatever its size."""
+    def kind(x):
+        if x.get("do") == "replace" and isinstance(x.get("with"), dict):
+            x = x["with"]
+        if x.get("do") not in ("build", None):
+            return None
+        m = x.get("module")
+        if m in ("factory", "workshop"):
+            return (m, x.get("item"))
+        return (m,) if m in BUILD_KINDS else None
+    k = kind(g)
+    if k is None:
+        return None
+    pool = list(crew.urgent) + ([crew.current["goal"]] if crew.current else [])
+    hit = next((x for x in pool if kind(x) == k), None)
+    if hit is None:                                   # the plan's own of that kind: the order takes its place
+        crew.plan_queue[:] = [x for x in crew.plan_queue if kind(x) != k]
+    return hit
+
+
 def apply_orders(crew, d: dict, log=print, event=lambda kind, **data: None) -> list[str]:
     """Carry out the overseer's orders. Returns what changed. Runs in the main thread (a checkpoint)."""
     w = crew.w
@@ -572,6 +604,10 @@ def apply_orders(crew, d: dict, log=print, event=lambda kind, **data: None) -> l
             changed.append(f"dropped {n} queued fix(es)" + (f", kept {len(kept)} fuel/power fix(es)" if kept else ""))
         note_dropped([g for g in crew.urgent if not is_rules(g)], f"the overseer cleared the fixes: {note}",
                      "overseer clear_urgent", event)
+        from .agenda import agenda_of
+        for g in crew.urgent:
+            if not is_rules(g):
+                agenda_of(crew).note_dropped(w.now_tick() / 3600, g, "overseer", f"cleared: {note}")
         crew.urgent[:] = kept
     taken = drop_forbidden(crew, crew.urgent) + drop_forbidden(crew, crew.plan_queue)
     if taken:
@@ -589,6 +625,10 @@ def apply_orders(crew, d: dict, log=print, event=lambda kind, **data: None) -> l
         if _bare(g) in busy:                                 # already running or queued: not twice (run
             changed.append(f"already under way: {_short(g)}")    # 20261120-084046: a second coal mine at minute 1)
             continue
+        twin = _same_build(crew, g)
+        if twin is not None:                                 # the same kind of thing is already being built
+            changed.append(f"not ordered: {_short(twin)} is already queued or running")   # (run 20261125-214645:
+            continue                                                                       # 7 research stations)
         busy.add(_bare(g))
         orders.append(g)
     if orders:
@@ -597,6 +637,9 @@ def apply_orders(crew, d: dict, log=print, event=lambda kind, **data: None) -> l
         at = rules_end(crew.urgent)
         crew.urgent[at:at] = [{**g, "reflex": tag} for g in orders]
         changed += [f"order: {_short(g)}" for g in orders]
+        from .agenda import agenda_of
+        for g in orders:
+            agenda_of(crew).record(now / 3600, "overseer", "order", g, note)
     plan = d.get("plan")
     if isinstance(plan, list) and not str(d.get("plan_why") or "").strip():
         changed.append("plan kept: no plan_why given")
@@ -619,7 +662,9 @@ def apply_orders(crew, d: dict, log=print, event=lambda kind, **data: None) -> l
         changed.append("doctrine rewritten")
     if d.get("guidance") is not None:
         crew.overseer_guidance = {"minute": round(now / 3600, 1), "text": str(d["guidance"])[:1200]}
-    if crew.current and crew.current.get("aged") and (d.get("interrupt") or d.get("drop_current")):
+    protected = bool(crew.current and crew.current.get("aged")
+                     and (now - crew.current.get("tick", now)) / 3600 < PROTECT_MAX_MIN)
+    if protected and (d.get("interrupt") or d.get("drop_current")):
         # frontier aging (upkeep.next_goal): the plan waited PLAN_STARVE_MIN for this goal; a pause would send it
         # back to the end of the line (run 20261120-180703: paused at minute 83, never run again). Stall and
         # over-budget guards still end it; a forbid keeps it from coming back
@@ -641,6 +686,9 @@ def apply_orders(crew, d: dict, log=print, event=lambda kind, **data: None) -> l
             changed.append(f"not dropped ({ran:.1f} min of work in it): paused instead")
         crew.request_pause(tag, force=True, drop=drop)
         changed.append("drop the goal in hand" if crew.drop_current else "pause the goal in hand")
+        if crew.drop_current:                           # no other decider queues it again for a while
+            from .agenda import agenda_of
+            agenda_of(crew).note_dropped(now / 3600, g, "overseer", note)
     log(f"[overseer] {note} -> {changed or ['no change']}")
     event("oversee", note=note, changes=changed)
     return changed

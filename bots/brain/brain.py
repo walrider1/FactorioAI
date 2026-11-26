@@ -131,7 +131,13 @@ def report(crew: Crew, task: dict, last_results: list[dict]) -> dict:
     milestones = task.get("score", {}).get("milestones", [])
     reached = w.milestones or {}
     inv = {k: v for k, v in sorted(w.inventory.items(), key=lambda kv: -kv[1])[:25]}
+    try:                                         # every decider sees the same agenda: who asked for what
+        from .agenda import agenda_of
+        shared = agenda_of(crew).summary(crew)
+    except Exception:  # noqa: BLE001 - stub crews in tests
+        shared = None
     return {
+        "agenda": shared,
         "game_minute": round(w.now_tick() / 3600, 1),
         "minutes_left": round(w.minutes_left, 1),
         "milestones_reached": [m["name"] for m in milestones if m["id"] in reached],
@@ -372,6 +378,12 @@ You never act yourself. A scripted crew carries out your goals at full speed: it
 (gathering plates, ore, stone, wood and coal on the way), unlocks what the kit needs (trigger technologies
 and research), and builds the module. A foreman keeps everything fuelled and feeds the labs. The game keeps
 running while you think, so plan several steps ahead.
+
+One agenda, shared by every decider ("agenda" in the report): every queued goal with who asked for it, the
+overseer's vetoes, the goals the overseer dropped recently and why, and the latest decisions with their authors.
+Read it before you act. Do not ask again for something already queued or running (it is merged, not done twice),
+never re-queue what the overseer vetoed or dropped (it is refused), and build on the others' decisions instead of
+undoing them. The overseer has the final word.
 
 The task: {title}
 {summary}

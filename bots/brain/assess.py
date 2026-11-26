@@ -862,6 +862,14 @@ def _nodes_view(crew) -> dict:
         return {}
 
 
+def _agenda(crew):
+    try:
+        from .agenda import agenda_of, now_of
+        return agenda_of(crew).summary(crew, n=10)
+    except Exception:  # noqa: BLE001 - stub crews in tests
+        return None
+
+
 def situation(crew, alerts: list[dict], doctrine: str = "") -> dict:
     """One page for the assessor: what is happening now and what is going wrong."""
     w, base = crew.w, crew.base
@@ -874,6 +882,7 @@ def situation(crew, alerts: list[dict], doctrine: str = "") -> dict:
                           "step": list(w.steps), "can_pause": crew.can_pause(),
                           "protected": bool(cur.get("aged"))} if cur else None),
         "urgent_queue": [_short(g) for g in crew.urgent],
+        "agenda": _agenda(crew),
         "plan_waited_min": round(_plan_waited(crew), 1),
         "plan_queue": [_short(g) for g in crew.plan_queue[:6]],
         "closeout_queue": [_short(g) for g in getattr(crew, "closeout_queue", [])[:6]],
@@ -950,6 +959,12 @@ ASSESS_PROMPT = """You are the shift supervisor of a Factorio AI racing to launc
 build order; a scripted crew carries out one goal at a time, and goals can take many minutes. You see the base
 every minute or two, and at once when something new goes wrong. Your job is to keep the base running and moving
 at full speed: amend the plan as soon as a problem appears, not when the current goal happens to end.
+
+One agenda, shared by every decider ("agenda" in the report): every queued goal with who asked for it, the
+overseer's vetoes, the goals the overseer dropped recently and why, and the latest decisions with their authors.
+Read it before you act. Do not ask again for something already queued or running (it is merged, not done twice),
+never re-queue what the overseer vetoed or dropped (it is refused), and build on the others' decisions instead of
+undoing them. The overseer has the final word.
 
 Progress first: the run is judged by how far it gets, not by how tidy the base is. Fix fully what the next stage
 needs (the plan's next build, the inputs and fluids of the sites making the next science, the labs); give the rest
@@ -1184,6 +1199,13 @@ class Supervisor:
                 changed.append(f"{_short(g)}: {held[:160]}")
                 continue
             goal = {**g, "reflex": f"{who}: {d.get('note', '')}"[:160]}
+            from .agenda import agenda_of, now_of
+            ag = agenda_of(crew)
+            hold = ag.holds(crew, goal, who)
+            if hold is not None:                         # vetoed, or the overseer dropped it a moment ago
+                ag.record(now_of(crew), who, "refused", goal, hold)
+                changed.append(f"{_short(g)}: {hold[:120]}")
+                continue
             if who == "assessor":
                 # the assessor amends the run, it does not fight it (run 20261120-092648): a job the plan or the
                 # close-out already has is moved up, not queued twice (then "replan to drop the duplicate"); a
@@ -1202,6 +1224,7 @@ class Supervisor:
                     else:
                         crew.urgent.append(goal)
                     queued.add(bare(goal))
+                    ag.record(now_of(crew), who, "moved up", goal)
                     continue
                 if g.get("do") == "research" and ((getattr(crew.w, "research", None) or {}).get("current")
                                                   or any(x.get("do") == "research" for q in mainline for x in q[:3])):
@@ -1214,6 +1237,7 @@ class Supervisor:
                 crew.urgent.append(goal)
             queued.add(key)
             changed.append(_short(g))
+            ag.record(now_of(crew), who, "propose", goal, d.get("note", ""))
         if who == "assessor" and d.get("interrupt") and not urgent_now:
             d = {**d, "interrupt": False}               # its fixes run after the goal in hand: a pause is for an
             changed.append("no pause without an urgent alert")   # urgent alert (it paused the iron build for
