@@ -93,3 +93,22 @@ def test_the_upkeep_lane_feeds_coal_inside_a_long_build():
     crew._upkeep_lane()
     assert len(fed) == 1
 
+
+
+def test_research_without_labs_builds_the_labs_first():
+    crew, w, minute = _crew()
+    built = []
+    crew.kn.tech_path = lambda t: [t]
+    crew.kn.is_trigger = lambda t: False
+    crew.log = lambda m: None
+
+    def build(goal):
+        built.append(goal)
+        crew.base.add(Site("labs", {"count": 2}, (0, 0)))
+        raise RuntimeError("stop here: the labs stand")
+    crew.build = build
+    try:
+        crew.research("automation")
+    except RuntimeError:
+        pass
+    assert built == [{"do": "build", "module": "labs", "count": 2}]

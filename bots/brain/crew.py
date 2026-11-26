@@ -3714,7 +3714,22 @@ class Crew:
                     return f"{tech} already researched; the labs were idle, so queued {pick}"
             return f"{tech} already researched"
         if not self.base.of("labs"):
-            raise BuildError(f"research {tech} needs labs (build labs first)")
+            # labs first, like power, plates and feeders first: run 20261126-test (seed 515151) asked for red
+            # science before any labs; the factory goal crafted for 5.4 minutes, then failed on this, and three
+            # more goals after it
+            if getattr(self, "_in_labs_first", False):
+                raise BuildError(f"research {tech} needs labs (build labs first)")
+            self._in_labs_first = True
+            try:
+                self.log(f"[crew] labs first: research {tech} needs labs")
+                if self.current is not None:
+                    self.current["extra_min"] = (float(self.current.get("extra_min") or 0.0)
+                                                 + MODULE_BUDGET_MIN.get("labs", GOAL_BUDGET_MIN["build"]))
+                self.build({"do": "build", "module": "labs", "count": 2})
+            except BuildError as exc:
+                raise BuildError(f"research {tech} needs labs, and building them first failed: {str(exc)[:160]}")                     from None
+            finally:
+                self._in_labs_first = False
         # every pack the path costs: made by a factory already, automated now, or (only if that is cheap or
         # impossible) hand-crafted within a budget; packs by hand mean the labs need the crew, so it waits
         notes = []
