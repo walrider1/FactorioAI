@@ -116,3 +116,23 @@ def test_supply_spots_count_every_input_not_only_plates():
     finally:
         MOD.supplied_for = orig
     assert (-90.5, 150.5) in [tuple(s[:2]) for s in spots]
+
+
+def test_a_quick_try_skips_the_own_mines_fallback(monkeypatch):
+    fac, w, tried = _fac(monkeypatch)
+    monkeypatch.setattr(fac, "reach", None)
+    monkeypatch.setattr(fac, "quick", True)
+    monkeypatch.setattr(fac, "designs", {})
+    monkeypatch.setattr(fac, "supplied_for", lambda kn, p: ({"iron-plate", "copper-plate", "plastic-bar"}, None))
+    monkeypatch.setattr(fac, "_take_ready", lambda *a: None)
+    monkeypatch.setattr(fac, "can_make", lambda kn: ["advanced-circuit"])
+    monkeypatch.setattr(fac, "_fed_places", lambda w, base, p: [(0, 0), (50, 0)])
+    own = []
+    monkeypatch.setattr(fac, "_places", lambda w, base: own.append(1) or [(9, 9)])
+    w.kn = SimpleNamespace(unlocked=set())
+    w.patch = lambda r: True
+    try:
+        fac._design(w, None, {"item": "advanced-circuit", "per_minute": 18})
+    except BuildError as exc:
+        assert "no advanced-circuit factory fits" in str(exc)
+    assert own == [] and len(tried) == 2

@@ -1005,8 +1005,8 @@ class Factory(Module):
             if not isinstance(got, str):
                 return got
             failures.append(f"plate-fed: {got}")
-            if "plates" in p:                # asked for plates in by name: no mines of its own instead
-                raise BuildError(f"no {item} factory fits. {failures[0]}")
+            if "plates" in p or self.quick:  # asked for plates in by name, or a quick try (split next): no
+                raise BuildError(f"no {item} factory fits. {failures[0]}")   # mines of its own instead
             # the default was plates in: try the older design with its own mines on iron and copper too
             supplied = supplied - set(self.PLATES)
             if not w.patch("iron-ore") or not w.patch("copper-ore"):
