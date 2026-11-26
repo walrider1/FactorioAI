@@ -29,7 +29,10 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 
-ENABLED = True
+# Off until the segment bus and its taps are placed (README "Zones (hybrid)"): without the bus, a segment's
+# factories are era-sized blocks fed by point-to-point links across the spine, on 18-23k reserved tiles taken
+# from organic builds, a cost with none of the benefit yet. Tests switch it on (tests/test_zones.py).
+ENABLED = False
 
 Tile = tuple[int, int]
 YARD_MIN_HALF = 36        # the start yard reaches at least this far from the base centre each way
