@@ -28,6 +28,9 @@ class Grid:
                 ore[t] = name
         # lanes (margins kept free for the bot's belts between sites) are off limits to a factory floor too
         keep = set(world.keepout) | set(getattr(world, "lanes", ()) or ())
+        zones = getattr(world, "zones", None)          # the brain's hybrid floorplan: reserved land (zones.py)
+        if zones is not None:
+            keep |= zones.refused()
         return cls(set(world.seen), set(world.water), set(world.cliffs), set(world.used), keep,
                    set(world.obstacles), ore, tuple(world.pos))
 

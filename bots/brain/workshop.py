@@ -421,7 +421,10 @@ class Workshop(Module):
 
     def _area_ok(self, w, tiles) -> bool:
         ore = set().union(*w.resources.values()) if w.resources else set()
-        return all(t in w.seen and not w.blocked(t) and t not in ore and t not in w.keepout for t in tiles)
+        z = getattr(w, "zones", None)
+        zb = z.refused() if z is not None else ()     # land the hybrid floorplan reserves (zones.py)
+        return all(t in w.seen and not w.blocked(t) and t not in ore and t not in w.keepout and t not in zb
+                   for t in tiles)
 
     def _find_area(self, w: FreeWorld, home, W: int, H: int):
         """The free rectangle nearest home (top-left tile), searched on rings of candidate corners."""

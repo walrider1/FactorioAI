@@ -166,6 +166,12 @@ class Crew:
         self.idle_since: dict[int, float] = {}        # site id -> minute its output stopped being used (upgrade.py)
         self.site_lanes: dict[int, list] = {}         # site id -> the margin tiles kept for belts around it
         self.fuel_strips: dict[int, list] = {}        # hand-fed furnace row -> the tiles its coal belt will need
+        self.zones = None                             # the hybrid floorplan (zones.py): reserved land, era segments;
+        world.zones = None                            # planned at the first electric build (zones.after_build)
+        try:
+            MODULES["factory"].zones = None           # a fresh crew: no segment of an earlier crew's world
+        except Exception:  # noqa: BLE001
+            pass
         self.retrofit_blocked: dict[int, float] = {}  # row -> minute its coal belt found its strip taken
         world.checkpoint = self.checkpoint
         world.tend = lambda: self.foreman.patrol(force=True)   # while a layout is worked out in the background
@@ -1361,6 +1367,10 @@ class Crew:
             self.reserve_strips()
         self._note_churn(site)
         msg = first + f"built {mod.name} as site {site.id} {site.brief_params()}"
+        from . import zones                   # the first electric build reserves the floorplan; segment 1 opens
+        znote = zones.after_build(self, site)  # once its conditions hold (never raises)
+        if znote:
+            msg += f"; {znote}"
         if site.params.get("pumps"):
             msg += f"; {len(site.params['pumps'])} pump(s) on its long pipe line" + (
                 f", {len(unpowered)} without power: {unpowered[0]}" if unpowered else "")
@@ -2537,7 +2547,9 @@ class Crew:
         return put
 
     def _strict_free(self, t) -> bool:
-        return not self.w.blocked(t) and t not in self.w.keepout and t in self.w.seen
+        z = getattr(self.w, "zones", None)
+        return not self.w.blocked(t) and t not in self.w.keepout and t in self.w.seen \
+            and not (z is not None and z.blocks((t,)))
 
     def _yard_tiles(self, yard) -> list[tuple[int, int]]:
         return [(yard[0] + i, yard[1] + j) for j in range(self.YARD[1]) for i in range(self.YARD[0])]
@@ -5633,6 +5645,9 @@ class Crew:
         a line's head (run 20261125-214645: a pole on the start of site 19's copper line left its plates no way
         out but taps upstream of five of its six furnaces)."""
         heads = self.line_heads()
+        z = getattr(self.w, "zones", None)
+        if z is not None and z.refused_slots():          # poles may cross the zones' corridors, never their slots
+            heads = set(heads) | z.refused_slots()
         return lambda t: t in self.w.seen and not self.w.blocked(t) and t not in self.w.keepout and t not in heads
 
     def _can_power(self, t: tuple[int, int], avoid: set = frozenset()) -> bool:

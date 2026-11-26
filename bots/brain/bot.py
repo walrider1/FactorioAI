@@ -163,6 +163,8 @@ def play(run: Run, client: ArenaClient, task: dict, strategist=None, log=print, 
             raise RuntimeError(f"no bot save {resume_from!r} in {saves_dir}")
         name, data = got
         loop = persist.restore(data, crew, world, strategist, sup, dog)
+        from . import zones as _zones                       # the hybrid floorplan: crew, world and factory share it
+        _zones.attach(crew, getattr(crew, "zones", None))
         goals, results, notes = loop.get("goals", []), loop.get("results", []), loop.get("notes", [])
         parked = list(loop.get("parked", []))
         seen_milestones = set(loop.get("seen_milestones", set()))
