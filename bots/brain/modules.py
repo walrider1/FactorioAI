@@ -873,6 +873,11 @@ class Factory(Module):
     probe = None
     avoid: tuple = ()
     AVOID_TILES = 20.0
+    # reach(focus) -> [inputs no spare source of which is within a link's reach of the place]: checked BEFORE a
+    # design is worked out there (Crew._set_probes). quick: a big chain's first try, at the two best places at the
+    # full rate only, so a block that does not fit is split at once (Crew.build) instead of after every place
+    reach = None
+    quick = False
 
     def feeds_for(self, w, supplied) -> frozenset:
         """Supplied items that come in on a belt straight onto the factory's own (docs/logistics-plan.md, phase
@@ -1029,7 +1034,10 @@ class Factory(Module):
         except BuildError:
             return False
         fed = bool(set(self.PLATES) & supplied)
-        places = (self._fed_places(w, base, p) if fed else self._places(w, base))[:3]
+        places = (self._fed_places(w, base, p) if fed else self._places(w, base))[:6]
+        if probe is not None and getattr(probe, "reach", None) is not None:
+            places = [f for f in places if not probe.reach(f)]
+        places = places[:3]
         if not places:
             return False
         grid = Grid.from_world(w)
@@ -1115,6 +1123,20 @@ class Factory(Module):
         # to design. Any factory that runs beats none.
         if not places:
             return "no open ground known near the base"
+        if self.reach is not None:
+            # a place too far from a source of one of its inputs never passes the route probe, however well the
+            # factory fits: skipped before any design (run 20261125-214645: advanced-circuit designs that took
+            # 47-94 s each were thrown away for plastic 223-354 tiles off)
+            far = {tuple(f): self.reach(f) for f in places}
+            ok = [f for f in places if not far[tuple(f)]]
+            if not ok:
+                f0 = places[0]
+                return (f"every place is beyond a link's reach of an input ({'; '.join(far[tuple(f0)][:2])} at "
+                        f"({f0[0]:.0f}, {f0[1]:.0f})): build that input next to here, or this factory next to it")
+            if len(ok) < len(places):
+                w.log(f"[fab] {len(places) - len(ok)} of {len(places)} places for the {item} factory are beyond a "
+                      f"link's reach of an input ({'; '.join(next(v for v in far.values() if v)[:1])}): skipped")
+            places = ok
         wide = places if w.blocking else places[:3]
         # Room first: replays of failed runs show the roomy rung (margin 24, 20 underground pairs) designs green
         # science where the tight one (14, 10) finds no route, so the tight rung only gets a quick try at the
@@ -1123,6 +1145,8 @@ class Factory(Module):
         ladder += [(round(rate * f, 1), 24, ug * 2, wide)
                    for f in ((2 / 3, 1 / 2, 1 / 3) if w.blocking else (2 / 3, 1 / 2)) if rate * f >= 1]
         budget = 420 if w.blocking else 300
+        if self.quick:                           # a big chain: two tries, then it is split (Crew.build)
+            ladder = [(rate, 24, ug * 2, places[:2])]
         tried: list[str] = []
         causes: dict[str, int] = {}
         first = None
@@ -1168,7 +1192,7 @@ class Factory(Module):
                             else "other")
                     causes[kind] = causes.get(kind, 0) + 1
                 tried.append(f"{r}/min at ({focus[0]:.0f}, {focus[1]:.0f})")
-        if fallback is not None:
+        if fallback is not None and not self.quick:
             # no place passed the route probe. The best design still goes up (a factory that runs beats none)
             # with a warning, unless it stands where this factory already failed walled in: then nothing is
             # placed and the error names the input (run 20261122-133537: four circuit factories, ~700 buildings)

@@ -1113,24 +1113,113 @@ class Crew:
         if goal.get("module") != "factory":
             return self._build(goal)
         split: list[str] = []
-        while True:
+        fac = MODULES["factory"]
+        planned = self._split_memory(goal)
+        if planned:
+            # split as the last time this factory had to be (this run or an earlier one): no design is tried
+            # as one block first (run 20261125-214645: 35 advanced-circuit designs, 73 real minutes, before the
+            # split that then fitted at once)
+            raw = goal.get("inputs") or []
+            raw = [raw] if isinstance(raw, str) else list(raw)
+            goal = {**goal, "inputs": raw + [q for q in planned if q not in raw]}
+            split += planned
+            self.log(f"[crew] planned ahead: the {goal.get('item')} factory takes {', '.join(planned)} by belt "
+                     "from feeder factories, as it had to before")
+        try:
+            while True:
+                # a big chain gets two tries as one block, then it is split (Modules.Factory.quick)
+                fac.quick = len(split) < self.SPLIT_MAX and self._big_chain(goal)
+                try:
+                    out = self._build(goal)
+                    if split:
+                        self._remember_split(goal, split)
+                    return out
+                except BuildError as exc:
+                    item = goal.get("item")
+                    no_fit = f"no {item} factory fits" in str(exc)
+                    near = "beyond a link's reach of an input" not in str(exc)     # a split brings it no nearer
+                    if not (no_fit and near) or len(split) >= self.SPLIT_MAX:
+                        raise
+                    part = self._split_candidate(goal)
+                    if part is None:
+                        if fac.quick:                 # nothing to split off after all: the whole ladder next
+                            split.append("")
+                            continue
+                        raise
+                    split.append(part)
+                    raw = goal.get("inputs") or []
+                    raw = [raw] if isinstance(raw, str) else list(raw)
+                    goal = {**goal, "inputs": raw + [part]}
+                    self.log(f"[crew] no {item} factory fits as one block: {part} gets a factory of its own "
+                             f"first, and the {item} factory takes it by belt")
+                    if self.current is not None:      # the new feeder's time on top of the goal's budget
+                        self.current["extra_min"] = (float(self.current.get("extra_min") or 0.0)
+                                                     + MODULE_BUDGET_MIN.get("factory", GOAL_BUDGET_MIN["build"]))
+        finally:
+            fac.quick = False
+
+    QUICK_SPLIT_ASM = 10           # a chain this big gets two tries as one block before it is split
+
+    def _big_chain(self, goal: dict) -> bool:
+        """Does this factory's own chain (what it makes itself) have QUICK_SPLIT_ASM assemblers or more, with
+        something to split off?"""
+        try:
+            fac = MODULES["factory"]
+            params = {k: v for k, v in goal.items() if k not in ("do", "module")}
+            supplied, pl = fac.supplied_for(self.kn, params)
+            from fab import recipes as fr
+            n = sum(v for k, v in (getattr(pl, "machines", None) or {}).items()
+                    if k in fr.RECIPES and k not in supplied)
+        except Exception:  # noqa: BLE001 - stub crews in tests
+            return False
+        return n >= self.QUICK_SPLIT_ASM and self._split_candidate(goal) is not None
+
+    def _memory_path(self):
+        from pathlib import Path
+        cd = getattr(MODULES["factory"], "case_dir", None)
+        return (Path(cd).parents[1] / "fab_memory.json") if cd is not None else None
+
+    def _split_memory(self, goal: dict) -> list[str]:
+        """The feeders this factory needed the last time at about this rate (runs/local/fab_memory.json)."""
+        import json
+        mem = getattr(self, "_fab_memory", None)
+        if mem is None:
+            p = self._memory_path()
             try:
-                return self._build(goal)
-            except BuildError as exc:
-                item = goal.get("item")
-                if f"no {item} factory fits" not in str(exc) or len(split) >= self.SPLIT_MAX:
-                    raise
-                part = self._split_candidate(goal)
-                if part is None:
-                    raise
-                split.append(part)
-                raw = goal.get("inputs") or []
-                raw = [raw] if isinstance(raw, str) else list(raw)
-                goal = {**goal, "inputs": raw + [part]}
-                self.log(f"[crew] no {item} factory fits as one block: {part} gets a factory of its own first, "
-                         f"and the {item} factory takes it by belt")
-                if self.current is not None:          # the new feeder's time on top of the goal's budget
-                    self.current["extra_min"] = float(self.current.get("extra_min") or 0.0) +                         MODULE_BUDGET_MIN.get("factory", GOAL_BUDGET_MIN["build"])
+                mem = json.loads(p.read_text(encoding="utf-8")) if p is not None and p.exists() else {}
+            except Exception:  # noqa: BLE001 - a broken file is no memory
+                mem = {}
+            self._fab_memory = mem
+        rec = mem.get(str(goal.get("item")))
+        try:
+            rate = float(MODULES["factory"].rate(goal))
+            makeable = set(MODULES["factory"].can_make(self.kn))
+        except Exception:  # noqa: BLE001
+            return []
+        if not rec or rate < 0.6 * float(rec.get("per_minute") or 0):
+            return []
+        return [q for q in rec.get("split") or [] if q and q in makeable]
+
+    def _remember_split(self, goal: dict, split: list[str]) -> None:
+        """A factory that had to be split: the next one at about this rate (any run) is split from the start."""
+        import json
+        parts = [q for q in split if q]
+        if not parts:
+            return
+        mem = getattr(self, "_fab_memory", None) or {}
+        old = mem.get(str(goal.get("item"))) or {}
+        rate = float(MODULES["factory"].rate(goal))
+        mem[str(goal.get("item"))] = {"split": parts,
+                                      "per_minute": min(rate, float(old.get("per_minute") or rate))}
+        self._fab_memory = mem
+        p = self._memory_path()
+        if p is None:
+            return
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(json.dumps(mem, indent=1), encoding="utf-8")
+        except OSError as exc:
+            self.log(f"[crew] fab memory not saved: {exc}")
 
     def _split_candidate(self, goal: dict) -> str | None:
         """The intermediate a too-big factory should take by belt instead of making: the one with the most
@@ -1420,7 +1509,7 @@ class Crew:
             return []
         want = {p: float(getattr(pl, "supplied", {}).get(p, 0)) for p in self.PLATE_ORE if p in supplied}
         want = {p: r for p, r in want.items() if r > 0}
-        if not want:
+        if not want and not (set(supplied) - set(self.PLATE_ORE) - {params.get("item")}):
             return []
         # every plate it takes, not only the one it needs most: a circuit factory placed beside copper had its
         # iron walled off behind the base core, four times (run 20261122-133537). And the port that waits for
@@ -1437,6 +1526,15 @@ class Crew:
                 if self.line_at((x, y)) is None:
                     spots.append((0.0, (x, y)))
             out += [(p[0], p[1], plate) for _, p in sorted(spots)[:(4 if not out else 2)]]
+        # inputs other than plates (plastic, circuits, cable from a feeder...): their sources count where the
+        # factory goes too (run 20261125-214645: advanced circuits were placed by the plates near the base, with
+        # plastic 223-354 tiles off at the oil field; no design there could ever be linked)
+        for it in sorted(set(supplied) - set(want) - set(self.PLATE_ORE) - {params.get("item")}):
+            srcs = [(x, y) for x, y, _s in self._free_outputs(it, None)]
+            if srcs:
+                home = self.base.centre or self.w.pos
+                srcs.sort(key=lambda q: math.dist(q, home))
+                out += [(q[0], q[1], it) for q in srcs[:2]]
         if out:
             item = params.get("item")
             waits = [tuple(pt["approach"]) for _, pt in self.item_ports() if pt.get("item") == item
@@ -1454,12 +1552,14 @@ class Crew:
         """Give a build its dry route checks for this goal (reset after it): a factory its route probe and the
         spots where the same factory already failed, an outpost its trunk probe. Returns the old values."""
         if mod.name == "factory":
-            old = {"probe": getattr(mod, "probe", None), "avoid": getattr(mod, "avoid", ())}
+            old = {"probe": getattr(mod, "probe", None), "avoid": getattr(mod, "avoid", ()),
+                   "reach": getattr(mod, "reach", None)}
             try:
                 mod.probe = self.route_probe(params)
             except Exception as exc:  # noqa: BLE001 - no probe is the old behaviour, never a failed build
                 self.log(f"[crew] route probe not set up for {params.get('item')}: {str(exc)[:120]}")
                 mod.probe = None
+            mod.reach = getattr(mod.probe, "reach", None)
             mod.avoid = self.bad_places(params.get("item"))
             return old
         if mod.name == "outpost":
@@ -1558,7 +1658,20 @@ class Crew:
             if out:
                 log(f"[fab] route probe for {item} at ({d.box[0]}, {d.box[1]}): {out[0]}")
             return out
+
+        def reach_at(focus) -> list[str]:
+            """Inputs with spare sources none of which is within a link's reach of this place (its ports stand
+            around it: REACH_SLACK tiles of room)."""
+            out = []
+            for it, cands in sources.items():
+                gap = min(self._manhattan(c[1], focus) for c in cands)
+                if gap > belts.LINK_REACH - self.REACH_SLACK:
+                    out.append(f"{it} {gap:.0f} tiles off")
+            return out
+        probe.reach = reach_at
         return probe
+
+    REACH_SLACK = 15               # tiles from a factory's centre to its farthest port, about
 
     def bad_places(self, item: str | None) -> list:
         """Where a factory of this item stood with an input no belt could reach (recently): [(centre, input)]."""
