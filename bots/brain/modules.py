@@ -63,6 +63,43 @@ def coal_belts_ready(kn) -> bool:
     return unlocked is None or {"underground-belt", "long-handed-inserter"} <= set(unlocked)
 
 
+# Electric smelting (docs/hybrid-plan.md, section 5). Once advanced-material-processing-2 is in, new smelter
+# columns and furnace rows use electric furnaces: no coal port, no coal belt, no burners for the foreman to refuel
+# (run 20261125-214645: 301 refuels by hand, and at minute 590 two iron columns and two copper rows were out of coal
+# while iron fell to 95/min). An electric furnace is 3x3 (a stone or steel one 2x2), smelts at speed 2 like a steel
+# furnace, and draws 180 kW.
+ELECTRIC_FURNACE = "electric-furnace"
+ELECTRIC_FURNACE_KW = 180.0
+
+
+def burner_furnace(kn) -> str:
+    return "steel-furnace" if "steel-furnace" in (getattr(kn, "unlocked", None) or set()) else "stone-furnace"
+
+
+def furnace_choice(w, p: dict, n: int = 1) -> str:
+    """The furnace a new column or row is built with: what the goal says (`furnace`, set once by Crew._build so the
+    kit and the build agree), else an electric one when it is unlocked and n of them can be got (Crew.can_obtain:
+    an electric furnace takes advanced circuits; a column that cannot get them is built with burners as before),
+    else the best burner furnace."""
+    kn = getattr(w, "kn", None)
+    asked = p.get("furnace")
+    if asked in ("stone-furnace", "steel-furnace", ELECTRIC_FURNACE):
+        return asked
+    if ELECTRIC_FURNACE in (getattr(kn, "unlocked", None) or set()):
+        can = getattr(w, "obtainable", None)
+        try:
+            if can is None or can(ELECTRIC_FURNACE, max(1, int(n))):
+                return ELECTRIC_FURNACE
+        except Exception:  # noqa: BLE001 - cannot tell: burners, as before
+            pass
+    return burner_furnace(kn)
+
+
+def coal_fed(site) -> bool:
+    """A smelting site whose furnaces burn coal (a coal port or hand fuel): what the electric swap replaces."""
+    return any(e[0] in ("stone-furnace", "steel-furnace") for e in site.entities)
+
+
 class PumpRejected(BuildError):
     """The game refused the offshore pump on a shore tile (the tile is remembered as bad)."""
 
@@ -1553,7 +1590,8 @@ class ElectricMine(Module):
                 "or `into: chest`). ~19 plates or 30 ore a minute each, buffers of 3200 per chest. Once logistics "
                 "is researched its furnaces burn coal from a belt behind the chests (a long-handed inserter each) "
                 "that the crew links to an electric coal mine right away; before that they are fed by hand, and "
-                "get their coal belt later where they stand. The plate supply for factories and "
+                "get their coal belt later where they stand. Once advanced-material-processing-2 is researched its "
+                "furnaces are electric (180 kW each, no coal at all). The plate supply for factories and "
                 "workshops. Needs electric-mining-drill researched and power. For iron and copper plates and "
                 "for coal a dense field near the base ({\"module\": \"outpost\", \"near_base\": true}) mines the "
                 "same patch twice as densely and smelts beside it: use rows for stone, raw ore, or where the "
@@ -1561,10 +1599,23 @@ class ElectricMine(Module):
     # a north-facing unit, relative to the drill's centre tile (cx, cy): the drill drops on (cx, cy - 2)
     # (catalog drop_vector 0, -1.85), the furnace covers it, an inserter above lifts plates into a chest
     UNIT_W = 3
+    # an electric furnace is 3 wide: its units stand 4 apart, a pole in the free column between two furnaces (it
+    # reaches both drills, both furnaces and both plate inserters; one per unit, so the wires span 4 tiles)
+    UNIT_W_ELECTRIC = 4
 
     @staticmethod
     def _into(p: dict) -> str:
         return p.get("into") or ("chest" if p["resource"] in ("coal",) else "furnace")
+
+    def furnace(self, w, p: dict) -> str | None:
+        """The furnace its units get (None: a chest row)."""
+        if self._into(p) == "chest":
+            return None
+        f = furnace_choice(w, p, self._count(p))
+        return f if f == ELECTRIC_FURNACE else "stone-furnace"     # burner rows: stone, upgraded in place later
+
+    def electric(self, w, p: dict) -> bool:
+        return self.furnace(w, p) == ELECTRIC_FURNACE
 
     def layout(self, w, p: dict) -> str:
         """chest, furnace (a plate chest per unit) or line (every unit's plates onto one belt): plate rows are
@@ -1590,8 +1641,13 @@ class ElectricMine(Module):
         else:
             out["transport-belt"] = 3 * n + 2
         if lay in ("furnace", "line"):
-            out.update({"stone-furnace": n, "inserter": n})
-            if self.fuel_belt(w):
+            fur = self.furnace(w, p)
+            out.update({fur: n, "inserter": n})
+            if fur == ELECTRIC_FURNACE:                  # no coal belt; a pole per unit (4 apart), the line 4 a unit
+                out["small-electric-pole"] = n + 2
+                if lay == "line":
+                    out["transport-belt"] = 4 * n + 2
+            elif self.fuel_belt(w):
                 out["long-handed-inserter"] = n
                 out["transport-belt"] = out.get("transport-belt", 0) + 3 * n
         return out
@@ -1601,13 +1657,28 @@ class ElectricMine(Module):
         """Furnace rows get a coal belt once coal belts are worth it (see coal_belts_ready)."""
         return coal_belts_ready(getattr(w, "kn", None))
 
-    def unit(self, cx: int, cy: int, into: str, fuel: bool = False) -> dict:
+    def unit_w(self, electric: bool = False) -> int:
+        return self.UNIT_W_ELECTRIC if electric else self.UNIT_W
+
+    def unit(self, cx: int, cy: int, into: str, fuel: bool = False, electric: bool = False) -> dict:
         """One drill's tiles, north-facing. With fuel: a coal belt runs east along row cy - 6, behind the plate
         chests, and a long-handed inserter at (cx + 1, cy - 4) lifts coal from it over the chest row into the
-        furnace (it picks up 2 tiles north, drops 2 tiles south)."""
+        furnace (it picks up 2 tiles north, drops 2 tiles south). Electric: a 3x3 electric furnace over the drop
+        tile (cx - 1..cx + 1, cy - 4..cy - 2), its inserter at (cx, cy - 5), the chest or line on row cy - 6, and a
+        pole at (cx + 2, cy - 3) in the free column before the next unit (it covers this unit's drill, furnace and
+        inserter and the next one's); no coal at all."""
         drill = {(cx + dx, cy + dy) for dx in (-1, 0, 1) for dy in (-1, 0, 1)}
         if into == "chest":
             return {"drill": drill, "rest": {(cx, cy - 2)}, "chest": (cx, cy - 2)}
+        if electric:
+            ftiles = {(cx + dx, cy + dy) for dx in (-1, 0, 1) for dy in (-4, -3, -2)}
+            u = {"drill": drill, "furnace": (cx + 0.5, cy - 2.5), "furnace_tiles": ftiles,
+                 "inserter": (cx, cy - 5), "chest": (cx, cy - 6), "pole": (cx + 2, cy - 3)}
+            u["rest"] = ftiles | {(cx, cy - 5), (cx, cy - 6), u["pole"]}
+            if into == "line":                   # four tiles a unit: the chest tile and the three east of it
+                u["line"] = [(cx + k, cy - 6) for k in range(self.UNIT_W_ELECTRIC)]
+                u["rest"] = u["rest"] | set(u["line"])
+            return u
         furnace = {(cx, cy - 3), (cx + 1, cy - 3), (cx, cy - 2), (cx + 1, cy - 2)}
         u = {"drill": drill, "rest": furnace | {(cx, cy - 4), (cx, cy - 5)}, "furnace": (cx + 1, cy - 2),
              "inserter": (cx, cy - 4), "chest": (cx, cy - 5)}
@@ -1627,25 +1698,31 @@ class ElectricMine(Module):
         return (first_cx - 2, cy - 6), (first_cx - 3, cy - 6)
 
     def _rows(self, w: FreeWorld, resource: str, n: int, into: str, toward,
-              fuel: bool = False) -> list[tuple[int, int]]:
+              fuel: bool = False, electric: bool = False) -> list[tuple[int, int]]:
         """The best run of up to n units side by side: drills on ore, everything free, nearest `toward`."""
         ore = w.resources.get(resource, set())
         foreign = foreign_ore(w, resource)
         best: list = []
         best_score = None
         starts = sorted(ore, key=lambda t: math.dist(t, toward))[:600]
+        elec = electric and into in ("furnace", "line")
+        step = self.unit_w(elec)
         for sx, sy in starts:
             run: list = []
             cx = sx
             while len(run) < n:
-                u = self.unit(cx, sy, into, fuel)
-                pole = ({(cx + 2, sy - 3)} if into in ("furnace", "line") else {(cx + 2, sy - 2)}) if len(run) % 2 == 0                     else set()          # a chest row's pole too (site 50 of run 20261119-154451 got none)
+                u = self.unit(cx, sy, into, fuel, elec)
+                if elec:
+                    pole = set()                     # every unit's pole is in its own tiles ("rest")
+                else:
+                    pole = ({(cx + 2, sy - 3)} if into in ("furnace", "line") else {(cx + 2, sy - 2)}) \
+                        if len(run) % 2 == 0 else set()   # a chest row's pole too (site 50 of run 20261119-154451)
                 port = set(self.fuel_port(cx, sy)) if fuel and not run else set()
                 if sum(t in ore for t in u["drill"]) < 7 or mixes_ore(cx, sy, foreign) or thin_ground(w, cx, sy) \
                         or reserved(w, u["drill"]) or not w.free(u["drill"] | u["rest"] | pole | port):
                     break
                 run.append((cx, sy))
-                cx += self.UNIT_W
+                cx += step
             if not run:
                 continue
             score = (-len(run), math.dist(run[0], toward))
@@ -1679,23 +1756,33 @@ class ElectricMine(Module):
                 continue                                 # a big patch's edge may still be in reach: 60 tiles slack
             w.survey_area(*c, half=min(40, max(12, int(math.sqrt(q["tiles"])))), step=32)
             lay = self.layout(w, p)
-            fuel = lay in ("furnace", "line") and self.fuel_belt(w) and w.inventory.get("long-handed-inserter", 0) >= 1
-            units = self._rows(w, resource, n, lay, base.centre or c, fuel)
+            elec = lay in ("furnace", "line") and self.furnace(w, p) == ELECTRIC_FURNACE
+            fuel = lay in ("furnace", "line") and not elec and self.fuel_belt(w) \
+                and w.inventory.get("long-handed-inserter", 0) >= 1
+            units = self._rows(w, resource, n, lay, base.centre or c, fuel, elec)
             if not units:
                 continue
             if wanted and min(abs(units[0][0] - e[0]) + abs(units[0][1] - e[1]) for e in wanted) > LINK_REACH:
                 too_far.append(min(abs(units[0][0] - e[0]) + abs(units[0][1] - e[1]) for e in wanted))
                 continue
             site = Site(self.name, {"resource": resource, "count": 0, "into": lay}, c)
+            if elec:
+                site.params["furnace"], site.params["fuel"] = ELECTRIC_FURNACE, "electric"
             from . import belts
             strip = [t for cx, cy in units for t in self.unit(cx, cy, lay, fuel).get("belt", [])] if fuel else []
             if strip and belts.strip_blocked(w, strip) is not None:
                 continue                             # its coal strip would end against a belt and spill onto it
             with belts.job_for(w, ["coal"], strip):          # its fuel strip ends dead: it joins no belt
                 for k, (cx, cy) in enumerate(units):
-                    u = self.unit(cx, cy, lay, fuel)
+                    u = self.unit(cx, cy, lay, fuel, elec)
                     ch = u["chest"]
-                    if lay in ("furnace", "line"):
+                    if elec:
+                        fx, fy = u["furnace"]                # no fuel: it runs on the network
+                        w.place(ELECTRIC_FURNACE, fx, fy, "north", u["furnace_tiles"])
+                        site.plate_furnaces.append((fx, fy, plate))
+                        ix, iy = u["inserter"]
+                        w.place("inserter", ix + 0.5, iy + 0.5, "south", {(ix, iy)})   # picks from the furnace below
+                    elif lay in ("furnace", "line"):
                         fx, fy = u["furnace"]
                         w.place("stone-furnace", fx, fy, "north", {t for t in u["rest"] if cy - 3 <= t[1] <= cy - 2})
                         site.plate_furnaces.append((fx, fy, plate))
@@ -1712,7 +1799,7 @@ class ElectricMine(Module):
                         w.place("iron-chest", ch[0] + 0.5, ch[1] + 0.5, "north", {ch})
                         site.chests.append((ch[0] + 0.5, ch[1] + 0.5, plate if into == "furnace" else resource))
                     w.place("electric-mining-drill", cx + 0.5, cy + 0.5, "north", u["drill"])
-                    if k % 2 == 0:
+                    if elec or k % 2 == 0:
                         pole = (cx + 2, cy - 3) if lay in ("furnace", "line") else (cx + 2, cy - 2)
                         if w.free({pole}):
                             w.place("small-electric-pole", pole[0] + 0.5, pole[1] + 0.5, "north", {pole})
@@ -1722,8 +1809,10 @@ class ElectricMine(Module):
             xs = [u[0] for u in units]
             site.centre = (sum(xs) / len(xs) + 0.5, units[0][1] - 1.5)
             if lay == "line":
-                site.params["line"] = self.lay_line(w, base, units, plate)
-            if fuel:                                     # the coal input: the crew belts coal into it right away
+                site.params["line"] = self.lay_line(w, base, units, plate, electric=elec)
+            if elec:
+                pass                                     # no coal input: nothing to link, nothing to refuel
+            elif fuel:                                   # the coal input: the crew belts coal into it right away
                 end, appr = self.fuel_port(*units[0])
                 site.params["ports"] = [{"item": "coal", "end": list(end), "approach": list(appr), "fuel": True,
                                          "per_minute": round(1.4 * len(units), 1), "fed": None}]
@@ -1741,11 +1830,13 @@ class ElectricMine(Module):
 
     PLATE_RATE = 18.75           # a stone furnace's plates a minute: the slower half of a drill-into-furnace unit
 
-    def lay_line(self, w, base, units: list, plate: str) -> dict:
-        """The row's line: a belt along the plate side of the units (y = cy - 5) flowing toward the base, its
-        first link continuing straight on from the tail (no inserter between: a whole row through one belt).
-        The tiles beyond the tail stay a lane, so nothing but a belt is built there."""
-        y = units[0][1] - 5
+    ELECTRIC_PLATE_RATE = 30.0   # an electric furnace (speed 2) keeps up with its drill's 30 ore a minute
+
+    def lay_line(self, w, base, units: list, plate: str, electric: bool = False) -> dict:
+        """The row's line: a belt along the plate side of the units (y = cy - 5; cy - 6 behind electric furnaces)
+        flowing toward the base, its first link continuing straight on from the tail (no inserter between: a whole
+        row through one belt). The tiles beyond the tail stay a lane, so nothing but a belt is built there."""
+        y = units[0][1] - (6 if electric else 5)
         x0, x1 = units[0][0], units[-1][0]
         home = base.centre or w.pos
         east_first = home[0] >= (x0 + x1) / 2
@@ -1767,7 +1858,8 @@ class ElectricMine(Module):
         lanes = getattr(w, "lanes", None)
         if lanes is not None:
             lanes |= {(start[0] + step * k, y) for k in range(3)}
-        return line_record(plate, tiles, facing, start, len(units) * self.PLATE_RATE)
+        return line_record(plate, tiles, facing, start,
+                           len(units) * (self.ELECTRIC_PLATE_RATE if electric else self.PLATE_RATE))
 
 
 # ---------------------------------------------------------------- pumpjack
@@ -1776,14 +1868,17 @@ class Pumpjack(Module):
     describe = ("pumpjacks on the nearest crude-oil wells, each with a pole, wired to the power network. Pumping "
                 "crude oil completes the oil-processing trigger technology (refinery, chemical plant). The oil "
                 "stays in the pumpjacks: no module pipes it to a refinery yet. Needs oil-gathering researched "
-                "(red + green; the crew queues it) and 5 steel per pumpjack (the crew smelts it). args: {count: 1-4}")
+                "(red + green; the crew queues it) and 5 steel per pumpjack (the crew smelts it). args: {count: 1-8}")
+
+    WELLS_MIN = 3                # crude wells known before the pumpjacks settle on fewer (assess.OIL_WELLS_MIN)
+    MAX = 8                      # pumpjacks one goal places at most (more wells found: more of them pumped)
 
     def kit(self, w, base, p):
-        n = max(1, min(4, int(p.get("count", 1))))
+        n = max(1, min(self.MAX, int(p.get("count", 1))))
         return {"pumpjack": n, "small-electric-pole": n}
 
     def build(self, w, base, p):
-        n = max(1, min(4, int(p.get("count", 1))))
+        n = max(1, min(self.MAX, int(p.get("count", 1))))
         if not base.powered_poles():
             raise BuildError("a pumpjack needs power: build steam_power first")
         home = base.centre or w.pos
@@ -1796,7 +1891,17 @@ class Pumpjack(Module):
             raise BuildError(f"no crude oil within ~{far} tiles of the base yet ({w.oil_rings} of {w.OIL_MAX_RINGS} "
                              "search rings walked); the next pumpjack goal searches farther out")
         taken = {(e[1], e[2]) for s in base.sites for e in s.entities if e[0] == "pumpjack"}
-        if not [q for q in wells if q not in taken and not any(w.blocked(t) for t in w.footprint("pumpjack", *q))]:
+        free = [q for q in wells if q not in taken and not any(w.blocked(t) for t in w.footprint("pumpjack", *q))]
+        if free and len(free) < n and len(wells) < self.WELLS_MIN \
+                and getattr(w, "oil_rings", 0) < getattr(w, "OIL_MAX_RINGS", 5):
+            # fewer free wells than pumpjacks asked for and few known at all: look for another field first, so the
+            # pumpjacks go on more wells (run 20261125-214645 pumped one well 188 tiles out for the whole oil chain)
+            w.doing(f"only {len(wells)} crude-oil well(s) known: looking for another field before the pumpjacks")
+            more = w.oil_wells(near=home, more=True) or wells
+            # this goal pumps one field (one pole bridge): the nearest free well's; a field found farther out is
+            # known now, and the next pumpjack goal goes there once this one's wells are taken
+            wells = [q for q in more if math.dist(q, free[0]) <= 40] or wells
+        if not free:
             # every well we know is pumped: a workshop that needs crude must still get it, so the search goes on
             # outward (run 20261124-015025: 2 wells, both pumped for plastic; chemical science never got crude)
             w.doing("every known crude-oil well is pumped: searching farther out for another field")

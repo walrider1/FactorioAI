@@ -552,7 +552,17 @@ class Workshop(Module):
                     if t in terminals and seen_any:           # an extra pumpjack that does not fit: skip it
                         continue
                     self._save_floor(w, d, nets, planned, fl, t)
-                    far = [q for q in nets.tiles(fl) | set(terminals) if math.dist(q, t) > self.SURVEY_MIN]
+                    srcs = nets.tiles(fl) | set(terminals)
+                    near = min(srcs, key=lambda q: math.dist(q, t)) if srcs else None
+                    if fl == "crude-oil" and near is not None and math.dist(near, t) <= self.SURVEY_MIN:
+                        # the floor's own crude net is right there: the port is boxed in on the floor (walkways,
+                        # other cells' ports and lanes), not cut off from the oil. Run 20261125-214645 said "58
+                        # tiles ... blocked by water, cliffs or buildings" while the net stood 13 tiles away
+                        raise BuildError(f"no pipe route for crude-oil from the new cell's port at {t} to the floor's "
+                                         f"crude net {round(math.dist(near, t))} tiles away at {near}: the floor is too "
+                                         "crowded there (cells, walkways, other fluids' ports and lanes). The crude "
+                                         "oil is found and pumped: scouting or more pumpjacks do not help")
+                    far = [q for q in srcs if math.dist(q, t) > self.SURVEY_MIN]
                     if fl == "crude-oil" and far:
                         src = min(far, key=lambda q: math.dist(q, t))
                         raise BuildError(f"no pipe route for crude-oil from the floor to its crude line (nearest at "
@@ -615,7 +625,14 @@ class Workshop(Module):
                     "planned": sorted([list(t) for t in planned]),
                     "pipe": [[t[0], t[1], f] for t, f in nets.pipe.items()],
                     "ptg": [[t[0], t[1], f, dd] for t, (f, dd) in nets.ptg.items()],
-                    "reserved": [[t[0], t[1], f] for t, f in nets.reserved.items()]}
+                    "reserved": [[t[0], t[1], f] for t, f in nets.reserved.items()],
+                    # the rest of the router's rules, so a replay fails the same way (the floors of run
+                    # 20261125-214645 replay as routable without them)
+                    "walk": sorted([list(t) for t in nets.walk if t in box]),
+                    "noend": sorted([list(t) for t in nets.noend if t in box]),
+                    "lanes": [[t[0], t[1], f] for t, f in nets.lanes.items()],
+                    "pumps": [[t[0], t[1], f] for t, f in nets.pumps.items()],
+                    "spans": [list(sp) for sp in nets.spans]}
             self.case_dir.mkdir(parents=True, exist_ok=True)
             n = len(list(self.case_dir.glob("floor_*.json"))) + 1
             (self.case_dir / f"floor_{n:02d}_{fluid}.json").write_text(json.dumps(data), encoding="utf-8")

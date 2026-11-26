@@ -22,15 +22,15 @@ from __future__ import annotations
 
 import math
 
-from .modules import (DRILL_REACH, Module, Site, coal_belts_ready, foreign_ore, line_record, lines_ready,
-                      mixes_ore, reserved, thin_ground)
+from .modules import (DRILL_REACH, ELECTRIC_FURNACE, Module, Site, burner_furnace, coal_belts_ready, foreign_ore,
+                      furnace_choice, line_record, lines_ready, mixes_ore, reserved, thin_ground)
 from .world import BuildError, _same_patch
 
 ORES = ("iron-ore", "copper-ore", "coal", "stone")
 PRODUCT = {"iron-ore": "iron-plate", "copper-ore": "copper-plate", "stone": "stone-brick",
            "iron-plate": "steel-plate"}
 # what one furnace takes in a minute (ore, or plates for steel: five a steel, 16 s at speed 1)
-FURNACE_IN = {"stone-furnace": 18.75, "steel-furnace": 37.5}
+FURNACE_IN = {"stone-furnace": 18.75, "steel-furnace": 37.5, "electric-furnace": 37.5}
 RUNWAY_MIN = 240.0              # game minutes of ore left on worked patches before the next patch is prepared
 DRILL_PER_MIN = 30.0            # an electric drill's ore a minute
 POLE = "small-electric-pole"
@@ -506,6 +506,7 @@ class SmelterColumn(Module):
                 "With resource iron-plate it makes STEEL by belt (iron plates linked in like any input, steel "
                 "into chests kits and links take from): the way to the silo's 1000 steel and purple science's "
                 "rails. With an ore it is the base end of an outpost's trunk (the outpost goal builds that one). "
+                "Once advanced-material-processing-2 is researched its furnaces are electric (no coal belt). "
                 "args: {resource, count (furnaces), toward: [x, y]}")
 
     @staticmethod
@@ -513,9 +514,15 @@ class SmelterColumn(Module):
         return p.get("into") or ("chest" if p["resource"] == "coal" else "furnace")
 
     @staticmethod
-    def furnace(w) -> str:
-        unlocked = getattr(w.kn, "unlocked", set()) or set()
-        return "steel-furnace" if "steel-furnace" in unlocked else "stone-furnace"
+    def furnace(w, p: dict | None = None, n: int | None = None) -> str:
+        """Its furnaces: electric once unlocked and obtainable (modules.furnace_choice), else steel or stone."""
+        p = p or {}
+        if n is None:
+            n = max(1, min(24, int(p.get("count", 8) or 8)))
+        return furnace_choice(w, p, n)
+
+    def electric(self, w, p: dict) -> bool:
+        return self.layout(w, p) != "chest" and self.furnace(w, p) == ELECTRIC_FURNACE
 
     def layout(self, w, p: dict) -> str:
         """chest (depot chests off the trunk), furnace (a product chest per furnace) or line (every furnace's
@@ -535,7 +542,16 @@ class SmelterColumn(Module):
         lay = self.layout(w, p)
         if lay == "chest":
             return {"iron-chest": n, "inserter": n, "transport-belt": n + 2, POLE: n // 4 + 2}
-        out = {self.furnace(w): n, "inserter": 2 * n, "long-handed-inserter": n, "iron-chest": n,
+        if self.furnace(w, p, n) == ELECTRIC_FURNACE:
+            # three rows a furnace: the trunk and (a line column) the line run 3n tiles; no coal belt, no
+            # long-handed inserters; a pole on each side of every second furnace
+            out = {ELECTRIC_FURNACE: n, "inserter": 2 * n, "transport-belt": 3 * n + 4, POLE: 2 * (n // 2 + 1) + 2}
+            if lay == "line":
+                out["transport-belt"] += 3 * n + 3
+            else:
+                out["iron-chest"] = n
+            return out
+        out = {self.furnace(w, p, n): n, "inserter": 2 * n, "long-handed-inserter": n, "iron-chest": n,
                "transport-belt": 4 * n + 4, POLE: n + 2}
         if lay == "line":
             out.pop("iron-chest")
@@ -548,25 +564,30 @@ class SmelterColumn(Module):
     # ever came out). So a line column leaves a free row after the first furnace and then after every second one,
     # and a pole there at bx - 3 covers both inserter columns of the furnaces above and below it.
     @staticmethod
-    def furnace_rows(n: int, into: str) -> tuple[list[int], list[int], int]:
-        """(each furnace's first row, the pole rows between them, rows in all) from the column's top row 0."""
+    def furnace_rows(n: int, into: str, electric: bool = False) -> tuple[list[int], list[int], int]:
+        """(each furnace's first row, the pole rows between them, rows in all) from the column's top row 0. An
+        electric column: three rows a furnace, its poles beside the inserters (no rows of their own)."""
         if into == "chest":
             return list(range(n)), [], n
+        if electric:
+            return [3 * k for k in range(n)], [], 3 * n
         if into != "line":
             return [2 * k for k in range(n)], [], 2 * n
         ys = [2 * k + (k + 1) // 2 for k in range(n)]
         gaps = [ys[k] + 2 for k in range(0, n, 2)]
         return ys, gaps, 2 * n + (n + 1) // 2
 
-    def tiles(self, bx: int, by: int, n: int, into: str) -> set:
-        rows = self.furnace_rows(n, into)[2]
+    def tiles(self, bx: int, by: int, n: int, into: str, electric: bool = False) -> set:
+        electric = electric and into != "chest"
+        rows = self.furnace_rows(n, into, electric)[2]
         xs = range(bx - 2, bx + 1) if into == "chest" else range(bx - 6, bx + 1)
         out = {(x, y) for x in xs for y in range(by, by + rows)}
         out |= {(bx, by - 1), (bx, by - 2)}
-        if into != "chest":
+        if into != "chest" and not electric:     # its coal port
             out |= {(bx - 6, by - 1), (bx - 6, by - 2)}
         if into == "line":                       # where the line's first link continues on
-            out |= {(bx - 5, by + rows), (bx - 5, by + rows + 1)}
+            lx = bx - 6 if electric else bx - 5
+            out |= {(lx, by + rows), (lx, by + rows + 1)}
         return out
 
     def find_spot(self, w, base, p, skip=()) -> tuple[int, int, int] | None:
@@ -574,6 +595,7 @@ class SmelterColumn(Module):
         a caller already ruled out (no trunk route into them, say)."""
         r, into = p["resource"], self.layout(w, p)
         n = max(1, min(24, int(p.get("count", 8))))
+        elec = self.electric(w, p)
         home = tuple(p.get("near") or base.centre or w.pos)     # where its inputs are, when known
         toward = tuple(p.get("toward") or home)
         skip = {tuple(s) for s in skip}
@@ -582,7 +604,7 @@ class SmelterColumn(Module):
         at = p.get("at")                                       # a spot checked before (Crew.outpost_probe)
         if at is not None:
             bx, by = int(at[0]), int(at[1])
-            area = self.tiles(bx, by, n, into)
+            area = self.tiles(bx, by, n, into, elec)
             if w.free(area) and not (area & ore) and not reserved(w, area):
                 return bx, by, n
         for size in range(n, 0, -1):
@@ -593,7 +615,7 @@ class SmelterColumn(Module):
                 for bx, by in sorted(cands, key=lambda q: (math.dist(q, home) * 0.6 + math.dist(q, toward) * 0.4)):
                     if (bx, by) in skip:
                         continue
-                    area = self.tiles(bx, by, size, into)
+                    area = self.tiles(bx, by, size, into, elec)
                     w.survey_area(bx - 3, by + size, half=max(12, size + 6), step=32)
                     if w.free(area) and not (area & ore) and not reserved(w, area):
                         return bx, by, size
@@ -609,12 +631,16 @@ class SmelterColumn(Module):
             raise BuildError(f"no clear ground near the base for a smelting column of "
                              f"{max(1, min(24, int(p.get('count', 8))))}")
         bx, by, n = found
+        if self.electric(w, p):
+            return self._build_electric(w, base, p, bx, by, n, trunk)
         fys, gaps, rows = self.furnace_rows(n, into)
         site = Site(self.name, {"resource": r, "count": n, "into": into}, (bx - 2.5, by + rows / 2))
         for t in range(rows):                          # the trunk's last stretch: down the column
             w.place("transport-belt", bx + 0.5, by + t + 0.5, "south", {(bx, by + t)})
         product = PRODUCT.get(r, r) if into != "chest" else r
-        fur = self.furnace(w)
+        fur = self.furnace(w, p)
+        if fur == ELECTRIC_FURNACE:                    # (fewer than asked would be obtainable: burners all the same)
+            fur = burner_furnace(getattr(w, "kn", None))
         for k in range(n):
             if into == "chest":
                 y = by + k
@@ -686,7 +712,71 @@ class SmelterColumn(Module):
             ports.append({"item": "coal", "end": [bx - 6, by - 1], "approach": [bx - 6, by - 2], "fuel": True,
                           "per_minute": round(1.4 * n, 1), "fed": None})
             site.params["fuel"] = "belt" if coal_belts_ready(getattr(w, "kn", None)) else "hand"
+        if p.get("outpost") is not None:            # a rebuild of an outpost's column: the same outpost feeds it
+            site.params["outpost"] = p["outpost"]
         site.params["ports"] = ports
+        for pt in ports:
+            w.keepout |= {tuple(pt["end"]), tuple(pt["approach"])}
+        return site
+
+    def _build_electric(self, w, base, p, bx: int, by: int, n: int, trunk: bool) -> Site:
+        """An electric column: the trunk (or the ore link) down column bx, an inserter at bx - 1 lifts ore into a
+        3x3 electric furnace (bx - 4..bx - 2, three rows each), an inserter at bx - 5 lifts its plates onto the line
+        (or into a chest) at bx - 6. Poles at bx - 1 and bx - 5 beside every second furnace's inserters reach both
+        furnaces' inserters and the furnaces (6 rows apart: within a small pole's wire). No coal port, no fuel."""
+        r, into = p["resource"], self.layout(w, p)
+        fys, _, rows = self.furnace_rows(n, into, electric=True)
+        site = Site(self.name, {"resource": r, "count": n, "into": into, "furnace": ELECTRIC_FURNACE,
+                                "fuel": "electric"}, (bx - 2.5, by + rows / 2))
+        for t in range(rows):
+            w.place("transport-belt", bx + 0.5, by + t + 0.5, "south", {(bx, by + t)})
+        product = PRODUCT.get(r, r)
+        for k in range(n):
+            y = by + fys[k]
+            ftiles = {(bx + dx, y + dy) for dx in (-4, -3, -2) for dy in (0, 1, 2)}
+            w.place(ELECTRIC_FURNACE, bx - 2.5, y + 1.5, "north", ftiles)
+            site.plate_furnaces.append((bx - 2.5, y + 1.5, product))
+            w.place("inserter", bx - 0.5, y + 1.5, "east", {(bx - 1, y + 1)})             # ore off the trunk
+            w.place("inserter", bx - 4.5, y + 1.5, "east", {(bx - 5, y + 1)})             # plates out of the furnace
+            if into == "line":
+                for dy in (0, 1, 2):
+                    w.place("transport-belt", bx - 5.5, y + dy + 0.5, "south", {(bx - 6, y + dy)})
+            else:
+                w.place("iron-chest", bx - 5.5, y + 1.5, "north", {(bx - 6, y + 1)})
+                site.chests.append((bx - 5.5, y + 1.5, product))
+            if k % 2 == 0:
+                for q in ((bx - 1, y + 2), (bx - 5, y + 2)):
+                    if w.free({q}):
+                        w.place(POLE, q[0] + 0.5, q[1] + 0.5, "north", {q})
+                        site.poles.append(q)
+        elec = [(bx - 1, by + y + 1) for y in fys] + [(bx - 5, by + y + 1) for y in fys]
+        for t in uncovered(elec, site.poles):       # a pole the layout could not place: any free spot near
+            if not uncovered([t], site.poles):
+                continue
+            q = next((q for q in sorted(((t[0] + dx, t[1] + dy) for dx in range(-2, 3) for dy in range(-2, 3)),
+                                        key=lambda q: abs(q[0] - t[0]) + abs(q[1] - t[1]))
+                      if w.free({q})), None)
+            if q is not None:
+                w.place(POLE, q[0] + 0.5, q[1] + 0.5, "north", {q})
+                site.poles.append(q)
+        dark = uncovered(elec, site.poles)
+        if dark:
+            raise BuildError(f"the electric smelting column's layout leaves {len(dark)} inserter(s) outside every "
+                             f"pole's supply area (first at {dark[0]})")
+        if into == "line":
+            tiles = [(bx - 6, by + t) for t in range(rows)]
+            start = (bx - 6, by + rows)
+            lanes = getattr(w, "lanes", None)
+            if lanes is not None:
+                lanes |= {(bx - 6, by + rows + k) for k in range(3)}
+            each = (FURNACE_IN[ELECTRIC_FURNACE] / 5) if r == "iron-plate" else FURNACE_IN[ELECTRIC_FURNACE]
+            site.params["line"] = line_record(product, tiles, "south", start, each * n)
+        per_in = 0.0 if trunk else round(FURNACE_IN[ELECTRIC_FURNACE] * n, 1)
+        ports = [{"item": r, "end": [bx, by - 1], "approach": [bx, by - 2], "fed": None, "per_minute": per_in,
+                  **({"trunk": True} if trunk else {})}]
+        site.params["ports"] = ports
+        if p.get("outpost") is not None:            # an electric swap of an outpost's column: the same outpost
+            site.params["outpost"] = p["outpost"]
         for pt in ports:
             w.keepout |= {tuple(pt["end"]), tuple(pt["approach"])}
         return site

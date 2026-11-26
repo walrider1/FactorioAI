@@ -498,6 +498,13 @@ inputs should come from a newer line.
 dry in turn. The link step belts a spare coal chest into them; new electric coal mines are what makes spares.
 When the coal patch has no room left, replace burner coal mines on it with electric ones, and keep new
 boilers and furnace rows within the coal there is: the patch is the ceiling until electric furnaces.
+Electric smelting: right after blue science is made, research advanced-material-processing-2 (electric furnaces;
+roadmap.next_step asks for it, and idle labs pick it first). From then on new smelter columns and furnace rows are
+built with electric furnaces (no coal port, no coal belt, 180 kW each), and the crew swaps the coal-fed ones itself,
+one at a time, least risky first, with their power booked before each swap ("swap-electric" alerts; a steam station
+first when the headroom is short): do not order those swaps yourself. Power is kept ~30% over what the network
+draws ("headroom-power" alerts). Oil: once oil processing is on its way the crew scouts until at least 3 crude
+wells are known ("scout-oil").
 
 Build like a player who finishes a block before moving on. "base_status" lists the sealed sites (they ran on
 their own for 10 minutes: inputs by belt, fuel by belt or none, power) and what still needs hands or repair,

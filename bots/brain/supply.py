@@ -33,8 +33,8 @@ HEADROOM = 1.3                  # build for the gap plus this much: demand grows
 ELECTRIC_ORE = 30.0             # an electric drill: 0.5 ore a second
 BURNER_ORE = 15.0               # a burner drill: 0.25 ore a second
 BURNER_SELF = 2.25              # coal a burner drill burns itself
-FURNACE = {"stone-furnace": 18.75, "steel-furnace": 37.5}       # plates a minute (3.2 s recipes)
-STEEL = {"stone-furnace": 3.75, "steel-furnace": 7.5}           # steel a minute (16 s recipe)
+FURNACE = {"stone-furnace": 18.75, "steel-furnace": 37.5, "electric-furnace": 37.5}   # plates a minute (3.2 s)
+STEEL = {"stone-furnace": 3.75, "steel-furnace": 7.5, "electric-furnace": 7.5}         # steel a minute (16 s)
 MINABLE = {"iron-ore", "copper-ore", "coal", "stone", "uranium-ore"}
 MAX_UNITS = {"electric_mine": 12, "burner_mine": 8, "smelter_column": 24}
 # Fewer, bigger mines: a 2-drill row runs dry within hours and every mine is one more source with its own belts
