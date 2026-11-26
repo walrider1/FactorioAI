@@ -431,3 +431,58 @@ def test_the_lab_round_never_empties_a_chest_a_science_belt_starts_at():
     assert not fm._labs_starving()                         # the packs there are the station's
     del crew.science_links[(1.5, 1.5)]
     assert fm._labs_starving() and fab.chests
+
+
+# ------------------------------------------------------------------ a line lends only past its last furnace
+def _copper_row(crew):
+    """Site 19 of run 20261125-214645: six furnaces below a line running east along y = 84, x -24..-9; each
+    furnace's output inserter (facing south: it picks from the furnace) drops onto the line at x -24, -21 .. -9."""
+    from brain.modules import line_record
+    tiles = [(x, 84) for x in range(-24, -8)]
+    ln = line_record("copper-plate", tiles, "east", (-8, 84), 112.5)
+    ents = [("inserter", x + 0.5, 85.5, "south") for x in range(-24, -8, 3)]          # plates out, onto the line
+    ents += [("inserter", x + 1.5, 85.5, "north") for x in range(-24, -8, 3)]         # fuel in, off the line
+    return crew.base.add(Site("electric_mine", {"resource": "copper-ore", "line": ln}, (-16, 88), entities=ents)), ln
+
+
+def test_a_line_lends_to_taps_only_past_its_last_furnace():
+    crew, w, _ = _crew()
+    site, ln = _copper_row(crew)
+    assert crew._line_drops(site, ln) == 15                    # x = -9: the tail
+    assert crew.line_taps(site, ln) == [(-9, 84)]             # nothing upstream, where one furnace of six drops
+    site.entities = []
+    assert crew.line_taps(site, ln) == [(x, 84) for x in range(-14, -9)]   # unknown drops: the last third
+
+
+def test_a_link_laid_on_the_first_tile_of_a_line_is_taken_up_once_to_be_laid_again():
+    crew, w, _ = _crew()
+    site, ln = _copper_row(crew)
+    fab = crew.base.add(Site("factory", {"item": "automation-science-pack"}, (-30, 40)))
+    port = {"item": "copper-plate", "end": (-30, 50), "approach": (-30, 51)}
+    rec = {"source": (-24, 84), "to_site": fab.id, "item": "copper-plate", "kind": "item", "port": port,
+           "steps": [], "entities": [], "ins": ((-24.5, 84.5), "east", "inserter"), "tap_of": ln}
+    crew.links.append(rec)
+    taken = []
+    crew._unlink = lambda q: (taken.append(q), crew.links.remove(q))
+    [q] = crew.starved_taps()
+    assert q["at"] == 0 and q["last"] == 15
+    [note] = crew._retake_starved()
+    assert taken == [rec] and "tile 1 of 16" in note
+    crew.links.append(dict(rec))                                # laid there again somehow: not taken up twice
+    assert crew._retake_starved() == []
+
+
+def test_no_pole_goes_on_a_line_head_and_a_starved_tap_stays_while_the_line_has_no_better_spot():
+    crew, w, _ = _crew()
+    site, ln = _copper_row(crew)
+    assert crew.line_heads() == {(-8, 84), (-7, 84), (-6, 84)}
+    w.seen, w.blocked, w.keepout = {(-8, 84), (-8, 80)}, (lambda t: False), set()
+    ok = crew._pole_freer()
+    assert not ok((-8, 84)) and ok((-8, 80))
+    fab = crew.base.add(Site("factory", {"item": "automation-science-pack"}, (-30, 40)))
+    rec = {"source": (-24, 84), "to_site": fab.id, "item": "copper-plate", "kind": "item",
+           "port": {"item": "copper-plate", "end": (-30, 50), "approach": (-30, 51)},
+           "steps": [], "entities": [], "ins": ((-24.5, 84.5), "east", "inserter")}
+    crew.links.append(rec)
+    crew._belt_free = lambda t: False                           # a pole on its start, the tail boxed in
+    assert crew._retake_starved() == [] and crew.links == [rec]

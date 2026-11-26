@@ -2603,7 +2603,7 @@ class Crew:
             return (f"plugged in {plugged} engine(s) with a pole each" if plugged else "already powered") + \
                 (self.short_note() if site.kind != "steam_power" else "")
         self.w.doing(f"routing power to site {site.id}")
-        free = lambda t: t in self.w.seen and not self.w.blocked(t) and t not in self.w.keepout
+        free = self._pole_freer()
         # Every group of the site's poles out of wire reach of the others (two pumpjacks on wells far apart,
         # cells between empty slots) is joined on its own: one bridge powers only the group it starts from.
         net = set(anchors)
@@ -2911,7 +2911,7 @@ class Crew:
             return 0
         status = self.look(site, sorted({e[0] for e in gens.values()}))
         unplugged = [gens[p] for p, st in status.items() if st == UNPLUGGED and p in gens]
-        free = lambda t: t in self.w.seen and not self.w.blocked(t) and t not in self.w.keepout
+        free = self._pole_freer()
         done = 0
         for name, x, y, d in unplugged:
             fp = self.w.footprint(name, x, y, d)
@@ -4587,7 +4587,7 @@ class Crew:
                 continue
             if not self._fits(budget, tuple(ln["source"]), need, item):
                 continue
-            out += [(tuple(t), ln) for t in ln["tiles"][:-1]]
+            out += [(t, ln) for t in self.line_taps(site, ln)]
         if item == "coal":
             for s in self.base.of("electric_mine"):
                 if s is consumer or s.params.get("fuel") != "belt" or not any(
@@ -4599,6 +4599,56 @@ class Crew:
                     continue
                 out += [((math.floor(x), math.floor(y)), s) for name, x, y, _ in s.entities if name == "transport-belt"]
         return [(t, owner) for t, owner in out if self._may_tap(t, item)]
+
+    @staticmethod
+    def _line_drops(site: Site, ln: dict) -> int:
+        """The index (in flow order) of the last tile of a line its own inserters drop plates onto; -1: none
+        found."""
+        from . import belts
+        idx = {tuple(t): i for i, t in enumerate(ln.get("tiles") or [])}
+        last = -1
+        for name, x, y, d in site.entities:
+            if not name.endswith("inserter") or d not in belts.VEC:
+                continue
+            dx, dy = belts.VEC[d]                     # an inserter faces where it picks up: it drops behind it
+            k = 2 if "long-handed" in name else 1
+            drop = (math.floor(x) - k * dx, math.floor(y) - k * dy)
+            if drop in idx:
+                last = max(last, idx[drop])
+        return last
+
+    def line_taps(self, site: Site, ln: dict) -> list[tuple[int, int]]:
+        """The tiles of a line a tap's inserter may pick from: only at or past the last furnace that drops onto
+        it, where the whole row's plates go by. A tile upstream sees only the furnaces before it (run
+        20261125-214645: three copper links picked from the first tile of site 19's line, where one furnace of
+        six drops; the other five backed up while the factories went short). The tail is left to the link that
+        runs on from it."""
+        tiles = [tuple(t) for t in ln.get("tiles") or []]
+        last = self._line_drops(site, ln)
+        if last < 0:
+            last = len(tiles) * 2 // 3               # no inserters known: the last third
+        return tiles[last:-1] or tiles[-1:]
+
+    def starved_taps(self) -> list[dict]:
+        """Links whose inserter picks from a line upstream of its last furnace (laid before line_taps)."""
+        from . import belts
+        out = []
+        for site, ln in self.lines():
+            tiles = [tuple(t) for t in ln.get("tiles") or []]
+            idx = {t: i for i, t in enumerate(tiles)}
+            last = self._line_drops(site, ln)
+            if last <= 0:
+                continue
+            for rec in self.links:
+                ins = rec.get("ins")
+                if rec.get("item") != ln.get("item") or not ins or not ins[0] or ins[1] not in belts.VEC:
+                    continue
+                dx, dy = belts.VEC[ins[1]]
+                pick = (math.floor(ins[0][0]) + dx, math.floor(ins[0][1]) + dy)
+                if pick in idx and idx[pick] < last:
+                    out.append({"link": rec, "site": site, "line": ln, "at": idx[pick], "last": last,
+                                "of": len(tiles)})
+        return out
 
     def _may_tap(self, t: tuple[int, int], item: str) -> bool:
         """Does the belt on tile t carry `item`? Not when it is another item's line, when its tag says it carries
@@ -4638,6 +4688,7 @@ class Crew:
         self.w.survey_area((min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2, half=half, step=32)
         bad = self.bad_tiles()
         resting = self._resting_starts()               # starts whose links kept rolling back (_note_rollback)
+        heads = {tuple(l["start"]) for _, l in self.lines()}   # a tap's inserter never takes a line's head-on start
         starts: dict = {}
         for c, key, label, cost, owner in cands:
             ln = self.line_at(key) if owner is None else None
@@ -4649,7 +4700,7 @@ class Crew:
             for dx, dy in belts.VEC.values():          # the inserter beside the source, the belt starts beyond it
                 ins, start = (c[0] + dx, c[1] + dy), (c[0] + 2 * dx, c[1] + 2 * dy)
                 if not all(t in unblock or self._belt_free(t) for t in (ins, start)) \
-                        or {ins, start} & (others | mine | bad | set(block)) or ins in resting:
+                        or {ins, start} & (others | mine | bad | set(block) | heads) or ins in resting:
                     continue
                 facing = next(k for k, v in belts.VEC.items() if v == (-dx, -dy))   # it picks up from the source
                 if start not in starts or cost < starts[start][0]:
@@ -4934,8 +4985,9 @@ class Crew:
                 if key in placed:
                     want[key] = (ln, "underground-belt" if st[0] == "ug" else "transport-belt", st[2],
                                  st[3] if st[0] == "ug" else None)
+        notes = self._retake_starved()
         if not want:
-            return []
+            return notes
         have: dict[tuple, dict] = {}
         todo = set(want)
         while todo:
@@ -4955,7 +5007,6 @@ class Crew:
             if not any(b[0] is ln for b in broken):
                 what = "missing" if e is None else f"{e.get('belt_type') or ''} facing {e.get('direction')}".strip()
                 broken.append((ln, key, what, name, facing, typ))
-        notes = []
         for ln, key, what, name, facing, typ in broken:
             todo_ln, gone = [ln], []
             while todo_ln:                            # and what hangs off it: it would carry nothing either
@@ -4970,6 +5021,42 @@ class Crew:
             notes.append(f"the {ln['item']} link into site {ln['to_site']} was broken at {key} ({name} "
                          f"{'wanted ' + (typ + ' ' if typ else '') + 'facing ' + facing}, found {what}): taken up "
                          f"({len(gone)} link(s)), to be laid again")
+        return notes
+
+    def _line_open(self, site: Site, ln: dict) -> bool:
+        """Can a link take this line's whole flow: its start free for a belt, or a tap past its last furnace with
+        room for an inserter and the belt beyond?"""
+        from . import belts
+        if self._belt_free(tuple(ln["start"])):
+            return True
+        heads = self.line_heads()
+        for t in self.line_taps(site, ln):
+            for dx, dy in belts.VEC.values():
+                ins, start = (t[0] + dx, t[1] + dy), (t[0] + 2 * dx, t[1] + 2 * dy)
+                if ins not in heads and start not in heads and self._belt_free(ins) and self._belt_free(start):
+                    return True
+        return False
+
+    def _retake_starved(self) -> list[str]:
+        """Take up (once each) a link that picks from a line where only its first furnaces drop: laid again, it
+        taps the line past its last furnace, or a belt that carries the whole row."""
+        done = self.__dict__.setdefault("_starved_retaken", set())
+        notes = []
+        for q in self.starved_taps():
+            rec = q["link"]
+            key = tuple(rec["port"]["end"])
+            if key in done or not any(rec is l for l in self.links):
+                continue
+            if not self._line_open(q["site"], q["line"]):
+                continue                              # nowhere better yet: a starved tap beats none (tried again later)
+            done.add(key)
+            hang = [h for h in self.links if h.get("tap_of") is rec or h.get("boost_into") is rec]
+            for h in hang + [rec]:
+                self._unlink(h)
+                self._link_fails.pop(tuple(h["port"]["end"]), None)
+            notes.append(f"the {rec['item']} link into site {rec['to_site']} picked from tile {q['at'] + 1} of "
+                         f"{q['of']} of site {q['site'].id}'s line, where only the first furnaces drop (the last "
+                         f"drops on tile {q['last'] + 1}): taken up, to be laid again past the last furnace")
         return notes
 
     def _unregister(self, rec: dict) -> None:
@@ -5267,22 +5354,39 @@ class Crew:
                and abs(p[1] - t[1]) <= self.POLE_SUPPLY[MEDIUM_POLE if p in medium else POLE] + half for p in poles):
             return []
         kinds = [POLE] + ([MEDIUM_POLE] if MEDIUM_POLE in (getattr(self.kn, "unlocked", None) or set()) else [])
-        free = lambda q: q in self.w.seen and not self.w.blocked(q) and q not in self.w.keepout and q not in avoid
+        pole_ok = self._pole_freer()
+        free = lambda q: pole_ok(q) and q not in avoid
         anchors = self.base.powered_poles()
         lanes = getattr(self.w, "lanes", None) or set()
         for kind in kinds:                            # a cheap small pole first, a medium one where none fits
             r = self.POLE_SUPPLY[kind] + half
             spots = sorted(((t[0] + dx, t[1] + dy) for dx in range(-r, r + 1) for dy in range(-r, r + 1)),
                            key=lambda q: abs(q[0] - t[0]) + abs(q[1] - t[1]))
-            open_spots = [q for q in spots if q != t and q not in avoid and self.w.free({q})]
+            open_spots = [q for q in spots if q != t and q not in avoid and self.w.free({q}) and pole_ok(q)]
             if not open_spots and half:               # a big machine boxed in: a belt lane may take a pole
-                open_spots = [q for q in spots if q in lanes and q not in avoid
+                open_spots = [q for q in spots if q in lanes and q not in avoid and pole_ok(q)
                               and getattr(self.w, "free_belt", lambda x: False)(q)]
             for spot in open_spots[:3]:               # the nearest few: each bridge search is a full route
                 bridge = route_poles([spot], anchors, poles, free, margin=16)
                 if bridge is not None:
                     return [(kind, spot)] + [(POLE, q) for q in bridge]
         raise BuildError(f"no room for a pole (or no pole route) to power the link's inserter at {t}")
+
+    def line_heads(self) -> set[tuple[int, int]]:
+        """Each line's start and the two tiles beyond it: where its plates run on into a link, belts only."""
+        from . import belts
+        out = set()
+        for _, ln in self.lines():
+            st, (dx, dy) = tuple(ln["start"]), belts.VEC.get(ln.get("facing"), (0, 0))
+            out |= {(st[0] + k * dx, st[1] + k * dy) for k in range(3)}
+        return out
+
+    def _pole_freer(self):
+        """A test for tiles a pole may go on (route_poles calls it per tile: the heads are looked up once). Never on
+        a line's head (run 20261125-214645: a pole on the start of site 19's copper line left its plates no way
+        out but taps upstream of five of its six furnaces)."""
+        heads = self.line_heads()
+        return lambda t: t in self.w.seen and not self.w.blocked(t) and t not in self.w.keepout and t not in heads
 
     def _can_power(self, t: tuple[int, int], avoid: set = frozenset()) -> bool:
         try:

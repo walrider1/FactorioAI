@@ -85,6 +85,7 @@ class GridCrew:
     short_note = Crew.short_note
     _off_grid_anchors = Crew._off_grid_anchors
     _cover_unpowered = Crew._cover_unpowered
+    _pole_freer, line_heads, lines = Crew._pole_freer, Crew.line_heads, Crew.lines
 
     def __init__(self, base, statuses, networks):
         self.base, self.statuses, self.networks = base, statuses, networks
