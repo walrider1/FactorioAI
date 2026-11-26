@@ -376,3 +376,58 @@ def test_a_removed_source_with_nothing_to_feed_in_takes_its_belts_out_at_once():
     out = _link(crew, (20.5, 5.5), belts_.id, "iron-gear-wheel", _row(22, 38, 5))
     crew.remove(gears.id)
     assert crew.links == [] and out["port"]["fed"] is None and crew.gone_roots() == {}
+
+
+# ------------------------------------------------------------------ hand-fed labs retire once a station is belted
+def _research(crew, w):
+    w.research = {"current": "steel-processing"}
+    crew.kn.research_cost = lambda t: {"automation-science-pack": 50}
+
+
+def test_hand_fed_labs_come_down_once_a_station_gets_every_pack_by_belt():
+    from brain.assess import RuleAssessor, retire_alerts
+    crew, w, _ = _crew()
+    _research(crew, w)
+    spawn = crew.base.add(Site("labs", {"count": 2}, (30, 0)))
+    st = crew.base.add(Site("labs", {"station": True, "count": 10, "ports": [{"pack": None}]}, (0, 0),
+                            powered=True))
+    assert retire_alerts(crew) == []                       # the station has no belt yet: the spawn labs stay
+    st.params["ports"] = [{"pack": "automation-science-pack"}]
+    [a] = retire_alerts(crew)
+    assert a["key"] == f"retire-labs-{spawn.id}" and a["fix"] == {"do": "remove", "site": spawn.id}
+    got = RuleAssessor().decide({}, [a], set())
+    assert got["urgent_goals"] == [a["fix"]] and not got["interrupt"]     # queued, the goal in hand goes on
+
+
+def test_a_second_station_missing_a_colour_comes_down_after_it_settles():
+    from brain.assess import RETIRE_SETTLE_MIN, retire_alerts
+    crew, w, minute = _crew()
+    _research(crew, w)
+    crew.kn.research_cost = lambda t: {"automation-science-pack": 50, "logistic-science-pack": 50}
+    both = [{"pack": "automation-science-pack"}, {"pack": "logistic-science-pack"}]
+    crew.base.add(Site("labs", {"station": True, "count": 10, "ports": both}, (0, 0), powered=True))
+    short = crew.base.add(Site("labs", {"station": True, "count": 2, "ports": [both[0], {"pack": None}]},
+                               (40, 0), powered=True, built_minute=minute["now"]))
+    assert retire_alerts(crew) == []                       # just built: its last link gets its tries
+    minute["now"] += RETIRE_SETTLE_MIN
+    [a] = retire_alerts(crew)
+    assert a["key"] == f"retire-station-{short.id}" and "logistic-science-pack" in a["what"]
+    short.params["count"] = 20                             # a bigger station never comes down for a small one
+    assert retire_alerts(crew) == []
+
+
+def test_the_lab_round_never_empties_a_chest_a_science_belt_starts_at():
+    crew, w, _ = _crew()
+    w.research = {"current": "steel-processing"}
+    fab = crew.base.add(Site("factory", {"item": "automation-science-pack"}, (0, 0),
+                             chests=[(1.5, 1.5, "automation-science-pack")]))
+    crew.base.add(Site("labs", {"count": 2}, (30, 0), labs=[(30.5, 0.5)],
+                       health={"missing_science_packs": 2}))
+    crew.kn.techs = {"steel-processing": {"unit_ingredients": [{"name": "automation-science-pack"}]}}
+    from brain.crew import Foreman
+    fm = Foreman(crew)
+    w.inventory = {}
+    crew.science_links[(1.5, 1.5)] = {"station": 99, "pack": "automation-science-pack"}
+    assert not fm._labs_starving()                         # the packs there are the station's
+    del crew.science_links[(1.5, 1.5)]
+    assert fm._labs_starving() and fab.chests

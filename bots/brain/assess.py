@@ -33,7 +33,7 @@ from .belts import LINK_REACH
 
 FUELS = ("coal", "wood")
 CRITICAL = ("coal", "boiler", "power", "fuel", "pipe", "belt-foreign", "gap-", "labs-feed")   # keys the rule floor fixes itself
-SOON = ("rebuild-", "swap-", "ore-soon-", "trunk-", "modules-")  # keys it queues by itself without pausing the goal in hand (planned)
+SOON = ("rebuild-", "swap-", "ore-soon-", "trunk-", "modules-", "retire-")  # keys it queues by itself without pausing the goal in hand (planned)
 FAR_LINK = "a link reaches"     # in a link failure: only the distance stopped it (Crew._link_port), a trunk fixes it
 TRUNK_AUTO_MAX = 600            # Manhattan tiles: a farther source is better made next to the site than belted over
 GOAL_DOS = ("build", "research", "stock", "remove", "replace", "connect", "feed", "priority", "wait",
@@ -320,6 +320,53 @@ def station_alerts(crew) -> list[dict]:
                         "what": f"research station site {s.id} gets {sorted(has)} but {cur} needs {sorted(need)}: "
                                 f"its labs wait for {sorted(need - has)}", "fix": {"do": "link"}})
     return out
+
+
+def retire_alerts(crew) -> list[dict]:
+    """Once a research station gets every pack the research in hand needs by belt, the first hand-fed labs come
+    down, and so does a second station that still misses a colour after RETIRE_SETTLE_MIN. Hand-fed labs only
+    take packs the belts would have brought (run 20261125-214645: the crew carried red packs out of the factory's
+    chests to the 2 labs at spawn every patrol while the 10-lab station waited on its belt); a station that never
+    gets its last colour researches nothing. Their labs go back to the inventory for the next station."""
+    rs = getattr(getattr(crew, "w", None), "research", None) or {}
+    cur = rs.get("current")
+    if not cur or not hasattr(crew.kn, "research_cost"):
+        return []
+    need = set(crew.kn.research_cost(cur))
+    labs = crew.base.of("labs")
+
+    def has(s) -> set:
+        return {pt.get("pack") for pt in s.params.get("ports", []) if pt.get("pack")}
+
+    full = [s for s in labs if s.params.get("station") and s.powered and need <= has(s)]
+    if not need or not full:
+        return []
+    best = max(full, key=lambda s: int(s.params.get("count") or 0))
+    out = []
+    for s in labs:
+        if s in full:
+            continue
+        if not s.params.get("station"):
+            out.append({"level": "urgent", "key": f"retire-labs-{s.id}",
+                        "what": f"labs site {s.id} is fed by hand while research station site {best.id} gets every "
+                                f"pack {cur} needs by belt: the crew only carries the station's packs there, so "
+                                "it comes down (its labs back to the inventory)",
+                        "fix": {"do": "remove", "site": s.id}})
+            continue
+        try:
+            age = crew._minute() - float(s.built_minute or 0)
+        except Exception:  # noqa: BLE001 - stub crews in tests
+            age = RETIRE_SETTLE_MIN
+        if age >= RETIRE_SETTLE_MIN and int(s.params.get("count") or 0) <= int(best.params.get("count") or 0):
+            out.append({"level": "urgent", "key": f"retire-station-{s.id}",
+                        "what": f"research station site {s.id} still misses {sorted(need - has(s))} after "
+                                f"{age:.0f} min while station site {best.id} gets every pack {cur} needs: its labs "
+                                "research nothing, so it comes down (its labs back to the inventory)",
+                        "fix": {"do": "remove", "site": s.id}})
+    return out
+
+
+RETIRE_SETTLE_MIN = 30.0       # game minutes a second station gets to link its last colour before it comes down
 
 
 def oil_alerts(crew) -> list[dict]:
@@ -671,6 +718,7 @@ def detect(crew) -> list[dict]:
         pass
     out += pipe_alerts(crew)
     out += station_alerts(crew)
+    out += retire_alerts(crew)
 
     # buildings that stopped: out of fuel, out of input, output stuck
     starved = [s for s in base.sites if s.kind == "burner_mine" and s.params.get("resource") != "coal"

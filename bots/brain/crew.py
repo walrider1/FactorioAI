@@ -6455,7 +6455,10 @@ class Foreman:
         cur = (w.research or {}).get("current")
         need = {i["name"] for i in (self.crew.kn.techs.get(cur, {}) or {}).get("unit_ingredients", [])} if cur else set()
         have = {k for k, v in w.inventory.items() if v > 0 and k.endswith("science-pack")}
-        stored = {what for s in base.sites for *_, what in s.chests if what.endswith("science-pack")}
+        # a chest a science belt starts at belongs to its station: hand-fed labs never count on it
+        linked = self.crew.science_links
+        stored = {what for s in base.sites for x, y, what in s.chests
+                  if what.endswith("science-pack") and (x, y) not in linked}
         return bool(need & (have | stored)) if need else bool(have)
 
     def _keep_labs_busy(self, quiet: bool = False) -> str | None:
@@ -6517,6 +6520,10 @@ class Foreman:
                 continue                              # every feeder has plenty: no trip to the labs at all
             for s in base.sites:                      # automated packs first
                 for x, y, what in s.chests:
+                    # never out of a chest a science belt starts at: those packs go to the station on their own
+                    # (run 20261125-214645: carried to the spawn labs while the station's belt ran dry)
+                    if (x, y) in self.crew.science_links:
+                        continue
                     if what == pack and w.inventory.get(pack, 0) < want:
                         w.extract(x, y, pack, want - w.inventory.get(pack, 0))
             allow = self.crew.hand_allow.get(pack, 0)     # only what hand_or_automate chose to do by hand
