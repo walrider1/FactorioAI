@@ -138,7 +138,7 @@ DRILL_RATE = {"electric-mining-drill": 30.0, "burner-mining-drill": 15.0}  # ore
 def mine_rate(site) -> float:
     """Ore a minute the mine takes out of the ground: its drills, slowed to its furnaces' pace when each drill
     drops into a furnace."""
-    furnace = 37.5 if any(e[0] == "steel-furnace" for e in site.entities) else 18.75
+    furnace = 37.5 if any(e[0] in ("steel-furnace", "electric-furnace") for e in site.entities) else 18.75
     into_furnace = site.kind == "electric_mine" and site.params.get("into") in ("furnace", "line")
     rate = 0.0
     for e in site.entities:

@@ -39,6 +39,7 @@ DEAD_RUN = ("run_not_active", "run_voided")      # the run is over: stop, never 
 SCIENCE = ("automation-science-pack", "logistic-science-pack", "military-science-pack", "chemical-science-pack",
            "production-science-pack", "utility-science-pack")
 POLE = "small-electric-pole"
+ELECTRIC_TECH = "advanced-material-processing-2"    # electric furnaces: researched first once blue science is made
 MEDIUM_POLE = "medium-electric-pole"
 POLES = (POLE, MEDIUM_POLE)
 LONG_LINE = 40               # tiles: a bridge this long uses medium poles once they can be made
@@ -69,9 +70,11 @@ EXPECTED_LOAD = 0.7     # share of their full load the sites with every input fe
 GOAL_BUDGET_MIN = {"build": 25.0, "replace": 30.0, "remove": 8.0, "link": 10.0, "link_science": 10.0, "stock": 8.0,
                    "act": 15.0,
                    "modules": 15.0,
-                   "feed": 4.0, "connect": 6.0, "upgrade": 20.0, "repair": 8.0, "repipe": 8.0, "scout": 10.0, "design": 4.0,
+                   "feed": 4.0, "connect": 6.0, "upgrade": 20.0, "repair": 8.0, "repipe": 8.0, "scout": 20.0, "design": 4.0,
                    "priority": 1.0, "purge": 10.0, "relink": 12.0, "trunk": 40.0}
 RESEARCH_BUDGET_MIN = 25.0
+ELECTRIC_SWAP_EXTRA_MIN = 15.0   # an electric furnace swap's budget on top: crafting its furnaces (advanced circuits)
+# (scout: 20 minutes, so one oil search ring ~700 tiles out is walked whole; a ring cut short is walked again)
 MODULE_BUDGET_MIN = {"outpost": 45.0, "workshop": 40.0, "silo": 60.0, "factory": 30.0, "steam_power": 15.0,
                      "research_station": 15.0, "electric_mine": 12.0, "burner_mine": 8.0, "pumpjack": 15.0,
                      "smelter_column": 15.0, "labs": 8.0}
@@ -291,6 +294,8 @@ class Crew:
         if do in ("build", "replace"):
             mod = (goal.get("with") or {}).get("module") if do == "replace" else goal.get("module")
             base = MODULE_BUDGET_MIN.get(mod or "", GOAL_BUDGET_MIN["build"])
+            if goal.get("electric"):                  # an electric swap: its furnaces take advanced circuits to make
+                base += ELECTRIC_SWAP_EXTRA_MIN
             return base + (8.0 if do == "replace" else 0.0)      # a replace also takes the old site down
         return GOAL_BUDGET_MIN.get(do)
 
@@ -401,6 +406,9 @@ class Crew:
                 raise BuildError("replace needs a build goal in 'with'")
             if goal.get("clear_first"):
                 return self._clear_and_build(old, new)
+            if goal.get("electric"):                      # an electric furnace swap: tried again only after a while
+                from .upgrade import note_swap_start
+                note_swap_start(self, goal)
             before = {s.id for s in self.base.sites}
             self._note_bad_place(old)                    # walled in where it stands: not the same spot again
             self._replacing = old
@@ -412,9 +420,17 @@ class Crew:
                 self._replacing = None
             self._replaced = old.id                      # built: the sole-maker guard has nothing to keep
             try:
-                return built + "; " + self.remove(old.id, force=False)
+                done = built + "; " + self.remove(old.id, force=False)
             finally:
                 self._replaced = None
+            if goal.get("electric") and old.params.get("outpost") is not None and "relinked:" not in done:
+                # an outpost's column swapped for electric furnaces: its trunk goes into the new one now (the link
+                # step lays pending trunks first), not whenever a link goal comes by
+                try:
+                    done += "; relinked: " + self.link()[:160]
+                except BuildError as exc:
+                    done += f"; its trunk is laid by the next link step ({str(exc)[:120]})"
+            return done
         if do == "design":
             return self.design(goal)
         if do == "connect":
@@ -752,12 +768,30 @@ class Crew:
         """Scouting for crude oil: report what is known; search on (the pumpjack's ring search, from where it
         stopped) only when nothing is. Run 20261120-211555: with 12+ wells known and a pumpjack on them, a scout
         goal walked rings ~700 tiles out looking for an oil "patch" of 60+ tiles, which crude oil never forms."""
+        from .assess import OIL_WELLS_MIN
+        if hasattr(self, "_minute"):
+            self.__dict__["_oil_scouted"] = self._minute()   # assess.oil_scout_alerts: not again for a while
         fields = self.oil_fields()
         if not fields:
             self.w.oil_wells(self.base.centre)
             fields = self.oil_fields()
             if not fields:
                 raise BuildError(f"no crude oil within ~{self.w.oil_searched()} tiles of the base")
+        known = sum(q["wells"] for q in fields)
+        if known < OIL_WELLS_MIN and not all(q["pumped"] >= q["wells"] for q in fields) \
+                and getattr(self.w, "oil_rings", 0) < getattr(self.w, "OIL_MAX_RINGS", 5):
+            # too few wells for the oil chain (run 20261125-214645: one well, 188 tiles out, all game): the ring
+            # search goes on outward (one ring a goal) for another field before the chain is built on this one
+            self.w.oil_wells(self.base.centre, more=True)
+            fields = self.oil_fields()
+            now = sum(q["wells"] for q in fields)
+            if now > known:
+                f = max(fields, key=lambda q: q["wells"] - q["pumped"])
+                return (f"found more crude oil: {now} wells in {len(fields)} field(s) (was {known}); the most free "
+                        f"wells at {f['centre']} ({f['distance']} tiles from the base): pumpjacks go there")
+            return (f"only {known} crude-oil well(s) known and no other field within ~{self.w.oil_searched()} tiles "
+                    f"yet ({getattr(self.w, 'oil_rings', 0)} of {getattr(self.w, 'OIL_MAX_RINGS', 5)} rings searched); "
+                    "the next scout goes farther out")
         if all(q["pumped"] >= q["wells"] for q in fields):    # every well is taken: a new field is what helps
             before = len(fields)
             self.w.oil_wells(self.base.centre, more=True)
@@ -950,7 +984,7 @@ class Crew:
             if found is None:
                 return (f"no clear ground for its {n}-furnace smelting column", None)
             bx, by, size = found
-            area = col.tiles(bx, by, size, col.layout(self.w, cp))
+            area = col.tiles(bx, by, size, col.layout(self.w, cp), col.electric(self.w, cp))
             port = {"item": r, "end": [bx, by - 1], "approach": [bx, by - 2]}
             appr = (bx, by - 2)
             k = max(1, int(math.dist(start, appr) // 40))
@@ -1037,8 +1071,8 @@ class Crew:
         burner to electric), forced replaces and rebuilds of depleted mines are never dropped. Run 20261122-133537:
         "relocate red science" was queued at minute 75 while a relink was running; the relink fed both ports, and
         the replace still ran four minutes later and left a duplicate factory."""
-        if goal.get("do") != "replace" or goal.get("force") or goal.get("early"):
-            return None
+        if goal.get("do") != "replace" or goal.get("force") or goal.get("early") or goal.get("electric"):
+            return None                               # (an electric furnace swap is an upgrade, never a move)
         site = self.base.get(goal.get("site"))
         new = goal.get("with") or {}
         if site is None or new.get("module") != site.kind:
@@ -1321,8 +1355,10 @@ class Crew:
                     if crude is None or not crude(exc):
                         raise
                     mod.kit(self.w, self.base, params)    # once more, with the new pumpjacks
+        self._pick_furnace(mod, params)
         first = self._coal_first(mod.name, params)
         first += self._power_first(mod.name, params)
+        first += self._electric_power_check(mod, params)
         first += self._fuel_first(mod.name, params)
         first += self._intermediates_first(mod.name, params)     # feeders first: their plate mines count below
         first += self._plates_first(mod.name, params)
@@ -1847,7 +1883,8 @@ class Crew:
         now = self._minute()
         return [s for s in self.base.sites if not s.params.get("ports") and now - tried.get(s.id, -1e9) >= self.RETROFIT_GAP_MIN
                 and ((s.kind == "steam_power" and any(w == "coal-in" for *_, w in s.chests))
-                     or (s.kind == "electric_mine" and s.params.get("into") in ("furnace", "line")))]
+                     or (s.kind == "electric_mine" and s.params.get("into") in ("furnace", "line")
+                         and s.params.get("fuel") != "electric"))]      # electric furnaces burn nothing
 
     def blocked_rows(self) -> list[Site]:
         """Hand-fed furnace rows whose coal strip is taken for good: they are rebuilt with their belt."""
@@ -1960,8 +1997,56 @@ class Crew:
         site.params["fuel"] = "hand"
         raise BuildError("no free side of the coal chest for a belt")
 
-    ELECTRIC_MODULES = {"factory", "workshop", "electric_mine", "labs", "research_station", "pumpjack", "silo"}
+    # Electric smelting: the furnace a column or row gets is decided once per build (the kit and the build agree),
+    # electric once advanced-material-processing-2 is in and the furnaces can be made, and only with the power for
+    # them: _power_first builds stations for them first; should that fail, the build falls back to burners.
+    SMELTING_MODULES = ("smelter_column", "electric_mine")
+
+    def _pick_furnace(self, mod, params: dict) -> None:
+        if mod.name not in self.SMELTING_MODULES or params.get("furnace"):
+            return
+        try:
+            if mod.name == "electric_mine":
+                f = mod.furnace(self.w, params)
+            elif mod.layout(self.w, params) == "chest":
+                f = None
+            else:
+                f = mod.furnace(self.w, params)
+        except Exception:  # noqa: BLE001 - stub modules or params: the module decides itself
+            return
+        if f:
+            params["furnace"] = f
+
+    def _electric_power_check(self, mod, params: dict) -> str:
+        """After power first: an electric column or row whose furnaces the network still cannot carry (with
+        POWER_HEADROOM; no station could be built) goes up with burner furnaces instead, and says so."""
+        from .modules import ELECTRIC_FURNACE, ELECTRIC_FURNACE_KW, burner_furnace
+        if mod.name not in self.SMELTING_MODULES or params.get("furnace") != ELECTRIC_FURNACE:
+            return ""
+        if not self.base.of("steam_power"):
+            return ""
+        try:
+            n = mod._count(params) if mod.name == "electric_mine" else max(1, min(24, int(params.get("count") or 8)))
+            from .assess import power_short_kw
+            short = power_short_kw(self, n * ELECTRIC_FURNACE_KW)
+        except Exception:  # noqa: BLE001 - stub crews: no verdict
+            return ""
+        if short <= 0:
+            return ""
+        if getattr(self, "_replacing", None) is not None:
+            # an electric swap: burners again would rebuild the same thing for nothing, so it waits for power
+            raise BuildError(f"the electric swap waits for power: its {n} furnaces ({n * ELECTRIC_FURNACE_KW:.0f} kW) "
+                             f"would leave the network {short:.0f} kW short of its headroom (a steam station first)")
+        fallback = burner_furnace(self.kn) if mod.name == "smelter_column" else "stone-furnace"
+        params["furnace"] = fallback
+        self.log(f"[crew] electric furnaces need {n * ELECTRIC_FURNACE_KW:.0f} kW the network cannot spare "
+                 f"({short:.0f} kW short): {fallback} this time")
+        return f"{fallback}s (power short by {short:.0f} kW for electric ones); "
+
+    ELECTRIC_MODULES = {"factory", "workshop", "electric_mine", "labs", "research_station", "pumpjack", "silo",
+                        "smelter_column"}
     POWER_MARGIN_KW = 500
+    POWER_HEADROOM = 1.3          # capacity kept over what the network draws with the new module (assess.py)
 
     def _power_first(self, module: str, params: dict) -> str:
         """Energy before building: a module that draws power gets the steam stations it needs first, so the
@@ -1979,7 +2064,9 @@ class Crew:
         try:
             for _ in range(4):                          # up to 4 stations (7.2 MW) ahead of one build
                 ps = self.power_status()
-                if ps["headroom_kw"] - add >= self.POWER_MARGIN_KW:
+                # the margin, or POWER_HEADROOM over what it all draws with the new module, whichever is more
+                load = ps["capacity_kw"] - ps["headroom_kw"] + add
+                if ps["headroom_kw"] - add >= max(self.POWER_MARGIN_KW, (self.POWER_HEADROOM - 1) * load):
                     break
                 self.log(f"[crew] power first: {add:.0f} kW more would leave {ps['headroom_kw'] - add:.0f} kW spare")
                 try:
@@ -2068,6 +2155,11 @@ class Crew:
                     and all(p in self.kn.researched for p in tech.get("prerequisites", []))
                     and {i["name"] for i in tech.get("unit_ingredients", [])} <= made)
         order = [t for goal in self.target_techs for t in self.kn.tech_path(goal)]
+        # electric furnaces first once blue science is made (docs/hybrid-plan.md, section 5): every coal-fed smelter
+        # after that is swapped for them, and the coal hauling ends (it is no milestone's prerequisite, so the
+        # milestone path alone never picks it)
+        if ELECTRIC_TECH in self.kn.techs and "chemical-science-pack" in made:
+            order = [ELECTRIC_TECH] + order
         pick = next((t for t in order if ready(t)), None)
         if pick is None:
             # else the cheapest tech on the way to the rocket, never one off it: packs went into radar, gun-turret
@@ -2362,9 +2454,17 @@ class Crew:
         # what the base draws once its fed sites run (run 20261122-133537: 1.48 MW measured on 4.5 MW with almost
         # everything idle for lack of circuits; green, red, circuits and gears at work want more than 4.5 MW)
         expected = EXPECTED_LOAD * ready
+        # power booked for electric furnace swaps queued but not built yet (upgrade.booked_power_kw): the planner
+        # counts it as drawn, so nothing else takes the headroom the swap needs
+        try:
+            from .upgrade import booked_power_kw
+            booked = booked_power_kw(self)
+        except Exception:  # noqa: BLE001 - stub crews in tests
+            booked = 0.0
         return {"capacity_kw": round(cap), "demand_kw": round(demand), "demand_source": "measured" if meas else
-                "estimated", "full_load_kw": round(full), "expected_kw": round(expected),
-                "stations": len(self.base.of("steam_power")), "headroom_kw": round(cap - max(demand, expected))}
+                "estimated", "full_load_kw": round(full), "expected_kw": round(expected), "booked_kw": round(booked),
+                "stations": len(self.base.of("steam_power")),
+                "headroom_kw": round(cap - max(demand, expected) - booked)}
 
     def courier(self, force: bool = False) -> str | None:
         """One round of the workshop: empty the output chests of everything some cell needs, then top up every
@@ -3736,7 +3836,7 @@ class Crew:
         key = tuple(key)
         return next((ln for _, ln in self.lines() if tuple(ln["source"]) == key), None)
 
-    LINE_FURNACE = {"stone-furnace": 18.75, "steel-furnace": 37.5}
+    LINE_FURNACE = {"stone-furnace": 18.75, "steel-furnace": 37.5, "electric-furnace": 37.5}
 
     def line_rate(self, ln: dict, site: Site | None = None) -> float:
         """What a line carries a minute: what its furnaces make (a row's drill gives 30 ore a minute, so a steel
@@ -3825,8 +3925,9 @@ class Crew:
     # a factory port wanting 40 iron a minute got one drill's 19 and its machines waited on their input.
     COAL_PER_CHEST = 30.0
     DRILL_PER_MIN = 30.0
-    FURNACE_PER_MIN = {"stone-furnace": 18.75, "steel-furnace": 37.5}    # iron, copper or bricks a minute
-    STEEL_PER_MIN = {"stone-furnace": 3.75, "steel-furnace": 7.5}
+    FURNACE_PER_MIN = {"stone-furnace": 18.75, "steel-furnace": 37.5,    # iron, copper or bricks a minute
+                       "electric-furnace": 37.5}
+    STEEL_PER_MIN = {"stone-furnace": 3.75, "steel-furnace": 7.5, "electric-furnace": 7.5}
 
     def _source_site(self, root: tuple, item: str) -> Site | None:
         return next((s for x, y, s in self.outputs(item) if (x, y) == tuple(root)), None)
@@ -3842,7 +3943,8 @@ class Crew:
         ln = site.params.get("line")
         if ln and tuple(ln["source"]) == tuple(root):
             return self.line_rate(ln, site)
-        furnace = "steel-furnace" if any(e[0] == "steel-furnace" for e in site.entities) else "stone-furnace"
+        furnace = next((f for f in ("electric-furnace", "steel-furnace") if any(e[0] == f for e in site.entities)),
+                       "stone-furnace")
         chests = max(1, sum(1 for *_, what in site.chests if what == item))
         if site.kind == "electric_mine":
             if site.params.get("into") == "chest":
@@ -4023,7 +4125,8 @@ class Crew:
 
     def _row_strip(self, site: Site) -> set | None:
         """The tiles a hand-fed furnace row's coal belt will take (None: not such a row)."""
-        if site.kind != "electric_mine" or site.params.get("into") != "furnace" or site.params.get("ports"):
+        if site.kind != "electric_mine" or site.params.get("into") != "furnace" or site.params.get("ports") \
+                or site.params.get("fuel") == "electric":
             return None
         em = MODULES["electric_mine"]
         drills = sorted({(math.floor(x), math.floor(y)) for name, x, y, _ in site.entities
@@ -4412,7 +4515,8 @@ class Crew:
         used = Counter(tuple(ln["source"]) for ln in self.links)
         out = []
         for s in self.base.of("electric_mine"):
-            if s.params.get("line") or s.params.get("into") != "furnace" or _depleted(s):
+            if s.params.get("line") or s.params.get("into") != "furnace" or _depleted(s) \
+                    or s.params.get("fuel") == "electric":     # its units stand 4 apart: to_line is for burner rows
                 continue
             if self._minute() - tried.get(s.id, -1e9) < self.LINE_RETRY_MIN:
                 continue

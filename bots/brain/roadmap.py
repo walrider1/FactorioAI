@@ -130,7 +130,7 @@ def plate_supply(crew) -> dict[str, float]:
     for s in crew.base.sites:
         if not supplying(s):
             continue
-        steel = any(e[0] == "steel-furnace" for e in s.entities)       # upgraded rows smelt twice as fast
+        steel = any(e[0] in ("steel-furnace", "electric-furnace") for e in s.entities)   # speed 2: twice as fast
         if s.kind == "burner_mine":
             per = 15.0
         elif s.kind == "electric_mine":
@@ -297,6 +297,25 @@ def supplier_needed(crew) -> dict | None:
     return None
 
 
+ELECTRIC_TECH = "advanced-material-processing-2"
+
+
+def electric_smelting_step(crew, science: dict | None = None) -> dict | None:
+    """Research electric furnaces once blue science is researched and made, unless it is done or on its way."""
+    kn = crew.kn
+    researched = getattr(kn, "researched", None) or set()
+    if ELECTRIC_TECH not in (getattr(kn, "techs", None) or {}) or ELECTRIC_TECH in researched \
+            or "chemical-science-pack" not in researched:
+        return None
+    rs = getattr(crew.w, "research", None) or {}
+    if ELECTRIC_TECH in set(rs.get("queue") or []) | {rs.get("current")}:
+        return None
+    blue = ((science or {}).get("chemical-science-pack") or {}).get("made_per_min")
+    if blue is None:
+        blue = pack_rate(crew, "chemical-science-pack")
+    return {"do": "research", "tech": ELECTRIC_TECH} if blue and blue > 0 else None
+
+
 def next_step(crew, science: dict, power: dict, path: list[str]) -> dict | None:
     """The rocket book: the one goal that moves the earliest unfinished part of the road (None: let it run)."""
     kn, base = crew.kn, crew.base
@@ -306,6 +325,11 @@ def next_step(crew, science: dict, power: dict, path: list[str]) -> dict | None:
     # power before anything else: every machine stalls on a short network, so it is fixed ahead of building
     if power["headroom_kw"] < POWER_RESERVE_KW:
         return {"do": "build", "module": "steam_power", "engines": 2}
+    # electric furnaces right after blue science (docs/hybrid-plan.md, section 5): the coal-fed smelters are then
+    # swapped one by one (assess.electric_swap_alerts) and the coal hauling ends
+    amp = electric_smelting_step(crew, science)
+    if amp is not None:
+        return amp
     # burner drills and stone furnaces out, electric mines in, as soon as the drills are researched: no more
     # refuelling every few minutes, and the burner mine's buildings come back for kits
     if "electric-mining-drill" in researched:

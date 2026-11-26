@@ -33,7 +33,7 @@ from .belts import LINK_REACH
 
 FUELS = ("coal", "wood")
 CRITICAL = ("coal", "boiler", "power", "fuel", "pipe", "belt-foreign", "gap-", "labs-feed")   # keys the rule floor fixes itself
-SOON = ("rebuild-", "swap-", "ore-soon-", "trunk-", "modules-", "retire-")  # keys it queues by itself without pausing the goal in hand (planned)
+SOON = ("rebuild-", "swap-", "ore-soon-", "trunk-", "modules-", "retire-", "headroom-", "scout-")  # keys it queues by itself without pausing the goal in hand (planned)
 FAR_LINK = "a link reaches"     # in a link failure: only the distance stopped it (Crew._link_port), a trunk fixes it
 TRUNK_AUTO_MAX = 600            # Manhattan tiles: a farther source is better made next to the site than belted over
 GOAL_DOS = ("build", "research", "stock", "remove", "replace", "connect", "feed", "priority", "wait",
@@ -506,6 +506,126 @@ def burner_swap_alerts(crew) -> list[dict]:
     return out
 
 
+POWER_HEADROOM = 1.3            # capacity kept over what the network draws (and what is booked for swaps)
+
+
+def power_short_kw(crew, add_kw: float = 0.0) -> float:
+    """How much capacity is missing to carry what the network draws (or will once its fed sites run), plus what
+    is booked for electric swaps and `add_kw`, with POWER_HEADROOM (0: enough)."""
+    ps = crew.power_status()
+    load = max(ps["demand_kw"], ps.get("expected_kw", 0)) + float(ps.get("booked_kw", 0) or 0) + add_kw
+    return max(0.0, load * POWER_HEADROOM - ps["capacity_kw"])
+
+
+def electric_swap_alerts(crew) -> list[dict]:
+    """Electric smelting (docs/hybrid-plan.md, section 5): once electric furnaces are unlocked, the coal-fed smelter
+    columns and furnace rows are rebuilt with them, one at a time and the least risky first (upgrade.swap_candidates),
+    each a replace that builds the new one first. Its furnaces' power (180 kW each) is booked before it may start:
+    with too little headroom the alert asks for a steam station first (its key carries today's capacity, so each new
+    station lets the rule floor ask again). Queued by the rule floor without pausing anything ("swap-")."""
+    from .modules import ELECTRIC_FURNACE
+    kn = getattr(crew, "kn", None)
+    if ELECTRIC_FURNACE not in (getattr(kn, "unlocked", None) or set()):
+        return []
+    try:
+        from .upgrade import swap_candidates, swap_goal, swap_in_flight, swap_tries
+        if swap_in_flight(crew) is not None:
+            return []                                 # never more than one swap in flight
+        cands = swap_candidates(crew)
+    except Exception:  # noqa: BLE001 - stub crews in tests
+        return []
+    can = getattr(crew, "can_obtain", None)
+    for s in cands[:3]:
+        g = swap_goal(crew, s)
+        n = max(1, int(g["power_kw"] // 180))
+        if callable(can) and not can(ELECTRIC_FURNACE, n):
+            continue                                  # its furnaces cannot be made yet (advanced circuits)
+        try:
+            short = power_short_kw(crew, g["power_kw"])
+            cap = crew.power_status()["capacity_kw"]
+            base_short = power_short_kw(crew)
+        except Exception:  # noqa: BLE001
+            short, cap, base_short = 0.0, 0, 0.0
+        if short > 0 and base_short > 0:
+            return []                                 # short already: the headroom alert asks for that station
+        if short > 0:
+            return [{"level": "urgent", "key": f"swap-power-electric-{cap}",
+                     "what": f"site {s.id} ({s.kind} {s.params.get('resource')}) is next for electric furnaces: "
+                             f"{g['power_kw']} kW more would leave the network {short:.0f} kW short of its "
+                             f"{int(round((POWER_HEADROOM - 1) * 100))}% headroom: a steam station first",
+                     "fix": {"do": "build", "module": "steam_power", "engines": 2}}]
+        tries, _ = swap_tries(crew, s.id)
+        return [{"level": "urgent", "key": f"swap-electric-{s.id}-{tries}",
+                 "what": f"site {s.id} ({s.kind} {s.params.get('resource')}, {n} coal-fed furnaces): rebuilt with "
+                         f"electric furnaces beside it ({g['power_kw']} kW booked), then it comes down with its coal "
+                         "belt; no more coal or refuelling for it",
+                 "fix": g}]
+    return []
+
+
+def power_headroom_alerts(crew) -> list[dict]:
+    """The power planner: keep POWER_HEADROOM over measured demand (and booked swaps), with a steam station queued
+    early ("headroom-": no pause) rather than at the limit (the urgent "power-capacity" alert at 95%). The key
+    carries today's capacity, so the next station is asked for once this one stands, if still short.
+    TODO(solar): once solar-energy is researched a solar field (panels + accumulators) would add capacity with no
+    fuel at all; there is no solar module yet, so steam it is (and power_status counts steam engines only)."""
+    try:
+        ps = crew.power_status()
+        if not crew.base.of("steam_power") or not ps["capacity_kw"]:
+            return []
+        short = power_short_kw(crew)
+    except Exception:  # noqa: BLE001 - stub crews in tests
+        return []
+    if short <= 0 or max(ps["demand_kw"], ps.get("expected_kw", 0)) > 0.95 * ps["capacity_kw"]:
+        return []                                     # enough, or the urgent power-capacity alert has it
+    return [{"level": "urgent", "key": f"headroom-power-{ps['capacity_kw']}",
+             "what": f"power: {ps['capacity_kw']} kW against {max(ps['demand_kw'], ps.get('expected_kw', 0))} kW drawn"
+                     + (f" and {float(ps.get('booked_kw')):.0f} kW booked" if ps.get("booked_kw") else "")
+                     + f": under {int(round((POWER_HEADROOM - 1) * 100))}% headroom, another steam station now",
+             "fix": {"do": "build", "module": "steam_power", "engines": 2}}]
+
+
+OIL_WELLS_MIN = 3               # crude wells known before the oil chain is built on them
+OIL_TECHS = ("oil-processing", "plastics", "sulfur-processing", "advanced-oil-processing", "chemical-science-pack")
+
+
+def oil_scout_alerts(crew) -> list[dict]:
+    """Oil scouting ahead: as soon as oil processing (or the plastic and sulfur chain) is queued, researched or
+    asked for, at least OIL_WELLS_MIN crude wells should be known. Run 20261125-214645 knew one well, 188 tiles out,
+    for the whole oil chain. A scout goal walks the ring search on (Crew.scout_oil), one ring a goal."""
+    w = getattr(crew, "w", None)
+    if w is None:
+        return []
+    rs = getattr(w, "research", None) or {}
+    kn = getattr(crew, "kn", None)
+    asked = set(rs.get("queue") or []) | ({rs["current"]} if rs.get("current") else set())
+    asked |= set(getattr(kn, "researched", None) or set())
+    goals = [g for q in ("urgent", "closeout_queue", "plan_queue") for g in (getattr(crew, q, None) or [])
+             if isinstance(g, dict)]
+    wanted = bool(asked & set(OIL_TECHS)) or any(
+        g.get("module") == "pumpjack" or (g.get("do") == "research" and g.get("tech") in OIL_TECHS)
+        or g.get("item") in ("plastic-bar", "sulfur", "sulfuric-acid", "petroleum-gas") for g in goals)
+    if not wanted:
+        return []
+    wells = len((getattr(w, "resources", None) or {}).get("crude-oil", ()) or ())
+    if wells >= OIL_WELLS_MIN or getattr(w, "oil_rings", 0) >= min(OIL_SCOUT_MAX_RINGS, getattr(w, "OIL_MAX_RINGS", 5)):
+        return []                                     # enough, or searched as far as scouting ahead is worth
+    try:
+        now = crew._minute()
+    except Exception:  # noqa: BLE001
+        return []
+    if now - float(crew.__dict__.get("_oil_scouted", -1e9)) < OIL_SCOUT_GAP_MIN:
+        return []
+    return [{"level": "urgent", "key": f"scout-oil-{wells}-{getattr(w, 'oil_rings', 0)}",
+             "what": f"oil processing is on the way and only {wells} crude-oil well(s) are known: scouting for "
+                     f"{OIL_WELLS_MIN - wells} more before the oil chain is built on them",
+             "fix": {"do": "scout", "resource": "crude-oil"}}]
+
+
+OIL_SCOUT_GAP_MIN = 40.0        # game minutes between oil scouts (each walks at most one or two new rings)
+OIL_SCOUT_MAX_RINGS = 3         # scouting ahead stops ~1,400 tiles out (a pumpjack goal still searches farther)
+
+
 def _diagnoses(crew) -> list[dict]:
     try:
         from .triage import diagnoses
@@ -659,6 +779,8 @@ def detect(crew) -> list[dict]:
     out += rebuild_soon_alerts(crew)
     out += rebuild_alerts(crew)
     out += burner_swap_alerts(crew)
+    out += electric_swap_alerts(crew)
+    out += oil_scout_alerts(crew)
     for s in crew.coal_mines():
         dry = s.health.get("no_fuel", 0)
         if dry:
@@ -703,6 +825,8 @@ def detect(crew) -> list[dict]:
                             + (f" and its fed sites will draw ~{ps['expected_kw']} kW once they run"
                                if ps.get("expected_kw", 0) > ps["demand_kw"] else "") + ": more steam power",
                     "fix": {"do": "build", "module": "steam_power", "engines": 2}})
+    else:
+        out += power_headroom_alerts(crew)            # 30% over demand, queued early without a pause
 
     # smelters out of fuel. A furnace with no fuel fills up with ore and its drill stops behind it
     # ("waiting_for_space"), which reads like a belt problem; the alert says what it really is

@@ -128,7 +128,7 @@ def upgrade_site(crew, site, limit: int = UPGRADE_MAX) -> str:
 
 
 FALLBACK_SPEED = {"assembling-machine-1": 0.5, "assembling-machine-2": 0.75, "assembling-machine-3": 1.25,
-                  "stone-furnace": 1.0, "steel-furnace": 2.0}
+                  "stone-furnace": 1.0, "steel-furnace": 2.0, "electric-furnace": 2.0}
 
 
 def speed(kn, name: str) -> float:
@@ -240,6 +240,8 @@ def successor_ok(old, goal: dict | None) -> bool:
     mod = goal.get("module")
     if old.kind == "burner_mine" and mod == "electric_mine":
         return goal.get("resource") == old.params.get("resource")
+    if electric_successor(old, goal):
+        return True
     if old.kind in ("burner_mine", "electric_mine") and mod == "outpost" and goal.get("near_base"):
         # a dense field near the base in place of a small mine of the same ore: more of the same from that ground
         return goal.get("resource") == old.params.get("resource") and \
@@ -256,6 +258,131 @@ def successor_ok(old, goal: dict | None) -> bool:
         return float(goal.get(cap) or 0) > float(old.params.get(cap) or 0)
     except (TypeError, ValueError):
         return False
+
+
+# ------------------------------------------------------------------ electric smelting: coal-fed sites swapped
+# Electric furnaces are 3x3 where stone and steel ones are 2x2, so this is no swap in place: the same column (or
+# row) is built again with electric furnaces beside the old one (make before break: "replace"), then the old one
+# comes down with its coal belt and coal port; its plate belts get the new line fed in (Crew._detach, boost_links)
+# and an outpost's trunk is laid again into the new column (Crew.remove -> pending_trunks). One swap at a time,
+# the least risky first, and only with the power for it booked (assess.electric_swap_alerts).
+SWAP_KINDS = ("electric_mine", "smelter_column")
+SWAP_RETRY_MIN = 45.0           # game minutes before a site whose swap was started (and is still there) is tried again
+
+
+def electric_successor(old, goal: dict | None) -> bool:
+    """Is this build the electric version of a coal-fed smelting site (same kind, same resource)?"""
+    from .modules import ELECTRIC_FURNACE, coal_fed
+    if not goal or goal.get("module") != old.kind or old.kind not in SWAP_KINDS:
+        return False
+    return goal.get("furnace") == ELECTRIC_FURNACE and goal.get("resource") == old.params.get("resource") \
+        and coal_fed(old)
+
+
+def furnaces_of(site) -> int:
+    return sum(1 for e in site.entities if e[0] in ("stone-furnace", "steel-furnace"))
+
+
+def swap_goal(crew, site) -> dict | None:
+    """The replace that rebuilds a coal-fed column or furnace row with electric furnaces (None: not such a site).
+    power_kw: what its furnaces will draw, booked against the network until it is built."""
+    from .modules import ELECTRIC_FURNACE, ELECTRIC_FURNACE_KW, coal_fed
+    if site.kind not in SWAP_KINDS or not coal_fed(site) or site.kind.startswith("unfinished"):
+        return None
+    r = site.params.get("resource")
+    if not r:
+        return None
+    n = furnaces_of(site)
+    if site.kind == "electric_mine":
+        if site.params.get("into") not in ("furnace", "line"):
+            return None
+        drills = sum(1 for e in site.entities if e[0] == "electric-mining-drill")
+        n = max(n, drills)
+        new = {"do": "build", "module": "electric_mine", "resource": r, "count": max(1, n), "into": "furnace",
+               "furnace": ELECTRIC_FURNACE}
+    else:
+        n = max(n, int(site.params.get("count") or 0))
+        new = {"do": "build", "module": "smelter_column", "resource": r, "count": max(1, min(24, n)),
+               "furnace": ELECTRIC_FURNACE, "near": [round(site.centre[0]), round(site.centre[1])]}
+        if site.params.get("into"):
+            new["into"] = site.params["into"]
+        out = site.params.get("outpost")
+        if out is not None:                           # the outpost's trunk is laid into the new column
+            new["outpost"] = out
+            o = crew.base.get(out) if hasattr(crew.base, "get") else None
+            if o is not None and o.params.get("head"):
+                new["toward"] = list(o.params["head"])
+    return {"do": "replace", "site": site.id, "with": new, "electric": True,
+            "power_kw": round(max(1, n) * ELECTRIC_FURNACE_KW)}
+
+
+def _goals_in_hand(crew) -> list[dict]:
+    out = []
+    for q in ("urgent", "closeout_queue", "plan_queue"):
+        out += [g for g in (getattr(crew, q, None) or []) if isinstance(g, dict)]
+    return out
+
+
+def swap_in_flight(crew) -> dict | None:
+    """The electric swap queued or running, if any (never more than one at a time)."""
+    cur = ((getattr(crew, "current", None) or {}).get("goal")) or {}
+    if cur.get("do") == "replace" and cur.get("electric"):
+        return cur
+    return next((g for g in _goals_in_hand(crew) if g.get("do") == "replace" and g.get("electric")), None)
+
+
+def booked_power_kw(crew) -> float:
+    """Power booked for electric swaps queued but not started (a running swap's build counts its own furnaces:
+    Crew._power_first)."""
+    return float(sum(float(g.get("power_kw") or 0) for g in _goals_in_hand(crew)
+                     if g.get("do") == "replace" and g.get("electric")))
+
+
+def note_swap_start(crew, goal: dict) -> None:
+    """A swap is starting: remember when (and how often) for this site, so a failed or dropped one waits
+    SWAP_RETRY_MIN before it is tried again."""
+    tried = crew.__dict__.setdefault("_electric_swaps", {})
+    n, _ = tried.get(goal.get("site"), (0, None))
+    tried[goal.get("site")] = (n + 1, crew._minute())
+
+
+def swap_tries(crew, site_id) -> tuple[int, float | None]:
+    return (crew.__dict__.get("_electric_swaps") or {}).get(site_id, (0, None))
+
+
+def swap_candidates(crew) -> list:
+    """Coal-fed smelting sites worth an electric swap, least risky first: rows before columns, a column no trunk
+    feeds before one an outpost's trunk feeds (that trunk is laid again), fewest outgoing belts, fewest furnaces.
+    Mines about to be rebuilt or mined out, half-built sites, rows on a full patch and sites tried lately wait."""
+    try:
+        from .upkeep import mine_depleted, rebuild_due
+    except Exception:  # noqa: BLE001
+        return []
+    now = crew._minute()
+    links = getattr(crew, "links", []) or []
+    out = []
+    for s in crew.base.sites:
+        if swap_goal(crew, s) is None:
+            continue
+        if s.kind == "electric_mine":
+            try:
+                if mine_depleted(s) or rebuild_due(crew, s):
+                    continue                          # its rebuild comes anyway, electric by then
+            except Exception:  # noqa: BLE001 - stub sites in tests
+                pass
+            full = getattr(crew, "patch_full", None)
+            if callable(full) and full(s.params.get("resource")):
+                continue                              # no room on the patch for the new row beside it
+        n, last = swap_tries(crew, s.id)
+        if last is not None and now - last < SWAP_RETRY_MIN * min(4, n):
+            continue
+        srcs = {(round(x, 2), round(y, 2)) for x, y, _ in s.chests}
+        if s.params.get("line"):
+            srcs.add(tuple(round(v, 2) for v in s.params["line"]["source"]))
+        outs = sum(1 for ln in links if (round(ln["source"][0], 2), round(ln["source"][1], 2)) in srcs)
+        trunk = s.kind == "smelter_column" and s.params.get("outpost") is not None
+        out.append(((s.kind != "electric_mine", trunk, outs, furnaces_of(s), s.id), s))
+    return [s for _, s in sorted(out, key=lambda q: q[0])]
 
 
 # ------------------------------------------------------------------ sites nobody needs any more
