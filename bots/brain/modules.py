@@ -23,6 +23,7 @@ from fab.build import build as fab_build
 from fab.design import design_factory
 from fab.grid import Grid
 
+from . import design_memory
 from .world import BuildError, FreeWorld
 
 Tile = tuple[int, int]
@@ -1140,6 +1141,9 @@ class Factory(Module):
             if gap is not None:                   # the least trunk first (a link-only place before any)
                 ok = sorted(ok, key=lambda f: gap(f) > 0)
             places = ok
+        got = self._recall(w, item, rate, supplied, places, ug, key, off_ore)
+        if got is not None:                      # a saved design that fits today's ground: no design at all
+            return got
         wide = places if w.blocking else places[:3]
         # Room first: replays of failed runs show the roomy rung (margin 24, 20 underground pairs) designs green
         # science where the tight one (14, 10) finds no route, so the tight rung only gets a quick try at the
@@ -1489,7 +1493,98 @@ class Factory(Module):
         self.designs.clear()
         if report["failed"] and report["placed"] < len(report["failed"]) * 2:
             raise BuildError(f"factory mostly failed: {report['failed'][0][:120]}")
+        self._remember(w, p, d, focus)
         return site
+
+    # ------------------------------------------------------------ saved designs (docs/hybrid-plan.md, section 2)
+    RECALL_SHIFTS = ((0, 0), (8, 0), (-8, 0), (0, 8), (0, -8))   # tried around each place: translation only
+
+    def _remember(self, w, p: dict, d, focus) -> None:
+        """A factory that was built: its design is saved (runs/local/designs/<item>/), for any later goal."""
+        store = design_memory.store_dir(self.case_dir)
+        if store is None:
+            return
+        try:
+            supplied, _ = self.supplied_for(w.kn, p)
+            plates_in = not any(c.kind == "mine" for c in d.cells)
+            if not plates_in:                    # the own-mines fallback (see _design): plates are made here
+                supplied = set(supplied) - set(self.PLATES)
+            path = design_memory.save(store, d, focus, supplied, plates_in)
+        except Exception as exc:  # noqa: BLE001 - the memory is a courtesy: the factory stands without it
+            w.log(f"[fab] the {p.get('item')} design was not saved: {str(exc)[:100]}")
+            return
+        if path is not None:
+            w.log(f"[fab] saved the {p.get('item')} design ({d.per_minute}/min) for later builds: {path.name}")
+
+    def _recall(self, w, item: str, rate: float, supplied: set, places: list, ug: int, key, off_ore: bool):
+        """A saved design of this factory (same inputs, plates fed or not, a rate within 0.8x-1.25x, a kit that is
+        unlocked) moved onto one of these places, if every tile there is free on today's ground and the route
+        probe passes. None: design one."""
+        store = design_memory.store_dir(self.case_dir)
+        if store is None or not places:
+            return None
+        recs = design_memory.candidates(store, item, rate, supplied, off_ore, ug=bool(ug),
+                                        feeds=self.feeds_for(w, supplied))
+        if not recs:
+            return None
+        surveyed: set = set()
+        why: dict[str, int] = {}
+        for rec in recs:
+            for focus in places:
+                for dx, dy in self.RECALL_SHIFTS:
+                    at = (focus[0] + dx, focus[1] + dy)
+                    d = design_memory.place(rec, at)
+                    bad = self._ground(w, d, off_ore)
+                    if bad == "unseen" and tuple(focus) not in surveyed:
+                        surveyed.add(tuple(focus))
+                        self._survey(w, focus)
+                        bad = self._ground(w, d, off_ore)
+                    if bad:
+                        why[bad] = why.get(bad, 0) + 1
+                        continue
+                    grid = Grid.from_world(w)
+                    if self.probe is not None:
+                        fail = w.think(f"checking the belt routes into the saved {item} design at ({at[0]:.0f}, "
+                                       f"{at[1]:.0f})", self.probe, grid, d)
+                        if fail:
+                            why["route probe"] = why.get("route probe", 0) + 1
+                            break                # the same inputs walled off a few tiles over: the next place
+                    saved = float(rec["per_minute"])
+                    n = int(rec.get("builds") or 0)
+                    w.log(f"[fab] reusing the saved {item} design ({n} earlier build{'s' if n != 1 else ''}) at "
+                          f"({at[0]:.0f}, {at[1]:.0f})" + ("" if abs(saved - rate) < 1e-6 else
+                          f": made for {saved:g}/min, {rate:g}/min asked (within {design_memory.RATE_LO}x-"
+                          f"{design_memory.RATE_HI}x)"))
+                    if saved < rate:
+                        d.notes.append(f"asked {rate}/min, designed {saved}/min")
+                    if off_ore:
+                        d.notes.append("plates come in through input ports")
+                    self.designs[key] = (d, grid, at)
+                    return self.designs[key]
+        w.log(f"[fab] {len(recs)} saved {item} design(s) fit none of {len(places)} places on today's ground "
+              f"({', '.join(f'{k}: {v}' for k, v in sorted(why.items()))}): designing one")
+        return None
+
+    @staticmethod
+    def _ground(w, d, off_ore: bool) -> str | None:
+        """Why a design cannot stand here on today's ground: "taken" (built on, kept out or a lane), "ore" (a
+        plate-fed floor on ore, or a mine cell off its ore), "unseen" (not looked at yet); None: free."""
+        tiles = set(d.tiles())
+        for pt in d.ports():
+            tiles |= {tuple(pt[k]) for k in ("end", "approach") if pt.get(k) is not None}
+        movable = getattr(w, "movable", None) or ()
+        lanes = getattr(w, "lanes", None) or ()
+        keep = getattr(w, "keepout", None) or ()
+        if any((w.blocked(t) and t not in movable) or t in keep or t in lanes for t in tiles):
+            return "taken"
+        res = getattr(w, "resources", None) or {}
+        if off_ore and any(t in ts for ts in res.values() for t in tiles):
+            return "ore"
+        if any(t not in res.get(c.ore, ()) for c in d.cells if c.kind == "mine" for t in c.drill_tiles()):
+            return "ore"
+        if any(t not in w.seen for t in tiles):
+            return "unseen"
+        return None
 
 
 # ----------------------------------------------------------- electric mine
