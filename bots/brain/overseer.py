@@ -304,7 +304,11 @@ ORE_ITEM = {"iron-ore": "iron-plate", "copper-ore": "copper-plate", "stone": "st
 
 def goal_item(goal: dict) -> str | None:
     """The item a build (or a replace's build) adds supply of: a mine's or outpost's plate, a steel column's
-    steel, pumpjacks' crude oil, a factory's or workshop's item."""
+    steel, pumpjacks' crude oil, a factory's or workshop's item. None for goals that move supply without adding
+    any (relink, link, feed, trunk...): a forbid holds those back even when the item is short (run 20261125-214645:
+    "forbid relink site 29" was issued four times and the relink ran again each time, "relieving" iron)."""
+    if goal.get("do") not in ("build", "replace", None):
+        return None
     g = goal.get("with") if goal.get("do") == "replace" and isinstance(goal.get("with"), dict) else goal
     r = g.get("resource")
     if g.get("module") == "smelter_column" and r == "iron-plate":

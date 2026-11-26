@@ -98,7 +98,7 @@ def test_a_replaced_mine_feeds_the_old_belts_and_no_consumer_is_touched():
     assert crew.spliced((0.5, 0.5)) and ln in crew.links and tap in crew.links
     assert ln["port"]["fed"] and tap["port"]["fed"]                       # neither consumer was relinked
     load, supply = crew._budget("iron-plate")[(0.5, 0.5)]
-    assert load == 18.0 and supply == 18.75                               # what feeds the old belts now
+    assert load == 18.0 and supply == 18.0     # what the old belts lack comes in; the rest stays spare
     crew._minute = lambda: 1e6
     assert crew.expire_gone() == [] and ln in crew.links                  # spliced: stays for good
 

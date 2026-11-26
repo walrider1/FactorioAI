@@ -183,6 +183,15 @@ def diagnose(crew, site_id, item: str | None = None, depth: int = 0) -> dict:
                          f"belts feed {load:.0f}/min")
             spare = crew._spare(item) if hasattr(crew, "_spare") else []
             may = crew._may_retry(("boost",) + root) if hasattr(crew, "_may_retry") else True
+            cover = _covering(crew, item, site, root, load)
+            if cover is not None:
+                # another free source covers the whole port: the relink lays it from there (run 20261125-214645:
+                # four relinks of green science answered "build an iron outpost" while a 112/min line stood idle)
+                out.update(cause="source-small", avoid=[root],
+                           why=f"its {item} source gets {supply:.0f}/min but feeds {load:.0f}/min: site "
+                               f"{cover[2].id}'s source at {[cover[0], cover[1]]} covers it in full, so the "
+                               "relink lays it from there")
+                return out
             if spare and may:
                 fix = {"do": "link"}
                 how = f"{len(spare)} unused {item} source(s) are fed into that belt"
@@ -212,7 +221,7 @@ def diagnose(crew, site_id, item: str | None = None, depth: int = 0) -> dict:
     return out
 
 
-RELINK_CAUSES = ("no-link", "no-effect", "unknown", "source-gone")
+RELINK_CAUSES = ("no-link", "no-effect", "unknown", "source-gone", "source-small")
 
 
 def diagnoses(crew, limit: int = 6) -> list[dict]:
@@ -249,6 +258,21 @@ def diagnoses(crew, limit: int = 6) -> list[dict]:
         if len(out) >= limit:
             break
     return out
+
+
+def _covering(crew, item: str, site, root: tuple, load: float):
+    """A free source of the item, other than `root`, with what the port takes left over (None: none). Only for a
+    port fed by one chain: a relink moves it whole."""
+    if not hasattr(crew, "_free_outputs") or not hasattr(crew, "_left"):
+        return None
+    try:
+        budget = crew._budget(item)
+        for x, y, s in crew._free_outputs(item, site, load):
+            if (x, y) != tuple(root) and crew._left(budget, (x, y), item) >= load - 0.5:
+                return (x, y, s)
+    except Exception:  # noqa: BLE001 - stub crews in tests
+        return None
+    return None
 
 
 def route(crew, goal: dict) -> tuple[dict | None, str, list]:

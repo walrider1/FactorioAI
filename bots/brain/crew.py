@@ -996,6 +996,21 @@ class Crew:
             return None
         if _depleted(site) or site.kind.startswith("unfinished"):
             return None
+        for k in ("per_minute", "count"):             # a bigger one is an upsize, not a move: it stands
+            try:
+                if new.get(k) is not None and float(new[k]) > float(site.params.get(k) or 0) * 1.05:
+                    return None
+            except (TypeError, ValueError):
+                pass
+        try:                                          # "fed" is a belt attached, not enough on it
+            from . import triage
+            if triage._starving(site) > max(1, triage._blocked(site)):
+                return None
+            for it in {pt.get("item") for pt in site.params.get("ports", []) if pt.get("item")}:
+                if triage.diagnose(self, site.id, it).get("cause") in ("source-short", "source-small"):
+                    return None                       # run 20261125-214645: dropped 3x while it got 56 of 91/min
+        except Exception:  # noqa: BLE001 - stub sites and crews in tests
+            pass
         ports = [pt for pt in site.params.get("ports", []) if pt.get("item") or "pack" in pt]
         if not ports or any(not (pt.get("fed") or pt.get("pack")) for pt in ports):
             return None
@@ -2053,6 +2068,12 @@ class Crew:
         per, put = max(1, count // len(targets)), 0
         for x, y in targets:
             put += self.w.insert(x, y, item, per)
+        if put <= 0:
+            # nothing went in (out of reach, no path, nothing on hand): a failure, so the repeat guards see it
+            # (run 20261125-214645: "fed 0 coal into site 11" came back ok six times, the boiler alert fired again
+            # each time and paused the goal in hand)
+            raise BuildError(f"no {item} went into site {site.id} ({site.kind}): its chest or burners could not be "
+                             f"reached or took nothing ({self.w.inventory.get(item, 0)} on hand)")
         return f"fed {put} {item} into site {site.id} ({site.kind})"
 
     def burner_drills(self, resource: str | None = None) -> int:
@@ -3597,7 +3618,24 @@ class Crew:
         out = [(x, y, s) for x, y, s in self.outputs(item) if s is not consumer and used.get((x, y), 0) < cap(s)
                and not (item == "coal" and s.kind == "burner_mine")]   # burner coal mines burn their own coal
         budget = self._budget(item)
-        return [(x, y, s) for x, y, s in out if self._fits(budget, (x, y), need, item)]
+        out = [(x, y, s) for x, y, s in out if self._fits(budget, (x, y), need, item)]
+        if need > 0.5 and consumer is not None:
+            # a source that covers the port in full, within a link's reach, before any short one: links go to the
+            # nearest source, and an unused one takes a port of any size (run 20261125-214645: green science's 91
+            # iron a minute went to a 56/min line 53 tiles off while a free 112/min line stood 58 tiles off;
+            # the factory ran at 55% for 170 game minutes and triage built iron mines meanwhile)
+            from . import belts
+            c = consumer.centre or (0, 0)
+            full = [q for q in out if self._left(budget, (q[0], q[1]), item) >= need - 0.5
+                    and self._manhattan(q[:2], c) <= belts.LINK_REACH]
+            if full:
+                return full
+        return out
+
+    def _left(self, budget: dict, root: tuple, item: str) -> float:
+        """What a source has left a minute after the ports it already feeds."""
+        load, supply = budget.get(tuple(root)) or [0.0, self._source_rate(tuple(root), item)]
+        return supply - load
 
     # A belt carries what its source gets. Run 20261119-154451: three boilers and four furnace rows tapped one coal
     # chest's belt (one drill, 30 a minute) and all ran dry, while each new coal mine stood unlinked (every port
@@ -3659,26 +3697,35 @@ class Crew:
 
     def _budget(self, item: str | None = None) -> dict[tuple, list[float]]:
         """{source: [a minute the ports it feeds take, a minute it gets]} for every chain (of one item). A
-        source fed into another chain (a boost) gives all it gets to that chain."""
+        source fed into another chain (a boost) gives that chain what it is short of, and keeps the rest: the
+        boosted belt backs up once full, and the source's line or chest has the rest for other links (run
+        20261125-214645: a 487/min line boosted into a steel column short of 37.5/min was booked whole, and
+        stood 43/52 machines blocked while it counted as fully used)."""
         out: dict[tuple, list[float]] = {}
 
         def row(root: tuple, it: str) -> list[float]:
             if root not in out:
                 out[root] = [0.0, self._source_rate(root, it)]
             return out[root]
+        boosts = []
         for ln in self.links:
             it = ln.get("item")
             if it is None or (item is not None and it != item) or ln.get("kind") in ("trunk", "science"):
                 continue
             if ln.get("boost_into") is not None:
-                src = row(tuple(ln["source"]), it)
-                src[0] += src[1]
-                if ln.get("boost_of") is not None:
-                    row(tuple(ln["boost_of"]), it)[1] += src[1]
+                boosts.append((ln, it))
                 continue
             root = self._coal_root(ln)
             if root is not None:
                 row(root, it)[0] += float((ln.get("port") or {}).get("per_minute") or 0)
+        for ln, it in boosts:                         # after every port is counted: what each chain lacks
+            src = row(tuple(ln["source"]), it)
+            give = max(0.0, src[1] - src[0])
+            if ln.get("boost_of") is not None:
+                chain = row(tuple(ln["boost_of"]), it)
+                give = min(give, max(0.0, chain[0] - chain[1]))
+                chain[1] += give
+            src[0] += give
         return out
 
     def _coal_budget(self) -> dict[tuple, list[float]]:
@@ -3980,6 +4027,9 @@ class Crew:
         that fits is queued first in its place and the relink is not done."""
         from . import triage
         from .overseer import same_target
+        st = self.base.get(goal.get("site"))
+        if st is not None and st.kind == "labs" and st.params.get("station")                 and str(goal.get("item") or "").endswith("science-pack"):
+            return self.relink(st.id, goal.get("item"))      # a station's packs: no triage of plate inputs
         try:
             fix, note, avoid = triage.route(self, goal)
         except Exception as exc:  # noqa: BLE001 - a failed diagnosis falls back to the plain relink
@@ -4000,6 +4050,8 @@ class Crew:
         site = self.base.get(site_id)
         if site is None:
             raise BuildError(f"there is no site {site_id}")
+        if site.kind == "labs" and site.params.get("station") and str(item or "").endswith("science-pack"):
+            return self._relink_station(site, item)
         ports = [pt for pt in site.params.get("ports", []) if pt.get("item") and not pt.get("trunk")
                  and (item is None or pt["item"] == item)]
         if not ports:
@@ -4034,6 +4086,19 @@ class Crew:
         fed = sum(1 for pt in ports if pt.get("fed"))
         return (f"site {site.id}: took up {len(gone)} link(s) into its {item or 'input'} ports and laid them "
                 f"again: {fed}/{len(ports)} fed. {msg[:240]}")
+
+    def _relink_station(self, site: Site, pack: str) -> str:
+        """A research station's ports take packs (port "pack"), not items: its belts of that pack come up and the
+        science links are laid again. Run 20261125-214645: "relink site 24 automation-science-pack" failed twice
+        with "no input port" and was forbidden, while red science backed up and the labs waited."""
+        gone = [ln for ln in self.links if ln.get("kind") == "science" and ln.get("to_site") == site.id
+                and ln.get("item") == pack]
+        for ln in gone:
+            self._unlink(ln)
+            self._link_fails.pop(tuple(ln["port"]["end"]), None)
+        msg = self.link_science()
+        return (f"research station {site.id}: took up {len(gone)} {pack} belt(s) and laid the science links "
+                f"again: {str(msg)[:240]}")
 
     TRUNK_SOURCES = 3              # far sources a trunk goal tries, nearest first
 
@@ -4985,7 +5050,7 @@ class Crew:
                 if key in placed:
                     want[key] = (ln, "underground-belt" if st[0] == "ug" else "transport-belt", st[2],
                                  st[3] if st[0] == "ug" else None)
-        notes = self._retake_starved()
+        notes = self._free_line_heads() + self._retake_starved()
         if not want:
             return notes
         have: dict[tuple, dict] = {}
@@ -5021,6 +5086,57 @@ class Crew:
             notes.append(f"the {ln['item']} link into site {ln['to_site']} was broken at {key} ({name} "
                          f"{'wanted ' + (typ + ' ' if typ else '') + 'facing ' + facing}, found {what}): taken up "
                          f"({len(gone)} link(s)), to be laid again")
+        return notes
+
+    def _free_line_heads(self) -> list[str]:
+        """A pole of ours on a line's start blocks the belt its plates run on from: a pole goes on a free tile next
+        to it first (within wire reach of the poles it was wired to), then it comes up and the power nearby is
+        checked. Once per line. Run 20261125-214645: site 19's own pole stood on its start; its copper had no
+        way out but taps upstream of five of six furnaces, and copper plates ran at 19 a minute."""
+        tried = self.__dict__.setdefault("_heads_freed", set())
+        notes = []
+        heads = self.line_heads()
+        tile = lambda e: (math.floor(e[1]), math.floor(e[2]))
+        for site, ln in self.lines():
+            st = tuple(ln["start"])
+            if (site.id, st) in tried:
+                continue
+            hit = next(((s, e) for s in self.base.sites for e in s.entities if e[0] in POLES and tile(e) == st), None)
+            if hit is None:
+                continue
+            tried.add((site.id, st))
+            owner, e = hit
+            near = [q for q in self.existing_poles() if q != st and math.dist(q, st) <= self.WIRE_REACH]
+            line = {tuple(t) for _, l in self.lines() for t in l.get("tiles") or []}
+            ok = self._pole_freer()
+            spots = sorted(((st[0] + dx, st[1] + dy) for dx in (-2, -1, 0, 1, 2) for dy in (-2, -1, 0, 1, 2)
+                            if (dx, dy) != (0, 0)), key=lambda q: math.dist(q, st))
+            spot = next((q for q in spots if q not in heads and q not in line and ok(q) and self.w.free({q})
+                         and all(math.dist(q, n) <= self.WIRE_REACH - 0.5 for n in near)), None)
+            if spot is None:
+                notes.append(f"site {owner.id}'s pole stands on the start of site {site.id}'s {ln['item']} line and "
+                             "no tile next to it keeps its wires: left standing")
+                continue
+            try:
+                self.make({e[0]: 1}, extra=True)
+                self.w.place(e[0], spot[0] + 0.5, spot[1] + 0.5, "north", {spot})
+            except BuildError as exc:
+                notes.append(f"the pole on site {site.id}'s line start could not be moved: {str(exc)[:80]}")
+                continue
+            new = (e[0], spot[0] + 0.5, spot[1] + 0.5, "north")
+            owner.entities.append(new)
+            owner.poles.append(spot)
+            try:
+                if self.w.pickup(*e):
+                    owner.entities.remove(e)
+                    owner.poles = [q for q in owner.poles if tuple(q) != st]
+            except BuildError as exc:
+                notes.append(f"the pole on site {site.id}'s line start stays (could not be picked up: "
+                             f"{str(exc)[:80]})")
+                continue
+            self._recheck_power_near([(e[1], e[2]), (new[1], new[2])])
+            notes.append(f"moved site {owner.id}'s pole off the start of site {site.id}'s {ln['item']} line to "
+                         f"{spot}: its plates can run on into a link now")
         return notes
 
     def _line_open(self, site: Site, ln: dict) -> bool:
@@ -5517,6 +5633,11 @@ class Crew:
                 mark, since = now_mark, self._minute()
             elif self._minute() - since >= self.RESEARCH_STALL_MIN:
                 raise BuildError(self._research_stalled(tech, rs, self._minute() - since))
+            if rs.get("current") and rs.get("current") != first[1]:
+                # the next tech of the path is on now: the pace is judged from here (run 20261125-214645: the
+                # path moved from fluid-handling to oil-gathering, the ETA stayed None for good, and the pumpjack
+                # goal waited out its budget twice)
+                first = (self._minute(), rs.get("current"), float(rs.get("progress") or 0))
             eta = self._research_eta(path, rs, first)
             if defer and eta is not None and eta > self.RESEARCH_DEFER_MIN:
                 raise BuildError(f"research for {tech} needs about {eta:.0f} more game minutes at this pace: the "
@@ -5605,7 +5726,15 @@ class Crew:
         kept = {k: min(inv.get(k, 0), hold.get(k, 0) + res.get(k, 0)) for k in need}
         self.make({k: v + kept[k] for k, v in need.items() if v})
 
-    STEEL_COLUMN = 4                   # furnaces of the first steel column (3.75 steel a minute each in stone)
+    STEEL_FIRST_PER_MIN = 15.0         # steel a minute of the first column: blue science's engines and then some
+
+    def steel_column(self) -> int:
+        """Furnaces of the first steel column: STEEL_FIRST_PER_MIN at the furnace it gets (3.75 a minute in stone,
+        7.5 in steel). Run 20261125-214645: 4 steel furnaces made 22-28 steel a minute for 2.2 used, and booked
+        150 iron a minute."""
+        from .outposts import SmelterColumn
+        fur = SmelterColumn.furnace(self.w)
+        return max(1, math.ceil(self.STEEL_FIRST_PER_MIN / self.STEEL_PER_MIN.get(fur, 3.75)))
 
     def _steel_first(self) -> str:
         """Steel by belt before steel by hand: once steel-processing is in and nothing of ours makes steel, a
@@ -5618,7 +5747,7 @@ class Crew:
         try:
             self.log("[crew] steel first: a smelting column on iron plates, so kits take steel from a chest")
             return self.build({"do": "build", "module": "smelter_column", "resource": "iron-plate",
-                               "count": self.STEEL_COLUMN})
+                               "count": self.steel_column()})
         except BuildError as exc:            # the kit goes on; its steel is smelted by hand this time
             self.failed_suppliers["steel-plate"] = self._minute()
             self.foreman.note(f"steel first (smelting column) failed: {str(exc)[:100]}")
@@ -6357,6 +6486,8 @@ class Foreman:
     def forget(self, site: Site) -> None:
         self.problems = [p for p in self.problems if not p.startswith(f"site {site.id} ")]
 
+    COAL_ROUND = 300               # coal the foreman carries for a round of refuelling
+
     def _coal(self, lean: bool = False) -> None:
         w = self.crew.w
         if w.inventory.get("coal", 0) >= 150:             # enough to top up several burners by nearly a stack
@@ -6364,9 +6495,15 @@ class Foreman:
         if self.crew.no_room("coal"):                     # a full inventory: walking to every chest gets nothing
             self.note("the inventory is full and nothing more could go into storage: no room for coal")
             return
-        for x, y in self.crew.coal_chests():
+        # enough for the round, not everything: chests a coal belt starts at last (their coal is the belts'),
+        # stop once it is on hand (run 20261125-214645: 35,508 coal taken out of the chests feeding four coal
+        # belts, 27,000 of it put into storage)
+        sources = {tuple(ln["source"]) for ln in self.crew.links if ln.get("item") == "coal"}
+        for x, y in sorted(self.crew.coal_chests(), key=lambda c: tuple(c) in sources):
+            if w.inventory.get("coal", 0) >= self.COAL_ROUND:
+                break
             if not lean or math.dist((x, y), w.pos) <= LEAN_REACH:
-                w.extract(x, y, "coal", 400)
+                w.extract(x, y, "coal", self.COAL_ROUND - w.inventory.get("coal", 0))
         # while building, gather fuel by hand only when it is nearly gone (the build itself is the priority)
         if w.fuel_units() < (5 if lean else 15) and any(s.burners for s in self.crew.base.sites):
             self.crew.get_fuel(30)
@@ -6647,7 +6784,10 @@ class Foreman:
                 per = max(1, w.inventory[pack] // len(bare))
                 for x, y in bare:
                     w.insert(x, y, pack, per)
-            if heads and pack not in belted and w.inventory.get(pack, 0) > 0:   # the station passes it down its row
+            if heads and w.inventory.get(pack, 0) > 0 and (pack not in belted or not plain):
+                # the station passes it down its row; packs carried anyway (out of labs taken down, a round
+                # before) go in too rather than riding along (run 20261125-214645: every lab round ended
+                # "still carrying 35 automation-science-pack")
                 per = max(1, w.inventory[pack] // len(heads))
                 for x, y in heads:
                     w.insert(x, y, pack, per)
