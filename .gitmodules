@@ -1,0 +1,3 @@
+[submodule "bots/atlas"]
+	path = bots/atlas
+	url = https://github.com/walrider1/AtlasFactorioAI.git
