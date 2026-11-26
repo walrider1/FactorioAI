@@ -206,6 +206,62 @@ stands, the hop stays within the small pole's 7.5 tiles.
 skipped, in furnace rows and outposts alike, so copper never ends up in an iron chest and on a factory's iron
 belt.
 
+## Zones (hybrid)
+
+`zones.py` adds the hybrid floorplan from `docs/hybrid-plan.md`. The brain keeps its organic opening in a
+**start yard**. From the first electric build, an Atlas floorplan only reserves land outside the yard. From
+**segment 1** on, the era's blocks go into spine slots. Atlas (`bots/atlas`, a submodule) is used as a library
+(ledger, floorplan, bus, strip designer, production graph). Atlas itself is not run.
+
+- **When.** `zones.after_build(crew, site)` runs after every build and never raises. On the first electric
+  build (or steam station) it does a remote survey, plans on a snapshot (`w.think`) and reserves the land.
+  Segment 1 opens on a later build, once all of these hold:
+  - underground belts are unlocked;
+  - an `electric_mine` or `outpost` exists;
+  - a `steam_power` station exists.
+- **Start yard.** A box around the base centre that holds the opening's buildings (those within 90 tiles of
+  the centre) plus 10 tiles, between 36 and 90 tiles from the centre each way. It is never reserved.
+- **Reservations** (`Zones.reserve` = `plan` then `apply`):
+  - the spine, starting at the yard's edge and heading away from it;
+  - the oil corridor;
+  - the silo slot;
+  - the next era's slots (make, science, two spare).
+
+  Nothing is reserved on any ore tile, on or within 2 tiles of our buildings, lanes or keepouts, or on unseen
+  land. `FreeWorld.free` refuses reserved tiles for buildings. `free_belt` and pole routing allow corridor
+  tiles but not slot tiles. fab's `Grid`, the workshop floor and the storage yard keep off all reserved land.
+- **Segments.** `Zones.segment(n)` / `open_segment(n)` work from `SEGMENTS[n]`. Segment 1 is red and green at
+  30/min, sized by `atlas.plan.graph`, which adds the ×1.2 `SUPPLY_MARGIN` to every intermediate. Each copy of
+  each make block (gears, circuits, red, green) and the labs gets a slot. Each is designed with Atlas's strip
+  designer, with its ports on the spine edge. The bus (`atlas.layout.bus.design_bus`) is laid for these
+  terminals only, plus **head terminals** at the spine's start for the plates the brain's lines bring in.
+  - The result is a `Segment`. Each `SegBlock` holds its slot rect, `ports` (spine edge tiles), `taps`
+    (bus line, lane, splitter per input) and `problems`.
+  - `Segment.head_ports(spine)` gives the head terminals as feed ports for trunks.
+  - The whole segment passes Atlas's world check: no clashes, one item per lane, every input port gets its item.
+- **Factories.** When a segment is open, `Factory._design` first asks `slot_block(item)`. If it gets a block,
+  `zones.slot_build` turns the Atlas design into placement steps:
+  - inserters face their pickup side, and undergrounds carry their belt type;
+  - each in port becomes a feed port whose last link belt stands on the spine edge;
+  - each out port gets an inserter and a chest on the spine edge (the product's stand-in until the bus exists).
+
+  `supplied_for` returns the block's bus inputs at the block's rate (`SlotPlan`), so the crew's "intermediates
+  first" and "plates first" size the feeders to the slot. Free-form fab stays for everything else: start-yard
+  builds, items not in the segment, a block already built, `plates: "mine"`, and a slot whose design fails.
+- **Saved** with the crew (`crew.zones`, the same object as `world.zones`). Only the plain state and the Atlas
+  corridor and slot records are saved. The floorplan's ledger and the designs are rebuilt after a resume.
+- **Off switch:** `zones.ENABLED = False`. Nothing is reserved, `free` works as before, and factories are
+  free-form.
+- **Not wired yet (stubs):**
+  - the bus pieces and taps are planned and checked but not built (`Segment.bus`; `atlas.build.compile.bus_jobs`
+    turns them into jobs);
+  - no trunk goal targets the head ports yet;
+  - until both exist, a slot factory's inputs are point-to-point links into its feed ports, and its output
+    sits in the stand-in chest;
+  - segments 2+ (blue, the oil zone) are hybrid-plan step 6.
+- **Tests:** `tests/test_zones.py` runs on the Atlas fixture map. `ZONES_ALL_MAPS=1` also runs it on the 22
+  generated maps (all pass, 3 to 11 s each).
+
 ## How far it gets today
 
 The opening book goes: burner mines on iron, coal, stone and copper, then steam power (unlocked by the 50th

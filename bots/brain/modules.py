@@ -916,6 +916,43 @@ class Factory(Module):
     # full rate only, so a block that does not fit is split at once (Crew.build) instead of after every place
     reach = None
     quick = False
+    # the hybrid floorplan (zones.py, set by zones.attach). While an era segment is open, a goal for one of its
+    # items is built into the segment's slot with Atlas's strip design; everything else stays free-form
+    zones = None
+
+    def slot_block(self, p: dict, w=None):
+        """The open segment's next unbuilt block for this goal's item, or None (free-form, as before): zones off
+        or no segment open, the item not in it, its blocks all built, or the goal asks for its own mines."""
+        from . import zones as zmod
+        z = getattr(w, "zones", None) if w is not None else None
+        z = z if z is not None else self.zones
+        if z is None or not zmod.ENABLED or not getattr(z, "opened", None) or not p.get("item"):
+            return None
+        if str(p.get("plates", "in")).lower() == "mine" or p.get("free_form"):
+            return None
+        try:
+            return z.slot_block(p["item"], w)
+        except Exception:  # noqa: BLE001 - the zones are an aid: any trouble there and the factory goes free-form
+            return None
+
+    def _slot_design(self, w: FreeWorld, p: dict):
+        """(SlotBuild, None, focus) for a goal the open segment holds, or None."""
+        block = self.slot_block(p, w)
+        if block is None:
+            return None
+        from . import zones as zmod
+        try:
+            d = zmod.slot_build(block)
+        except Exception as exc:  # noqa: BLE001
+            w.log(f"[zones] no slot build for {p.get('item')} ({type(exc).__name__}: {str(exc)[:120]}): free-form")
+            return None
+        taken = {t for t in d.tiles() if w.blocked(t) and t not in w.movable}
+        if taken:
+            w.log(f"[zones] slot {block.slot.id} for {p['item']} lost {len(taken)} tiles: free-form instead")
+            return None
+        w.log(f"[zones] {p['item']} goes into segment slot {block.slot.id} ({block.key}, "
+              f"{d.per_minute}/min, {len(d.all_steps())} buildings)")
+        return (d, None, d.focus)
 
     def feeds_for(self, w, supplied) -> frozenset:
         """Supplied items that come in on a belt straight onto the factory's own (docs/logistics-plan.md, phase
@@ -1008,7 +1045,16 @@ class Factory(Module):
             supplied.add(max(cands)[1])
 
     def supplied_for(self, kn, p: dict) -> tuple[set[str], object]:
-        """The goal's inputs and its plan (what the crew sizes plate supply and power from, before any layout)."""
+        """The goal's inputs and its plan (what the crew sizes plate supply and power from, before any layout).
+        A goal the open zone segment holds takes its Atlas block's bus inputs, at the block's rate."""
+        item = p["item"]
+        block = self.slot_block(p)
+        if block is not None:
+            return {i for i in block.spec.bus_in if i != item}, SlotPlan(block)
+        return self.free_supplied(kn, p)
+
+    def free_supplied(self, kn, p: dict) -> tuple[set[str], object]:
+        """supplied_for of the free-form designer (fab), whatever the zones hold."""
         item = p["item"]
         return self.inputs(kn, item, self.rate(p), sorted(self.asked_inputs(kn, p) - {item}))
 
@@ -1027,7 +1073,11 @@ class Factory(Module):
                 return self.designs[key]
             w.log(f"[fab] the kept {item} design lost {len(taken)} tiles to other builds: designing again")
             del self.designs[key]
-        supplied, _ = self.supplied_for(w.kn, p)
+        got = self._slot_design(w, p)            # an open zone segment holds this item: its slot, Atlas's design
+        if got is not None:
+            self.designs[key] = got
+            return got
+        supplied, _ = self.free_supplied(w.kn, p)
         got = self._take_ready(w, key, supplied)
         if got is not None:
             self.designs[key] = got
@@ -1067,8 +1117,10 @@ class Factory(Module):
         key = (item, rate)
         if key in self.designs or key in self.ready or (self._worker is not None and not self._worker.done()):
             return False
+        if self.slot_block(p, w) is not None:   # a zone segment's slot: designed by Atlas when it comes up
+            return False
         try:
-            supplied, _ = self.supplied_for(w.kn, p)
+            supplied, _ = self.free_supplied(w.kn, p)
         except BuildError:
             return False
         fed = bool(set(self.PLATES) & supplied)
@@ -1466,6 +1518,8 @@ class Factory(Module):
 
     def recipes(self, w, base, p):
         d, _, _ = self._design(w, base, p)
+        if not hasattr(d, "cells"):              # a zone slot's Atlas design (zones.SlotBuild)
+            return d.recipes()
         return {c.recipe for c in d.cells if c.kind == "asm" and c.recipe}
 
     def kit(self, w, base, p):
@@ -1481,6 +1535,8 @@ class Factory(Module):
         if not base.powered_poles():
             raise BuildError("a factory needs power: build steam_power first")
         d, grid, focus = self._design(w, base, p)
+        if not hasattr(d, "cells"):              # a zone slot's Atlas design (zones.SlotBuild)
+            return self._build_slot(w, base, p, d)
         report = fab_build(w, d, w.log, anchors=())     # the crew runs the line to the network after
         site = Site(self.name, {"item": p["item"], "per_minute": float(d.per_minute)}, focus)
         for c in d.cells:
@@ -1622,6 +1678,88 @@ class Factory(Module):
         if any(t not in w.seen for t in tiles):
             return "unseen"
         return None
+
+
+    def _build_slot(self, w, base, p, d) -> Site:
+        """Place a zone slot's Atlas design (zones.SlotBuild) step by step: every building the game refuses is a
+        gap the site keeps (repairs place it later), as with fab designs. Its input ports are feed ports on the
+        spine edge: until the segment's bus taps exist (zones.py: not built yet), the link step belts them from
+        sources as it does for any factory. Its product collects in a chest past each out port."""
+        from fab.build import _gap, _retry
+        placed, failed, gaps = 0, [], []
+        for s in d.all_steps():
+            tiles = {tuple(t) for t in s.tiles}
+            try:
+                if s.belt_type:                  # an underground: the API takes its belt type
+                    w.clear(tiles)
+                    w.near(s.x, s.y)
+                    if any(abs(w.pos[0] - t[0] - 0.5) < 1.2 and abs(w.pos[1] - t[1] - 0.5) < 1.2 for t in tiles):
+                        w.step_out(tiles)
+                    r = _retry(w, tiles, lambda s=s: w.run.place(s.name, s.x, s.y, s.direction, s.belt_type))
+                    if not r.get("ok"):
+                        raise BuildError(f"place {s.name} at ({s.x}, {s.y}): {r.get('code')} {r.get('message', '')}")
+                    w.used.update(tiles)
+                    w.inventory[s.name] = max(0, w.inventory.get(s.name, 0) - 1)
+                else:
+                    w.place(s.name, s.x, s.y, s.direction, tiles)
+                placed += 1
+            except BuildError as exc:
+                failed.append(f"{s.name} at ({s.x}, {s.y}): {str(exc)[:120]}")
+                gaps.append(_gap(s.name, s.x, s.y, s.direction, str(exc), recipe=s.recipe, type=s.belt_type))
+                continue
+            if s.recipe and s.name.startswith("assembling-machine"):
+                r = w.run.set_recipe(s.x, s.y, s.recipe)
+                if not r.get("ok"):
+                    failed.append(f"recipe {s.recipe} at ({s.x}, {s.y}): {r.get('code')}")
+                    gaps.append(_gap(s.name, s.x, s.y, s.direction, f"recipe: {r.get('code')}", recipe=s.recipe,
+                                     placed=True))
+        block = d.block
+        site = Site(self.name, {"item": p["item"], "per_minute": float(d.per_minute), "slot": block.slot.id,
+                                "segment_block": block.key}, d.focus)
+        site.chests = [(x, y, p["item"]) for x, y in d.chests]
+        site.poles = [tuple(q) for q in d.poles]
+        ports = [dict(pt) for pt in d.ports]
+        for pt in ports:
+            w.keepout |= {tuple(pt["end"]), tuple(pt["approach"])}
+        if ports:
+            site.params["ports"] = ports
+            site.params["inputs"] = sorted({pt["item"] for pt in ports})
+            site.port_lanes = sorted({tuple(t) for pt in ports for t in (pt["end"], pt["approach"])})
+        site.note = f"{placed} built in zone slot {block.slot.id}" + (
+            f", {len(failed)} failed (first: {failed[0][:120]})" if failed else "")
+        if gaps:
+            from .gaps import record
+            record(site, gaps)
+        z = getattr(w, "zones", None) or self.zones
+        if z is not None:
+            z.mark_built(block, d.focus)
+        self.designs.clear()
+        if failed and placed < len(failed) * 2:
+            raise BuildError(f"slot factory mostly failed: {failed[0][:120]}")
+        return site
+
+
+class SlotPlan:
+    """What Factory.supplied_for returns for a zone slot's block, shaped like fab's plan where the crew reads it:
+    `supplied` (input -> per minute) and `machines` (recipe -> machines; only the block's own product counts, so
+    the crew never tries to split a slot block)."""
+
+    def __init__(self, block):
+        spec = block.spec
+        self.supplied = {i: round(v * 60, 2) for i, v in spec.bus_in.items() if i != spec.product}
+        mach = 0
+        for st in spec.stages:
+            if st.product == spec.product:
+                try:
+                    from atlas.plan.data import game
+                    from atlas.plan.graph import crafts_per_s
+                    gd = game()
+                    r = gd.recipe(st.recipe)
+                    mach = math.ceil(st.per_s / (crafts_per_s(r, st.machine, gd) * r.makes(st.product)))
+                except Exception:  # noqa: BLE001
+                    mach = 1
+        self.machines = {spec.product: mach}
+        self.item = spec.product
 
 
 # ----------------------------------------------------------- electric mine

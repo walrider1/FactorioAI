@@ -73,6 +73,10 @@ class FreeWorld(ab.World):
         # tiles kept free of buildings so belts can always get through: a margin around every site and along
         # trunks (crew._reserve_margin). Belts may use them (free_belt); buildings and poles may not (free)
         self.lanes: set[Tile] = set()
+        # the hybrid floorplan (zones.py): land reserved for the spine, the oil corridor and the era's slots. Its
+        # tiles are not free for buildings; belts may cross its corridors but not its slots. Same object as
+        # crew.zones; None until the first electric build plans it
+        self.zones = None
         self.make_way = None
         self.walk_fails = 0                   # moves in a row the game refused (no path, blocked)
         self.walk_fail: str | None = None     # the last refused move, for error messages and the strategist
@@ -1042,13 +1046,22 @@ class FreeWorld(ab.World):
 
     def free(self, tiles, need_seen: bool = True) -> bool:
         """Free to build on. A storage chest's tile counts as free: the chest moves when the build clears it.
-        Lanes (margins kept for belts) are not free for buildings."""
+        Lanes (margins kept for belts) and land the zones reserve (zones.py) are not free for buildings."""
+        if not isinstance(tiles, (set, frozenset, list, tuple)):
+            tiles = list(tiles)                       # read more than once below
         if self.lanes and any(t in self.lanes for t in tiles):
+            return False
+        z = self.__dict__.get("zones")
+        if z is not None and z.blocks(tiles):
             return False
         return self._free_ground(tiles, need_seen)
 
     def free_belt(self, t) -> bool:
-        """Free for a belt: like free, but a lane is exactly where belts belong."""
+        """Free for a belt: like free, but a lane is exactly where belts belong, and so are the zones' corridors
+        (a reserved slot is not)."""
+        z = self.__dict__.get("zones")
+        if z is not None and z.blocks_belt(t):
+            return False
         return self._free_ground((t,), True)
 
     def _free_ground(self, tiles, need_seen: bool) -> bool:
