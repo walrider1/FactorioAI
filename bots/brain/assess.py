@@ -517,6 +517,20 @@ def power_short_kw(crew, add_kw: float = 0.0) -> float:
     return max(0.0, load * POWER_HEADROOM - ps["capacity_kw"])
 
 
+SWAP_CIRCUITS_SPARE = 2.0      # advanced circuits a minute made over what is used before a furnace swap may start
+
+
+def _circuits_to_spare(crew) -> bool:
+    """Is blue science automated, with advanced circuits made faster than they are used? An electric furnace takes 5
+    of them, a 13-furnace column 65, and the swap's kit takes them from the advanced-circuit factory's chests: the
+    same circuits blue science runs on (3 per 2 packs, at about 5 a minute in run 20261125-214645)."""
+    w = getattr(crew, "w", None)
+    if "blue-auto" not in (getattr(w, "milestones", None) or {}):
+        return False
+    st = ((getattr(w, "stats", None) or {}).get("items") or {}).get("advanced-circuit") or {}
+    return float(st.get("made_per_min") or 0) - float(st.get("used_per_min") or 0) >= SWAP_CIRCUITS_SPARE
+
+
 def electric_swap_alerts(crew) -> list[dict]:
     """Electric smelting (docs/hybrid-plan.md, section 5): once electric furnaces are unlocked, the coal-fed smelter
     columns and furnace rows are rebuilt with them, one at a time and the least risky first (upgrade.swap_candidates),
@@ -535,6 +549,8 @@ def electric_swap_alerts(crew) -> list[dict]:
     except Exception:  # noqa: BLE001 - stub crews in tests
         return []
     can = getattr(crew, "can_obtain", None)
+    if not _circuits_to_spare(crew):
+        return []                                     # blue science first: it runs on the same advanced circuits
     for s in cands[:3]:
         g = swap_goal(crew, s)
         n = max(1, int(g["power_kw"] // 180))

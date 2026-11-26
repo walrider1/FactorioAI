@@ -202,7 +202,21 @@ def _swap_crew(cap=9000, demand=2000):
     crew.can_obtain = lambda item, n=1: True
     crew.power_status = lambda: {"capacity_kw": cap, "demand_kw": demand, "expected_kw": 0,
                                  "booked_kw": upgrade.booked_power_kw(crew), "stations": 3}
+    w.milestones = {"blue-auto": 1}                               # blue science runs, with circuits to spare
+    w.stats = {"items": {"advanced-circuit": {"made_per_min": 10.0, "used_per_min": 6.0}}}
     return crew, w, minute
+
+
+def test_no_furnace_swap_takes_the_circuits_blue_science_runs_on():
+    crew, w, _ = _swap_crew()
+    _coal_row(crew)
+    w.stats = {"items": {"advanced-circuit": {"made_per_min": 6.0, "used_per_min": 5.5}}}
+    assert electric_swap_alerts(crew) == []                       # barely any to spare
+    w.stats = {"items": {"advanced-circuit": {"made_per_min": 10.0, "used_per_min": 6.0}}}
+    w.milestones = {}
+    assert electric_swap_alerts(crew) == []                       # blue science not automated yet
+    w.milestones = {"blue-auto": 1}
+    assert len(electric_swap_alerts(crew)) == 1
 
 
 def test_the_least_risky_coal_fed_site_is_swapped_first_with_its_power_booked():
