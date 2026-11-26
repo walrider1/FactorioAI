@@ -225,19 +225,27 @@ class Crew:
     LANE_SHARE_MIN = 2.0           # game minutes of upkeep allowed per LANE_WINDOW_MIN inside one goal
     LANE_WINDOW_MIN = 10.0
 
+    LANE_BATCH = 4                 # feeds one safe point may do (all that are due, so the old pause is not needed)
+
     def _upkeep_lane(self) -> None:
+        for _ in range(self.LANE_BATCH):
+            if not self._lane_once():
+                return
+
+    def _lane_once(self) -> bool:
+        """One due fuel feed inside the goal in hand. Returns whether one ran."""
         cur = self.current or {}
         if not cur or cur.get("urgent") or not self.urgent or not self._safe_now():
-            return
+            return False
         i = next((k for k, g in enumerate(self.urgent) if g.get("do") in self.LANE_DOS
                   and str(g.get("reflex", "")).startswith("rules:")), None)
         if i is None:
-            return
+            return False
         now = self._minute()
         log = [x for x in (self.__dict__.get("_lane_log") or []) if now - x[0] < self.LANE_WINDOW_MIN]
         if sum(x[1] for x in log) >= self.LANE_SHARE_MIN:
             self._lane_log = log
-            return
+            return False
         g = self.urgent.pop(i)
         rec, self.w.recorder = self.w.recorder, None   # nothing it does belongs to the goal's site
         self._in_lane = True
@@ -264,6 +272,7 @@ class Crew:
         if self.preempt and str(self.preempt).startswith("rules") and not any(
                 str(q.get("reflex", "")).startswith("rules:") for q in self.urgent):
             self.clear_pause()                        # what the pause was for is done: the goal goes on
+        return True
 
     def request_pause(self, why: str, force: bool = False, drop: bool = False) -> None:
         """Pause (drop: and discard) the goal in hand at its next safe point. Tied to that goal: when it ends

@@ -80,9 +80,12 @@ def test_the_upkeep_lane_feeds_coal_inside_a_long_build():
     fed = []
     crew.feed = lambda site, item, n: fed.append((site, item, n)) or f"fed {n} {item} into site {site}"
     crew.log = lambda m: None
+    crew.urgent.insert(1, {"do": "feed", "site": 68, "item": "coal", "count": 200, "reflex": "rules: dry row"})
     crew.request_pause("rules: site 61 out of fuel")
     crew._upkeep_lane()
-    assert fed == [(61, "coal", 80)] and [g["do"] for g in crew.urgent] == ["relink"]
+    assert fed == [(61, "coal", 80), (68, "coal", 200)] and [g["do"] for g in crew.urgent] == ["relink"]
+    fed.clear()
+    fed.append("first round")
     assert w.recorder == ["build's own"] and crew.preempt is None   # recorder restored; no pause left for it
     crew.urgent.insert(0, {"do": "feed", "site": 62, "item": "coal", "reflex": "rules: dry"})
     w.steps = ["build"]                                          # placing: never in the middle of that
