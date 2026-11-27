@@ -46,7 +46,7 @@ class DummyRun:
 
 
 KN = SimpleNamespace(researched={"automation", "logistics", "electronics", "logistic-science-pack"},
-                     unlocked={"underground-belt", "long-handed-inserter", "transport-belt"})
+                     unlocked={"underground-belt", "long-handed-inserter", "transport-belt", "assembling-machine-1"})
 
 
 def brain_world(scan, sites: bool = True):

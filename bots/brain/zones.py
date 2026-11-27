@@ -59,7 +59,10 @@ from .roadmap import SCIENCE_RATE as _ROAD  # noqa: E402
 SEGMENTS = {1: {"automation-science-pack": _ROAD["automation-science-pack"] / 60,
                 "logistic-science-pack": _ROAD["logistic-science-pack"] / 60}}
 SEGMENT_ZONES = ("make", "science")       # smelting stays with the brain's fields; the spine head gets their lines
-OPEN_RECIPES = {1: {"underground-belt"}}  # a segment opens only once these are unlocked (and see ready())
+# a segment opens only once these are unlocked (and see ready()). The strip designer needs assemblers and
+# long-handed inserters (automation): the zones test, seed 737373, researched logistics first, and segment 1
+# failed "no layout candidate" until automation was in
+OPEN_RECIPES = {1: {"underground-belt", "assembling-machine-1", "long-handed-inserter"}}
 
 
 # ==================================================================== the brain's world as an Atlas map scan
