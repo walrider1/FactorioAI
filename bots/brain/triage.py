@@ -185,7 +185,10 @@ def diagnose(crew, site_id, item: str | None = None, depth: int = 0) -> dict:
             facts.append(f"source {list(root)} really gives ~{supply:.0f}/min (nominal {nominal:.0f}) and its "
                          f"belts feed {load:.0f}/min")
             spare = crew._spare(item) if hasattr(crew, "_spare") else []
-            may = crew._may_retry(("boost",) + root) if hasattr(crew, "_may_retry") else True
+            if hasattr(crew, "boost_ready"):
+                may = crew.boost_ready(root, item)
+            else:
+                may = crew._may_retry(("boost",) + root) if hasattr(crew, "_may_retry") else True
             cover = _covering(crew, item, site, root, load)
             if cover is not None:
                 # another free source covers the whole port: the relink lays it from there (run 20261125-214645:
@@ -195,9 +198,17 @@ def diagnose(crew, site_id, item: str | None = None, depth: int = 0) -> dict:
                                f"{cover[2].id}'s source at {[cover[0], cover[1]]} covers it in full, so the "
                                "relink lays it from there")
                 return out
+            stuck = ((getattr(crew, "_link_fails", None) or {}).get(("boost",) + tuple(root)) or {}).get("reason", "")
             if spare and may:
                 fix = {"do": "link"}
                 how = f"{len(spare)} unused {item} source(s) are fed into that belt"
+            elif spare and "join from the side" in stuck:
+                # the belt itself has no place to join: a new mine would join it the same way and fail the same
+                # way (run 20261127-101219: four iron mines in 20 minutes, none joined, the bus head kept starving
+                # while site 8's furnaces stood full)
+                fix = None
+                how = (f"{len(spare)} unused {item} source(s) wait to join it, but its belts have no place to join "
+                       "from the side; more mines would not help (the join is tried again by itself)")
             else:
                 from .supply import supply_goal
                 fix = supply_goal(crew, item, max(load - supply * SAFE_SHARE, 0.3 * load))
@@ -284,6 +295,11 @@ def _covering(crew, item: str, site, root: tuple, load: float):
     try:
         budget = crew._budget(item)
         for x, y, s in crew._free_outputs(item, site, load):
+            if s is not None and any(pt.get("item") and not pt.get("fed") for pt in (s.params or {}).get("ports", [])):
+                continue          # its own inputs have no belt: it makes nothing yet (run 20261127-101219: the bus
+                                  # head was to be moved onto site 35, a smelter column with no ore or coal laid)
+            if s is not None and real_rate(s, 1.0) < 0.5:
+                continue          # most of its machines lack something: its nominal rate is not what it gives
             if (x, y) != tuple(root) and crew._left(budget, (x, y), item) >= load - 0.5:
                 return (x, y, s)
     except Exception:  # noqa: BLE001 - stub crews in tests

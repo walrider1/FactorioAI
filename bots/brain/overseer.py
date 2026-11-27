@@ -548,6 +548,8 @@ def floorplan_guard(crew, g: dict) -> str | None:
     if g.get("do") in ("replace", "remove") and (site.params or {}).get("slot"):
         return (f"site {site.id} is the slot factory of {site.params['slot']}: it takes its inputs from the bus; "
                 "a short input is fixed at the bus (trunk plates into its head), not by moving the factory")
+    if g.get("do") == "replace" and hasattr(crew, "bus_superseded"):
+        return crew.bus_superseded(g)
     return None
 
 

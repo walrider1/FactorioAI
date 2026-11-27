@@ -1113,6 +1113,29 @@ class Crew:
                 msg += f"; taking the failed replacement site {s.id} down failed too: {str(e2)[:80]}"
         return msg
 
+    def bus_superseded(self, goal: dict) -> str | None:
+        """Why a replace that rebuilds an off-bus factory is not wanted any more, or None: a zones slot factory
+        (one that puts the item on the bus) already makes that item. Run 20261127-101219: the overseer ordered the
+        old organic gear feeder (site 18) moved at minute 123; the bus got its own gear slot factory (site 25) at
+        137, the forced move still ran at 147 and spent 11 game minutes on an iron outpost, a 131/min smelter
+        column and a gear factory whose gears went nowhere, while the bus head starved for iron."""
+        if goal.get("do") != "replace":
+            return None
+        new = goal.get("with") or {}
+        item = new.get("item")
+        if new.get("module") not in ("factory", "workshop") or not item:
+            return None
+        old = self.base.get(goal.get("site"))
+        if old is not None and (old.params or {}).get("slot"):
+            return None                               # a slot factory rebuilt in its slot (floorplan_guard decides)
+        slot = next((s for s in self.base.of("factory") + self.base.of("workshop")
+                     if (s.params or {}).get("slot") and item in ((s.params or {}).get("bus_out") or ())), None)
+        if slot is None:
+            return None
+        return (f"{item} already comes from the bus: slot factory site {slot.id} ({slot.params['slot']}) puts it "
+                f"there, so site {goal.get('site')} is not rebuilt as another {item} factory; a short input is "
+                "fixed at the bus head (plates into it), not with a second factory off the bus")
+
     def stale_replace(self, goal: dict) -> str | None:
         """Why a queued replace that moves a site (the same thing again elsewhere, ordered because its inputs could
         not reach it or it had no power) is no longer needed, or None. Checked when it is about to start: every
@@ -1120,6 +1143,9 @@ class Crew:
         burner to electric), forced replaces and rebuilds of depleted mines are never dropped. Run 20261122-133537:
         "relocate red science" was queued at minute 75 while a relink was running; the relink fed both ports, and
         the replace still ran four minutes later and left a duplicate factory."""
+        bus = self.bus_superseded(goal) if hasattr(self, "bus_superseded") else None
+        if bus is not None:
+            return bus                                # even forced: the bus makes it now, a move only duplicates it
         if goal.get("do") != "replace" or goal.get("force") or goal.get("early") or goal.get("electric"):
             return None                               # (an electric furnace swap is an upgrade, never a move)
         site = self.base.get(goal.get("site"))
@@ -4237,9 +4263,19 @@ class Crew:
                 if not ({end, appr} & others) and all(self._belt_free(t) for t in (end, appr)):
                     out.append(({"item": item, "end": list(end), "approach": list(appr), "per_minute": 0,
                                  "boost": True, "head": True}, ln))
-            for i in range(1, len(st) - 1):
-                a, b, c = st[i - 1], st[i], st[i + 1]
-                if not (a[0] == b[0] == c[0] == "belt") or not (a[2] == b[2] == c[2]):
+            for i in range(1, len(st)):
+                # b stays straight when something feeds it from behind in its own direction: a belt facing the
+                # same way, or an underground exit. What comes after b does not matter (an underground entrance,
+                # a turn, the port). Run 20261127-101219: the bus head's only iron belt was 27 steps of which all
+                # but five were underground pairs, no three straight belts in a row, so no spare source could
+                # ever join it; triage built four more iron mines instead, none of which could join either.
+                a, b = st[i - 1], st[i]
+                if b[0] != "belt" or a[2] != b[2]:
+                    continue
+                if not (a[0] == "belt" or (a[0] == "ug" and len(a) > 3 and a[3] == "output")):
+                    continue
+                avx, avy = belts.VEC[a[2]]
+                if (a[1][0] + avx, a[1][1] + avy) != tuple(b[1]):
                     continue
                 for p in (belts.LEFT[b[2]], belts.RIGHT[b[2]]):
                     vx, vy = belts.VEC[p]
@@ -4304,6 +4340,22 @@ class Crew:
 
     BOOST_TRIES = 6
 
+    def _no_join_before(self, key: tuple) -> bool:
+        """Did this boost last fail because its belts had no place to join from the side?"""
+        return "join from the side" in ((self._link_fails.get(tuple(key)) or {}).get("reason") or "")
+
+    def boost_ready(self, root: tuple, item: str) -> bool:
+        """May a spare source be fed into the chain from root now: its back-off is over, or it failed only for
+        want of a join point and its belts have one now."""
+        key = ("boost",) + tuple(root)
+        if self._may_retry(key):
+            return True
+        if not self._no_join_before(key):
+            return False
+        chain = [ln for ln in self.links if ln["item"] == item and ln.get("boost_into") is None
+                 and ln.get("kind") not in ("trunk", "science") and self._coal_root(ln) == tuple(root)]
+        return bool(chain and self._sideload_ports(chain, item))
+
     def boost_links(self) -> tuple[list[str], list[str]]:
         """Feed a spare source into every chain whose ports take more than its source gets (any item): a belt
         from the spare chest side-loads onto one of the chain's straight belts. Returns (done, failed)."""
@@ -4320,10 +4372,12 @@ class Crew:
             spare = self._spare(item)
             chain = [ln for ln in self.links if ln["item"] == item and ln.get("boost_into") is None
                      and ln.get("kind") not in ("trunk", "science") and self._coal_root(ln) == root]
-            if not spare or not chain or not self._may_retry(key):
+            if not spare or not chain:
                 continue
-            site = self.base.get(chain[0]["to_site"])
             targets = self._sideload_ports(chain, item)
+            if not self._may_retry(key) and not (targets and self._no_join_before(key)):
+                continue                              # (it failed for want of a join point and now has one)
+            site = self.base.get(chain[0]["to_site"])
             near = lambda q: min(math.dist(q[0]["end"], (x, y)) for x, y, _ in spare)
             rec = None
             # the nearest side-joins first; then the three nearest again with a wide detour (run 20261122-133537:
