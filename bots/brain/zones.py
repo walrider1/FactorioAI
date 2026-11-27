@@ -966,9 +966,11 @@ def after_build(crew, site) -> str:
         return ""
 
 
-def survey(world, base, half: int = 160, step: int = 64) -> None:
+def survey(world, base, half: int = 160, step: int = 40) -> None:
     """Remote looks (no walking) over the land round the base, so the floorplan has ground to plan on. Points the
-    level's observe range does not reach are skipped."""
+    level's observe range does not reach are skipped. The looks (radius 32) overlap: 64 apart they left a diamond of
+    unseen land between every four, and a 40-wide spine never crossed one (the zones test, seed 626262: 107k tiles
+    seen out to 200 tiles, yet every spine stopped after 1-2 cells)."""
     centre = (base.centre if base is not None else None) or getattr(world, "pos", None)
     look = getattr(world, "observe", None)
     if centre is None or look is None:
@@ -980,7 +982,7 @@ def survey(world, base, half: int = 160, step: int = 64) -> None:
             x, y = centre[0] + dx, centre[1] + dy
             if math.dist((x, y), pos) > rng:
                 continue
-            around = [(math.floor(x) + ox, math.floor(y) + oy) for ox in (-20, 0, 20) for oy in (-20, 0, 20)]
+            around = [(math.floor(x) + ox, math.floor(y) + oy) for ox in (-16, 0, 16) for oy in (-16, 0, 16)]
             if all(t in world.seen for t in around):
                 continue
             try:
