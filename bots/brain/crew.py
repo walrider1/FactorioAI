@@ -1739,7 +1739,7 @@ class Crew:
         consumers = [(tuple(pt["end"]), tuple(pt["approach"])) for s, pt in self.item_ports()
                      if pt.get("item") == item and not pt.get("fed")]
         others = {tuple(t) for _, pt in self.all_ports() for t in (pt["end"], pt["approach"])}
-        blocked = set(self.w.keepout) | set(self._bad_belt) | self._strip_tiles()
+        blocked = set(self.w.keepout) | set(self.bad_tiles()) | self._strip_tiles()   # bans that rest
         ug_block = self.ug_cover() if ug else None
         log = self.log
 
@@ -1806,9 +1806,22 @@ class Crew:
                 log(f"[fab] route probe for {item} at ({d.box[0]}, {d.box[1]}): {out[0]}")
             return out
 
+        def roomy(kind, c) -> bool:
+            """Has this source room for a link to start: a line's start tile free, or a free side for the
+            inserter and the belt beyond it?"""
+            if kind == "line":
+                return self._belt_free(c)
+            return any(self._belt_free((c[0] + dx, c[1] + dy)) and self._belt_free((c[0] + 2 * dx, c[1] + 2 * dy))
+                       for dx, dy in belts.VEC.values())
+        # an input none of whose sources has room for a link fails at every place alike: no design is worth
+        # trying until room is made there (the zones test, seed 626262: six engine-factory designs, each refused
+        # with "no free side at any spare source" for iron, while a burner mine boxed the iron line in)
+        boxed = sorted(it for it, cands in sources.items() if not any(roomy(k, c) for k, c in cands[:40]))
+
         def reach_at(focus) -> list[str]:
-            """Inputs with spare sources none of which a trunk could bring to this place (FACTORY_INPUT_REACH)."""
-            out = []
+            """Inputs with spare sources none of which a trunk could bring to this place (FACTORY_INPUT_REACH), and
+            inputs whose sources have no room for a link at all."""
+            out = [f"{it}: no spare source has room for a belt to start" for it in boxed]
             for it, cands in sources.items():
                 gap = min(self._manhattan(c[1], focus) for c in cands)
                 if gap > self.FACTORY_INPUT_REACH - self.REACH_SLACK:
@@ -5308,6 +5321,12 @@ class Crew:
 
     def ban_tile(self, t) -> None:
         t = (int(t[0]), int(t[1]))
+        if t in self.line_heads():
+            # a line's start is the one tile its plates can leave by: a refusal there (the character in the way,
+            # an item on the ground) is never banned (the zones test, seed 626262: the iron line's start was the only
+            # banned tile, and every iron link and factory design was refused for it)
+            self.log(f"[crew] belt refused on {t}, the start of a line: not banned, tried again next time")
+            return
         self._bad_belt.add(t)
         at = getattr(self, "_bad_belt_at", None)
         if not isinstance(at, dict):

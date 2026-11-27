@@ -152,3 +152,17 @@ def test_the_lane_never_goes_fetching_coal():
     w.inventory = {"coal": 30}
     crew._upkeep_lane()
     assert fed == [30]                                           # what it carries, not a trip for the rest
+
+
+def test_a_lines_start_is_never_banned_and_old_bans_rest():
+    from test_lifecycle import _copper_row
+    crew, w, minute = _crew()
+    crew.log = lambda m: None
+    site, ln = _copper_row(crew)
+    crew._bad_belt = set()
+    crew.ban_tile(ln["start"])
+    assert tuple(ln["start"]) not in crew._bad_belt              # the one tile its plates can leave by
+    crew.ban_tile((5, 5))
+    assert (5, 5) in crew.bad_tiles()
+    minute["now"] += crew.BAD_BELT_REST_MIN
+    assert (5, 5) not in crew.bad_tiles()                        # a ban rests, then the tile is tried again

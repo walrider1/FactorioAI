@@ -804,7 +804,8 @@ def plan_trunk(crew, start: tuple, port: dict, block: set = frozenset(), ug_reac
     mine = {start, end, appr}
     ug = "underground-belt" in crew.kn.unlocked
     for width in TRUNK_WIDTHS:
-        free = lambda t, wd=width: ((t in mine or crew._belt_free(t)) and t not in crew._bad_belt
+        bad = crew.bad_tiles() if hasattr(crew, "bad_tiles") else crew._bad_belt
+        free = lambda t, wd=width, bad=bad: ((t in mine or crew._belt_free(t)) and t not in bad
                                     and t not in block and _near_line(t, start, appr, wd))
         steps = belts.route_belt(free, start, appr, end, avoid=others - mine, underground=ug, margin=width,
                                  limit=600_000, ug_block=crew.ug_cover() if ug and hasattr(crew, "ug_cover") else None,
