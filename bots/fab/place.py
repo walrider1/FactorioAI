@@ -201,14 +201,19 @@ def asm_candidates(grid: Grid, window: tuple[int, int, int, int], forbidden: set
 
 def place_assemblers(grid: Grid, asms: list[Cell], fixed: list[Cell], nets: list[Net],
                      window: tuple[int, int, int, int], gap: int = 3, seed: int = 1,
-                     iterations: int = 4000) -> tuple[list[Cell], list[str]]:
+                     iterations: int = 4000, slots: list[tuple[int, int]] | None = None
+                     ) -> tuple[list[Cell], list[str]]:
+    """slots: anneal over these top-left tiles only (a slot lattice, fab/slots.py: its corridors keep belts
+    room by construction), one machine per slot and no gap rule between them."""
     rng = random.Random(seed)
     forbidden = set()
     for c in fixed:
         forbidden |= dilate(c.footprint(), 2)
-    cands = asm_candidates(grid, window, forbidden)
+    cands = list(slots) if slots else asm_candidates(grid, window, forbidden)
     if len(cands) < len(asms):
         return [], [f"only {len(cands)} spots for {len(asms)} assemblers in the area seen"]
+    if slots:
+        gap = 0                                       # distinct slots never overlap; a shared one is gap -1
     ore_cost = {xy: sum((xy[0] + i, xy[1] + j) in grid.ore for i in range(3) for j in range(3)) * 0.5 +
                sum((xy[0] + i, xy[1] + j) in grid.obstacles for i in range(3) for j in range(3)) * 1.0
                for xy in cands}

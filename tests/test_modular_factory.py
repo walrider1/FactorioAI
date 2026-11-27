@@ -39,8 +39,9 @@ def test_plates_as_inputs_get_input_cells_and_no_mines():
 def test_a_goal_names_any_inputs_and_plates_come_in_by_default():
     kn = _kn()
     assert {"iron-plate", "copper-plate"} <= F.asked_inputs(kn, {"item": "logistic-science-pack"})
+    # mines are modules of their own: a goal asking for its own mines still gets its plates in by belt
     got = F.asked_inputs(kn, {"item": "logistic-science-pack", "inputs": ["iron-gear-wheel"], "plates": "mine"})
-    assert got == {"iron-gear-wheel"}
+    assert got == {"iron-gear-wheel", "iron-plate", "copper-plate"}
     supplied, pl = F.supplied_for(kn, {"item": "logistic-science-pack", "per_minute": 10,
                                        "inputs": ["iron-gear-wheel", "electronic-circuit"]})
     assert {"iron-gear-wheel", "electronic-circuit"} <= supplied
@@ -121,27 +122,28 @@ class SupplyCrew:
 
 
 def test_plates_first_builds_the_mines_a_plate_fed_factory_lacks():
+    # (circuits: green science takes its plates through its gear and circuit feeders since the 6-machine cap)
     kn = _kn()
-    _, pl = F.supplied_for(kn, {"item": "logistic-science-pack", "per_minute": 15})
+    _, pl = F.supplied_for(kn, {"item": "electronic-circuit", "per_minute": 40})
     crew = SupplyCrew(kn, chests=3, links=1)                     # 3 iron chests, 1 already belted somewhere
-    note = crew._plates_first("factory", {"item": "logistic-science-pack", "per_minute": 15})
+    note = crew._plates_first("factory", {"item": "electronic-circuit", "per_minute": 40})
     iron = next(g for g in crew.built if g["resource"] == "iron-ore")
     assert iron["module"] == "electric_mine"                       # no long-handed inserters yet: a row
     crew.built.clear()
     kn.unlocked = set(kn.unlocked) | {"long-handed-inserter", "underground-belt"}   # logistics in: a dense field
-    note = crew._plates_first("factory", {"item": "logistic-science-pack", "per_minute": 15})
+    note = crew._plates_first("factory", {"item": "electronic-circuit", "per_minute": 40})
     iron = next(g for g in crew.built if g["resource"] == "iron-ore")
     assert iron["module"] == "outpost" and iron["near_base"]
     assert any(g["resource"] == "copper-ore" for g in crew.built) and note.startswith("first ")
     crew.built.clear()
     crew.no_field = True                                          # no field fits: a mine row as before
-    crew._plates_first("factory", {"item": "logistic-science-pack", "per_minute": 15})
+    crew._plates_first("factory", {"item": "electronic-circuit", "per_minute": 40})
     iron = next(g for g in crew.built if g["resource"] == "iron-ore")
     assert iron["count"] == max(2, pl.machines["iron-plate"] - 2) and iron["into"] == "furnace"
     crew.no_field = False
     crew.built.clear()
-    crew._plates_first("factory", {"item": "logistic-science-pack", "per_minute": 15, "plates": "mine"})
-    assert crew.built == []                                       # its own mines: nothing to feed
+    crew._plates_first("factory", {"item": "electronic-circuit", "per_minute": 40, "plates": "mine"})
+    assert crew.built                                             # mines are their own modules: plates come in
 
 
 def test_a_mine_plate_chest_feeds_one_port_and_a_factory_chest_two():

@@ -239,6 +239,136 @@ def port_access_problems(grid: Grid, d: "Design", underground: bool = True) -> l
             for a, path in port_escapes(grid, d, underground).items() if path is None]
 
 
+POCKET = 60                     # an input whose first belt reaches fewer free tiles than this is walled in
+
+
+def _pockets(grid: Grid, inputs: list[Cell], fixed: list[Cell], box) -> set[Tile]:
+    """The dead ends input cells were put in: for each input whose pins reach fewer than POCKET free tiles of
+    the box, those tiles. (Two of the eleven LLM bench cases, and the search placer's only two failures, were
+    a feed whose first belt tile opened into a pocket walled by ore and buildings: no placement can route that.)"""
+    x0, y0, x1, y1 = box
+    solid = {t for c in fixed + inputs for t in c.footprint()}
+    out: set[Tile] = set()
+    for c in inputs:
+        sites = c.pin_sites()
+        stop = {s.inserter for s in sites}
+        seen: set[Tile] = set()
+        todo = [s.outer for s in sites if grid.free(s.outer) and s.outer not in solid]
+        seen |= set(todo)
+        while todo and len(seen) < POCKET:
+            t = todo.pop()
+            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                n = (t[0] + dx, t[1] + dy)
+                inside = x0 <= n[0] <= x1 and y0 <= n[1] <= y1
+                if n in seen or n in solid or n in stop or not inside or not grid.free(n):
+                    continue
+                seen.add(n)
+                todo.append(n)
+        if len(seen) < POCKET:
+            out |= seen | {s.outer for s in sites}
+    return out
+
+
+def _place_inputs(grid: Grid, counts: dict[str, int], focus, box, fixed: list[Cell], feeds: set,
+                  side: str | None) -> tuple[list[Cell], list[str]]:
+    """place_sources (ports on `side` first, then any side), placed again away from any dead end an input's
+    belt would start in (_pockets)."""
+    taken = {t for c in fixed for t in c.footprint()}
+    srcs, probs = [], []
+    for _ in range(8):
+        srcs, probs = place_sources(grid, counts, focus, box, taken, feeds=feeds, side=side)
+        if probs and side:                   # no room with every port on that side: any side then
+            srcs, probs = place_sources(grid, counts, focus, box, taken, feeds=feeds)
+        pocket = set() if probs else _pockets(grid, srcs, fixed, box)
+        if not pocket:
+            break
+        taken |= pocket
+    return srcs, probs
+
+
+SEARCH_SLOTS = "alternate"      # the annealer on the slot lattice: "off", "all" attempts, or "alternate" with free
+
+
+def _search_slots(grid: Grid, box, fixed: list[Cell], asms: list[Cell], k: int) -> list[Tile] | None:
+    """Slot top-left tiles for the search placer's attempt k, or None for free placement."""
+    if SEARCH_SLOTS == "off" or (SEARCH_SLOTS == "alternate" and k % 2) or not asms:
+        return None
+    from .slots import lattice
+    lat = lattice(grid, box, fixed, len(asms))
+    return [(sl.x, sl.y) for sl in lat.slots] if lat is not None else None
+
+
+REPAIRS = 2                     # repair rounds per LLM attempt: the model moves the machines of failed belts
+
+
+def _wire(grid: Grid, cand: Design, nets: list[Net], box, max_ug_pairs: int, per_minute: float,
+          anchors) -> list[str]:
+    """Route, power and check the input ports of a placed design (sets its routes, poles and problems).
+    Returns the routing failures only (empty when every belt routed, even if power or a port failed)."""
+    from .route import COLLECT_MAX_PER_MIN
+    router, fails = route_all(grid, cand.cells, nets, box, max_ug_pairs,
+                              collect=float(per_minute) <= COLLECT_MAX_PER_MIN)
+    cand.routes = router.routes
+    cand.problems = fails
+    if not fails:
+        occupied = set(router.occ) | router.nobelt
+        consumers = [set(c.footprint()) for c in cand.cells if c.kind == "asm"]
+        consumers += [set(c.drill_tiles()) for c in cand.cells if c.kind == "mine"]
+        consumers += [{t} for t, _ in cand.inserters()]
+        consumers += [{c.port()["inserter"]} for c in cand.cells if c.kind == "src"]   # input ports
+        poles, pprobs = plan_poles(grid, consumers, occupied, box, list(anchors))
+        cand.poles, cand.problems = poles, pprobs
+        if not pprobs:
+            cand.problems = port_access_problems(grid, cand, underground=max_ug_pairs > 0)
+    return fails
+
+
+def _route_layouts(sess, lays, grid: Grid, base: Design, fixed: list[Cell], asms: list[Cell], nets: list[Net],
+                   box, max_ug_pairs: int, per_minute: float, anchors, log) -> tuple[Design, list[str]]:
+    """Wire each of the model's layouts and keep the first that works; if none does, let the model repair the
+    best one (it moves the machines of the failed belts) up to REPAIRS times. (the best design, notes)"""
+    notes: list[str] = []
+    mode = getattr(sess, "mode", "free")
+
+    def wire(lay) -> tuple[Design, list[str]]:
+        c = Design(base.target, base.per_minute, base.plan, placer="llm", box=box, nets=nets)
+        c.cells = list(fixed) + lay.cells(asms)
+        fails = _wire(grid, c, nets, box, max_ug_pairs, per_minute, anchors)
+        return c, fails
+
+    best = best_lay = best_fails = None
+    for lay in lays:
+        c, fails = wire(lay)
+        log(f"[design] llm layout {lay.index}/{len(lays)} ({mode}): {len(c.problems)} problem(s)")
+        if best is None or c.cost < best.cost:
+            best, best_lay, best_fails = c, lay, fails
+        if c.ok:
+            notes.append(f"layout {lay.index} of {max(getattr(sess, 'replied', 0), len(lays))} routed ({mode})")
+            return c, notes
+    notes.append(f"none of {len(lays)} layout(s) wired ({mode}); best: layout {best_lay.index}, "
+                 f"{len(best.problems)} problem(s): {'; '.join(best.problems)[:200]}")
+    for r in range(1, REPAIRS + 1):
+        if not best_fails:                   # every belt routed; power or an input port failed: no moves help
+            break
+        new, moved = sess.repair(best_lay, best_fails, len(nets) - len(best_fails), len(nets), wired=best)
+        if new is None:
+            notes.append(f"repair round {r}: no usable moves" + (f" ({', '.join(moved)})" if moved else ""))
+            if getattr(sess, "unavailable", None):
+                break
+            continue
+        c, fails = wire(new)
+        notes.append(f"repair round {r} moved {', '.join(moved) or 'nothing'}: "
+                     + ("routed" if c.ok else f"{len(c.problems)} problem(s)"))
+        log(f"[design] {notes[-1]}")
+        if c.ok:
+            return c, notes
+        if c.cost < best.cost:
+            best, best_lay, best_fails = c, new, fails
+        elif hasattr(sess, "record"):
+            sess.record(moved, new, c.problems)
+    return best, notes
+
+
 def design_factory(grid: Grid, target: str, per_minute: float, near: tuple[float, float] | None = None,
                    placer: str = "search", llm=None, log=lambda *a: None, seed: int = 1,
                    max_ug_pairs: int = 10, anchors: list[Tile] = (), margin: int = 14,
@@ -278,11 +408,7 @@ def design_factory(grid: Grid, target: str, per_minute: float, near: tuple[float
         mines, probs = place_mines(grid, mine_counts, focus, set(), gap=mine_gap, seed=s - seed)
         box = _box_around(mines, focus, margin, grid)
         if src_counts and not probs:                 # inputs from other factories, ports facing outward
-            srcs, sprobs = place_sources(grid, src_counts, focus, box, {t for c in mines for t in c.footprint()},
-                                         feeds=set(feeds), side=feed_side)
-            if sprobs and feed_side:                 # no room with every port on that side: any side then
-                srcs, sprobs = place_sources(grid, src_counts, focus, box,
-                                             {t for c in mines for t in c.footprint()}, feeds=set(feeds))
+            srcs, sprobs = _place_inputs(grid, src_counts, focus, box, mines, set(feeds), feed_side)
             mines, probs = mines + srcs, sprobs
         cand.cells, cand.box = list(mines), box
         if probs:
@@ -294,36 +420,40 @@ def design_factory(grid: Grid, target: str, per_minute: float, near: tuple[float
         nets = build_nets(mines + asms)
         cand.nets = nets
         if placer == "llm":
-            from .llm_place import llm_place_assemblers
+            from .llm_place import LayoutSession
             fb = [n[len("routing failed: "):] for n in d.notes if n.startswith("routing failed: ")][-1:]
-            placed, probs, notes = llm_place_assemblers(llm, grid, asms, mines, nets, box, gap, feedback=fb, log=log)
-            d.notes += notes
+            sess = LayoutSession(llm, grid, asms, mines, nets, box, gap, feedback=fb, log=log,
+                                 max_ug_pairs=max_ug_pairs)
+            lays, probs = sess.propose()
+            if lays:                                 # each layout routed in turn, then repairs of the best one
+                got, notes = _route_layouts(sess, lays, grid, cand, mines, asms, nets, box, max_ug_pairs,
+                                            per_minute, anchors, log)
+                d.notes += sess.notes + notes
+                got.notes = list(d.notes)
+                cand = got
+                log(f"[design] attempt {mine_gap}/{gap}/{s}: {cand.summary()}")
+                if best is None or cand.cost < best.cost:
+                    best = cand
+                if cand.ok:
+                    break
+                d.notes.append("routing failed: " + "; ".join(cand.problems))
+                continue
+            d.notes += sess.notes
             cand.notes = list(d.notes)
             if probs and probs[0].startswith(("designer unavailable", "no LLM")):
                 log(f"[design] {probs[0]}; using the search placer")
                 placed, probs = place_assemblers(grid, asms, mines, nets, box, gap=gap, seed=s)
                 placer = cand.placer = "search"
+            else:
+                placed = []
         else:
-            placed, probs = place_assemblers(grid, asms, mines, nets, box, gap=gap, seed=s)
+            placed, probs = place_assemblers(grid, asms, mines, nets, box, gap=gap, seed=s,
+                                             slots=_search_slots(grid, box, mines, asms, s - seed))
         cand.cells = mines + placed
         if probs:
             cand.problems = probs
         else:
-            from .route import COLLECT_MAX_PER_MIN
-            router, fails = route_all(grid, cand.cells, nets, box, max_ug_pairs,
-                                      collect=float(per_minute) <= COLLECT_MAX_PER_MIN)
-            cand.routes = router.routes
-            cand.problems = fails
-            if not fails:
-                occupied = set(router.occ) | router.nobelt
-                consumers = [set(c.footprint()) for c in cand.cells if c.kind == "asm"]
-                consumers += [set(c.drill_tiles()) for c in cand.cells if c.kind == "mine"]
-                consumers += [{t} for t, _ in cand.inserters()]
-                consumers += [{c.port()["inserter"]} for c in cand.cells if c.kind == "src"]   # input ports
-                poles, pprobs = plan_poles(grid, consumers, occupied, box, list(anchors))
-                cand.poles, cand.problems = poles, pprobs
-                if not pprobs:
-                    cand.problems = port_access_problems(grid, cand, underground=max_ug_pairs > 0)
+            _wire(grid, cand, nets, box, max_ug_pairs, per_minute, anchors)
         log(f"[design] attempt {mine_gap}/{gap}/{s}: {cand.summary()}")
         if best is None or cand.cost < best.cost:
             best = cand

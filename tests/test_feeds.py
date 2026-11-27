@@ -42,7 +42,9 @@ def test_green_science_designs_with_two_feeds_on_one_side_where_chests_found_no_
                          supplied=PLATES, max_attempts=6)
     new = design_factory(_grid(), "logistic-science-pack", 20, near=(0.0, 0.0), margin=24, max_ug_pairs=20,
                          supplied=PLATES, max_attempts=6, feeds=PLATES, feed_side="west")
-    assert not old.ok and len(old.ports()) >= 8                # nine chests to belt in, from every side
+    # nine chests to belt in, from every side (they found no room before the search placer got the slot lattice,
+    # fab/slots.py; now they may fit, but every one still needs a belt from outside)
+    assert len(old.ports()) >= 8
     assert new.ok, new.problems
     ports = new.ports()
     assert len(ports) == 2 and all(p["feed"] and p["chest"] is None for p in ports)

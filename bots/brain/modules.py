@@ -920,16 +920,17 @@ class Factory(Module):
                 "Any item made in assemblers (see factory_can_make in the report), e.g. science, circuits, or "
                 "buildings for a mall. A modular block: `inputs` lists what comes in from outside through input "
                 "ports, any items at all (plates, gears, circuits, steel...); the rest of its chain it makes "
-                "itself, up to 12 assemblers: a bigger chain is split, and its biggest intermediates (gears, "
+                "itself, up to 6 assemblers and 3 recipes: a bigger chain is split, and its biggest intermediates (gears, "
                 "circuits...) come in through ports too, from feeder factories the build makes FIRST (sized to "
                 "what is not already spare); if a feeder cannot be built the build fails and names it, rather than "
                 "leave ports nothing can feed. Ore is for drills only: by default iron and copper plates are inputs too, so the "
                 "factory goes on open ground off the ore, and electric_mine rows supply its plates (built first "
                 "when short; then \"link\" belts each mine chest to a port, the courier carries until then). "
                 "Items no assembler makes from plates (steel, plastic, sulfur...) are always inputs. "
-                "plates: \"mine\" puts its own drills and furnaces on iron and copper instead (needs free ore). "
+                "Plates always come in by belt: a factory never puts drills or furnaces of its own on the ore "
+                "(mines are their own modules, electric_mine and outpost). "
                 "Needs electric mining and automation researched, and power. "
-                "args: {item, per_minute (or per_second), inputs?: [items], plates?: \"in\"|\"mine\"}")
+                "args: {item, per_minute (or per_second), inputs?: [items]}")
     def __init__(self):
         self.designs: dict[tuple, object] = {}
         self.items: list[str] = []
@@ -943,7 +944,11 @@ class Factory(Module):
         self.placer = "fallback"             # with a designer: search | fallback | llm (see _design_at)
         self.case_dir = None                 # a Path: every design's terrain is saved there for the bench
 
-    MAX_ASM = 12                             # bigger chains are split into factories that feed each other
+    # Bigger chains are split into factories that feed each other. Over 131 design attempts (runs of
+    # 2026-11-25..27) layouts of 7 machines or fewer mostly routed, the failed ones had 14 (median), and single-
+    # recipe factories routed 18 of 18: small blocks, belted together, instead of one big tangle.
+    MAX_ASM = 6
+    MAX_RECIPES = 3
     FEEDS = True                             # plates come in on one belt each (a feed), once lines exist
     # Set by the crew around one build (Crew._set_probes): probe(grid, design) -> [why an input or the output
     # cannot be belted there]; avoid: [(centre, input)] where this item's factory already stood walled in
@@ -1042,8 +1047,10 @@ class Factory(Module):
         return float(p.get("per_minute", 5))
 
     def plates_in(self, p: dict) -> bool:
-        """Plates come in from outside (the default: ore is for drills), unless asked for its own mines."""
-        return str(p.get("plates", "in")).lower() != "mine"
+        """Plates always come in from outside: mines are modules of their own (electric_mine, outpost), never cells
+        inside a factory. The own-mine designs failed 12 times on "only 2 of 3 iron-plate mine cells fit on the
+        ore seen so far" and took ore the drills needed. A goal asking plates: "mine" gets plates in too."""
+        return True
 
     def asked_inputs(self, kn, p: dict) -> set[str]:
         """What the goal says comes in from outside: `inputs` (and the older `split`), plus the plates by
@@ -1066,7 +1073,8 @@ class Factory(Module):
 
     def inputs(self, kn, item: str, rate: float, split=()) -> tuple[set[str], object]:
         """What a belt factory for `item` takes from other factories, and its plan. Items no assembler makes from
-        plates always; then, while the chain has more than MAX_ASM assemblers, its biggest intermediate becomes an
+        plates always; then, while the chain has more than MAX_ASM assemblers or MAX_RECIPES recipes, its biggest
+        intermediate becomes an
         input of this one (a chain of smaller factories routes where one big one cannot). Nothing here builds the
         feeder: Crew._intermediates_first does, before this factory, for every such input that has an assembler
         recipe and is not already spare (run 20261122-133537: green science came out with gear and circuit ports
@@ -1077,7 +1085,9 @@ class Factory(Module):
         while True:
             pl = fr.plan(item, rate, supplied=supplied)
             asm = {k: v for k, v in pl.machines.items() if k in fr.RECIPES and k not in supplied}
-            if sum(asm.values()) <= self.MAX_ASM:
+            # the item's own machines are what they are: past MAX_ASM of them alone, only the recipe cap splits
+            too_big = sum(asm.values()) > self.MAX_ASM and asm.get(item, 0) < self.MAX_ASM
+            if not too_big and len(asm) <= self.MAX_RECIPES:
                 return supplied, pl
             cands = [(v, k) for k, v in asm.items() if k != item]
             if not cands:
@@ -1122,28 +1132,13 @@ class Factory(Module):
         if got is not None:
             self.designs[key] = got
             return got
-        fed = bool(set(self.PLATES) & supplied)
-        if not fed and (not w.patch("iron-ore") or not w.patch("copper-ore")):
-            raise BuildError("a factory with its own mines needs iron and copper patches known (or plates: \"in\")")
         ug = 10 if "underground-belt" in w.kn.unlocked else 0
-        failures: list[str] = []
-        if fed:
-            # plates come in: open ground near the base, off the ore (ore is for drills)
-            got = self._ladder(w, base, item, rate, supplied, self._fed_places(w, base, p), ug, key, off_ore=True)
-            if not isinstance(got, str):
-                return got
-            failures.append(f"plate-fed: {got}")
-            if "plates" in p or self.quick:  # asked for plates in by name, or a quick try (split next): no
-                raise BuildError(f"no {item} factory fits. {failures[0]}")   # mines of its own instead
-            # the default was plates in: try the older design with its own mines on iron and copper too
-            supplied = supplied - set(self.PLATES)
-            if not w.patch("iron-ore") or not w.patch("copper-ore"):
-                raise BuildError(f"no {item} factory fits. {failures[0]}")
-        got = self._ladder(w, base, item, rate, supplied, self._places(w, base)[:5], ug, key, off_ore=False)
+        # plates come in by belt: open ground near the base, off the ore (ore is for the mine modules). No
+        # fallback to drills and furnaces inside the factory: mines are modules of their own
+        got = self._ladder(w, base, item, rate, supplied, self._fed_places(w, base, p), ug, key, off_ore=True)
         if not isinstance(got, str):
             return got
-        failures.append(f"with its own mines: {got}")
-        raise BuildError(f"no {item} factory fits. " + " | ".join(failures))
+        raise BuildError(f"no {item} factory fits. plate-fed: {got}")
 
     # ------------------------------------------------------------ background designs
     def prefetch(self, w: FreeWorld, base: Base, p: dict, probe=None) -> bool:
@@ -1277,8 +1272,9 @@ class Factory(Module):
         # Room first: replays of failed runs show the roomy rung (margin 24, 20 underground pairs) designs green
         # science where the tight one (14, 10) finds no route, so the tight rung only gets a quick try at the
         # nearest place. The designs run in the background (FreeWorld.think), so a longer budget costs no upkeep.
-        ladder = [(rate, 24, ug * 2, places), (rate, 14, ug, places[:1])]
-        ladder += [(round(rate * f, 1), 24, ug * 2, wide)
+        room = max(24, int(getattr(self, "room_side", 0) or 0) // 2 + 12)   # a bigger factory: a bigger box
+        ladder = [(rate, room, ug * 2, places), (rate, 14, ug, places[:1])]
+        ladder += [(round(rate * f, 1), room, ug * 2, wide)
                    for f in ((2 / 3, 1 / 2, 1 / 3) if w.blocking else (2 / 3, 1 / 2)) if rate * f >= 1]
         budget = 420 if w.blocking else 300
         if self.quick:                           # a big chain: two tries, then it is split (Crew.build)
@@ -1429,10 +1425,73 @@ class Factory(Module):
         return out
 
     def _fed_places(self, w, base, p: dict, n: int = 6) -> list[tuple[float, float]]:
-        """Where a plate-fed factory may go: beside its supply first, then the open ground near the base."""
+        """Where a plate-fed factory may go: beside its supply first, then the open ground near the base; each
+        moved onto the nearest clear square the factory fits in (_clear_centre), and dropped if none is near."""
         near = self._supply_places(w, p.get("supply_at") or [])
         rest = [c for c in self._open_places(w, base, n) if all(math.dist(c, q) >= 12 for q in near)]
-        return (near + rest)[:max(n, len(near))]
+        places = (near + rest)[:max(n, len(near))]
+        side = self._side_for(w, p)
+        self.room_side = side
+        ore = set().union(*(set(v) for v in w.resources.values())) if getattr(w, "resources", None) else set()
+        out: list[tuple[float, float]] = []
+        for c in places:
+            cc = self._clear_centre(w, c, side, ore, self.CLEAR_REACH)
+            if cc is not None and all(math.dist(cc, q) >= 12 for q in out):
+                out.append(cc)
+        if not out:                              # nowhere clear enough: the old places (the design may still fit)
+            return places
+        if len(out) < len(places):
+            try:
+                w.log(f"[fab] {len(out)} of {len(places)} places for the {p.get('item')} factory have a clear "
+                      f"{side}x{side} square within {self.CLEAR_REACH} tiles: designing there")
+            except Exception:  # noqa: BLE001
+                pass
+        return out
+
+    # The places used to be judged by the share of free ground within 14 tiles (60% was enough). Run
+    # 20261127-101219 put green science at (31, -23), on top of the red-science factory: half the 49x49 design box
+    # was buildings and their margins in scattered pieces, all four designs failed on belt routes, and open ground
+    # lay 20 tiles south. A place now needs one clear square the size of the factory.
+    CLEAR_REACH = 30
+
+    def _side_for(self, w, p: dict) -> int:
+        """The side of the clear square a factory needs: ~36 tiles per assembler (3x3, its inserters and the
+        corridor between rows), plus a tile per input port."""
+        try:
+            from fab import recipes as fr
+            supplied, pl = self.free_supplied(w.kn, p)
+            n = sum(v for k, v in pl.machines.items() if k in fr.RECIPES and k not in supplied)
+            n_in = sum(1 for k in pl.machines if k in supplied)
+        except Exception:  # noqa: BLE001 - an unplannable goal fails later with its own reason
+            return 20
+        return max(16, min(34, math.ceil(math.sqrt(36 * max(1, n))) + 4 + n_in))
+
+    @staticmethod
+    def _clear_centre(w, c, side: int, ore: set, reach: int) -> tuple[float, float] | None:
+        """The centre of the clear side x side square nearest to c (within reach tiles), or None. Clear: no water,
+        cliffs, buildings, kept-out tiles or ore (trees and rocks are cleared by the build)."""
+        x0, y0 = int(c[0]) - reach - side, int(c[1]) - reach - side
+        n = 2 * (reach + side) + 1
+        water, cliffs, used = w.water, getattr(w, "cliffs", ()) or (), w.used
+        keep = getattr(w, "keepout", ()) or ()
+        acc = [[0] * (n + 1) for _ in range(n + 1)]       # summed-area table of blocked tiles
+        for j in range(n):
+            row, above, here = 0, acc[j], acc[j + 1]
+            for i in range(n):
+                t = (x0 + i, y0 + j)
+                if t in water or t in used or t in ore or t in keep or t in cliffs:
+                    row += 1
+                here[i + 1] = above[i + 1] + row
+        best = None
+        for j in range(n - side + 1):
+            for i in range(n - side + 1):
+                cx, cy = x0 + i + side / 2, y0 + j + side / 2
+                d = math.hypot(cx - c[0], cy - c[1])
+                if d > reach or (best is not None and d >= best[0]):
+                    continue
+                if acc[j + side][i + side] - acc[j][i + side] - acc[j + side][i] + acc[j][i] == 0:
+                    best = (d, (cx, cy))
+        return best[1] if best else None
 
     @staticmethod
     def _open_places(w: FreeWorld, base: Base, n: int = 6) -> list[tuple[float, float]]:
