@@ -43,7 +43,7 @@ from .world import BuildError, FreeWorld, Preempted  # noqa: E402
 def play(run: Run, client: ArenaClient, task: dict, strategist=None, log=print, replan_minutes: float = 8.0,
          stop_minutes_left: float = 0.3, telemetry_dir=None, designer=None, placer: str = "fallback",
          assessor=None, fixer=None, chiplets=None, saver=None, resume_from: str | None = None,
-         autosave_minutes: float = 20.0, overseer=None) -> dict:
+         autosave_minutes: float = 20.0, overseer=None, daily_cap: float | None = None) -> dict:
     """telemetry_dir: where to write bot_live.json and bot_events.jsonl for the monitor page (usually the
     run's own log folder); None writes nothing. Every factory design's terrain is saved in its chiplets/
     folder, as cases for the chiplet bench.
@@ -59,7 +59,10 @@ def play(run: Run, client: ArenaClient, task: dict, strategist=None, log=print, 
     telemetry_dir/saves ("" = the newest) whose bot state to load: the game itself was already loaded by the
     arena (local-run --resume).
     overseer: an overseer.Overseer: every few game minutes a deep-thinking model reads everything and gives
-    orders that run before anything else (None: no overseer)."""
+    orders that run before anything else (None: no overseer).
+    daily_cap: dollars a day for every model part of every bot process on this machine (spend.py; None: the
+    default, $FACTORIOAI_DAILY_CAP or spend.DAILY_CAP; 0: no daily cap). Past 75% the expensive parts slow
+    down, past 100% every part plays on its rules; the run itself goes on."""
     speed = float(task.get("clock_speed", 1.0))
     run = run if isinstance(run, RealtimeRun) else RealtimeRun.wrap(run, speed=speed)
     kn = Knowledge(client.catalog())
@@ -256,6 +259,40 @@ def play(run: Run, client: ArenaClient, task: dict, strategist=None, log=print, 
         except Exception as exc:  # noqa: BLE001 - a repair never stops the run
             log(f"[bot] pipe line repair failed: {type(exc).__name__}: {str(exc)[:160]}")
         log(f"[bot] patches: {[(p['name'], p['tiles'], p['distance']) for p in world.patches[:8]]}")
+        from . import spend as spend_mod
+        day = spend_mod.DailySpend(daily_cap, key=f"{Path(telemetry_dir).name if telemetry_dir else 'run'}"
+                                                   f"@{int(time.time())}")
+        ai_parts = {"strategist": strategist, "overseer": overseer, "assessor": assessor, "fixer": fixer,
+                    "designer": designer, "chiplets": chiplets}
+        day_state = {"mode": "normal", "t": 0.0}
+
+        def day_check() -> None:
+            """Book this session's AI spend in the day's ledger; slow the expensive parts down near the cap and
+            treat every part as spent past it (each falls back to its rules, the run plays on)."""
+            if time.monotonic() - day_state["t"] < 30:
+                return
+            day_state["t"] = time.monotonic()
+            cost = sum(float(getattr(o, "cost_usd", 0.0) or 0.0) for o in ai_parts.values() if o is not None)
+            mode = day.update(cost)
+            if mode == day_state["mode"]:
+                return
+            old, day_state["mode"] = day_state["mode"], mode
+            if mode in ("saver", "off") and old == "normal":
+                if overseer is not None:
+                    overseer.period_min = max(30.0, float(overseer.period_min) * 3)
+                factory.placer = "search"
+                log(f"[bot] the day's AI bill is ${day.total:.2f} of ${day.cap:.2f}: saver mode (the overseer "
+                    f"every {overseer.period_min if overseer is not None else 0:g} game min, factory layouts by search)")
+                tel.event("ai_saver", spent=day.total, cap=day.cap)
+            if mode == "off":
+                for o in ai_parts.values():
+                    if o is not None and getattr(o, "max_cost", None) is not None:
+                        o.max_cost = float(getattr(o, "cost_usd", 0.0) or 0.0)
+                log(f"[bot] the day's AI bill reached ${day.total:.2f} (cap ${day.cap:.2f}): every model part is "
+                    "off for today; the bot plays on its rules")
+                tel.event("ai_off", spent=day.total, cap=day.cap)
+                crew.foreman.note(f"the day's AI budget (${day.cap:.0f}) is spent: playing on rules")
+
         pending = ask("first plan" if resume_from is None else "resumed from a save: check the plan still fits")
         if saves_dir is not None:
             tel.set(saves=persist.index(saves_dir)[-12:])
@@ -272,8 +309,12 @@ def play(run: Run, client: ArenaClient, task: dict, strategist=None, log=print, 
                         log(f"[bot] stopping as asked: carry on later from save {saved}")
                         break
                     crew.foreman.note("stop asked, but the save failed: playing on")
+            try:
+                day_check()
+            except Exception as exc:  # noqa: BLE001 - the ledger never stops a run
+                log(f"[bot] AI bill ledger: {type(exc).__name__}: {str(exc)[:120]}")
             spent = spent_budgets({"strategist": strategist, "overseer": overseer, "assessor": assessor,
-                                   "fixer": fixer, "designer": designer})
+                                   "fixer": fixer, "designer": designer}) if day_state["mode"] != "off" else []
             if spent and saver is not None:
                 # a model's cost cap ran out: save and stop between goals, so the run carries on with new caps
                 # (arena local-run --resume <id> --max-cost ... ; costs count from zero again after a resume)

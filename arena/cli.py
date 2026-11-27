@@ -205,7 +205,8 @@ def cmd_local_run(args) -> None:
                                     designer=designer, assessor=assessor, fixer=fixer, chiplets=chiplets,
                                     placer=placer, saver=saver,
                                     resume_from=(resume_save or "") if resume_id else None,
-                                    autosave_minutes=args.autosave, overseer=overseer)
+                                    autosave_minutes=args.autosave, overseer=overseer,
+                                    daily_cap=args.daily_max_cost)
             elif args.bot == "atlas":
                 import os
                 from atlas.bot import play as atlas_play  # type: ignore
@@ -481,12 +482,19 @@ def main(argv: list[str] | None = None) -> None:
                    help="brain bot: the overseer, a deep-thinking model that reads everything every few game "
                         "minutes, finds what is wrong or wasted and gives orders that run before anything else "
                         "(on with --strategist openai)")
+    # the overseer was half the bill (gpt-6.1-sol on high, $0.07-0.12 a call, 5-6 calls a game hour): medium
+    # effort and a look every 15 game minutes (2026-11-27)
     p.add_argument("--overseer-effort", choices=["none", "minimal", "low", "medium", "high", "xhigh"],
-                   default="high", help="the overseer's reasoning effort")
-    p.add_argument("--overseer-minutes", type=float, default=10.0,
-                   help="game minutes between the overseer's looks (it may ask for 5-20)")
+                   default="medium", help="the overseer's reasoning effort")
+    p.add_argument("--overseer-minutes", type=float, default=15.0,
+                   help="game minutes between the overseer's looks (it may ask for 10-30)")
     p.add_argument("--overseer-max-cost", type=float, default=5.0, help="the overseer's own cost cap in USD")
     p.add_argument("--no-overseer", action="store_true", help="brain bot: no overseer")
+    p.add_argument("--daily-max-cost", type=float, default=None,
+                   help="brain bot: dollars a day for every model part of every bot process on this machine "
+                        "(the stream, test games, both checkouts; default $FACTORIOAI_DAILY_CAP or 20). Past 75%% "
+                        "the overseer slows and layouts go by search; past 100%% every part plays on its rules. "
+                        "0: no daily cap")
     p.add_argument("--provider", default="openai", help="openai bot: openai | ollama | ollama-cloud")
     p.add_argument("--model", help="openai bot: model name (default: the provider's default)")
     p.add_argument("--max-cost", type=float, default=5.0, help="openai bot: stop before the bill passes this (USD)")
