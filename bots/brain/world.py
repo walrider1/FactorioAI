@@ -420,7 +420,21 @@ class FreeWorld(ab.World):
                     self.oil_rings = ring
                     self.log(f"[world] no crude oil within ~{self.oil_searched()} tiles of the base yet")
         here = near or self.pos
-        for f in sorted(fields, key=lambda f: math.dist((f["nearest"]["x"], f["nearest"]["y"]), here))[:2]:
+        crude = self.resources.setdefault("crude-oil", set())
+        for f in fields:                                  # a well is a patch of its own: the scan names its tile
+            crude.add(ab.tile(f["nearest"]["x"], f["nearest"]["y"]))
+        # a full look at the nearest two FIELDS, new ones first. Run 20261127-101219: every scan saw a second field
+        # (-235, -125), but each well is its own patch, so "the nearest two patches" were the two wells already
+        # known; the new field was never looked at, the scout reported "0 of 5 rings searched" three times and
+        # the ring search never ran.
+        pick: list[dict] = []
+        at = lambda f: (f["nearest"]["x"], f["nearest"]["y"])
+        for f in sorted(fresh(fields) or fields, key=lambda f: math.dist(at(f), here)):
+            if all(math.dist(at(f), at(p)) > 24 for p in pick):
+                pick.append(f)
+            if len(pick) >= 2:
+                break
+        for f in pick:
             try:
                 self.look(f["centre"]["x"], f["centre"]["y"], radius=16)
             except BuildError:

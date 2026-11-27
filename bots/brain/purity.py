@@ -139,8 +139,10 @@ def _stop_leak(crew, q: tuple[int, int], own: set) -> str:
     return f"took up the {here['name']} at {q} that fed into it"
 
 
-INSERTERS = ["burner-inserter", "inserter", "long-handed-inserter", "fast-inserter", "filter-inserter",
-             "stack-inserter", "bulk-inserter"]
+# the game's own inserters (data/factorio-base.json): an observe naming one the game does not have is refused
+# whole. Run 20261127-101219: "filter-inserter" and "stack-inserter" (gone since Factorio 2.0) made every purge
+# fail ("unknown entity name"), so a research station's polluted green belt stayed and all four labs idled.
+INSERTERS = ["burner-inserter", "inserter", "long-handed-inserter", "fast-inserter", "bulk-inserter"]
 
 
 def inserters_onto(crew, tiles) -> list[dict]:

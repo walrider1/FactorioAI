@@ -1260,7 +1260,7 @@ function renderDesign(D) {
   if (!D) return;
   const key = `${D.item}|${D.attempt}|${D.status}|${D.slot}`;
   if (key !== ZN.key) { ZN.key = key; ZN.t0 = performance.now(); if (D.status !== "building") ZN.flash.clear(); }
-  setText("dsgName", `${nice(D.item)} · ${D.rate}/min`);
+  setText("dsgName", +D.rate ? `${nice(D.item)} · ${D.rate}/min` : nice(D.item));   // (older bots sent slots as 0/min)
   const st = { drawing: "DESIGNING", refused: "REFUSED", kept: "DESIGNED", building: "BUILDING" }[D.status] || "";
   setText("dsgState", D.status === "drawing" ? "" : D.attempt ? `${st} · #${D.attempt}` : st);
   setText("dsgWho", PLACER[D.placer] || D.placer || "");
