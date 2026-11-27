@@ -162,7 +162,12 @@ def _slot_state(z, crew, slot) -> tuple[str, str | None]:
     for n, st in (z.opened or {}).items():
         try:
             seg = z.segment(n)
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001 - no plan at hand (just resumed): what was built, by where it stands
+            x0, y0, w, h = slot.rect
+            for key, where in (st.get("built") or {}).items():
+                if isinstance(where, (list, tuple)) and len(where) == 2 and                         x0 <= where[0] < x0 + w and y0 <= where[1] < y0 + h:
+                    item = str(key).split("#")[0].split("-", 1)[-1]
+                    state = "built"
             continue
         for b in seg.blocks:
             if b.slot.id != slot.id:

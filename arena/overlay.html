@@ -217,6 +217,26 @@ body.atlas #thoughts .research { border-top: 0; } body:not(.atlas) #loop, body:n
 #world { right: 24px; top: 656px; width: 372px; height: 296px; padding: 14px 14px 0; }
 #world canvas { display: block; margin-top: 10px; }
 body.atlas #world { display: none; }
+/* ---------------------------------------------------------------- brain: the floorplan and the factory designer
+   The floorplan takes the world map's place once the brain has zones (viz.py, zones_plan.json); the designer
+   shows, top left, while a factory is designed or built (bot_live "design"). */
+#zmap { right: 24px; top: 656px; width: 372px; height: 296px; padding: 14px 14px 0; }
+#zmap canvas { display: block; margin-top: 10px; }
+body:not(.zoned) #zmap, body.zoned #world, body.atlas #zmap { display: none; }
+#dsg { left: 24px; top: 94px; width: 392px; height: 448px; padding: 14px 14px 0; transition: opacity .5s; }
+#dsg canvas { display: block; margin-top: 10px; }
+#dsg .hd .t { color: var(--ink); font: 800 19px/1 var(--f-d); letter-spacing: .08em; }
+#dsg .sub { display: flex; justify-content: space-between; margin-top: 6px; font: 600 13px/1 var(--f-m); color: var(--muted); }
+#dsg .sub b { color: var(--acc); font-weight: 700; }
+#dsgWhy { margin-top: 8px; height: 34px; overflow: hidden; font: 500 13px/17px var(--f-m); color: var(--muted); }
+#dsgWhy.bad { color: #ff6a55; } #dsgWhy.good { color: var(--acc); }
+#dsgHist { display: flex; gap: 5px; margin-top: 6px; height: 20px; }
+#dsgHist i { flex: 0 0 26px; height: 18px; font: 800 13px/18px var(--f-d); text-align: center; font-style: normal; background: var(--well); color: var(--dim); }
+#dsgHist i.ok { background: var(--acc); color: var(--acc-ink); } #dsgHist i.no { background: #4a1f19; color: #ff6a55; }
+#dsg .meter { margin-top: 8px; }
+#dsg .meter i { background: var(--hazard); background-size: 28px 28px; animation: march .9s linear infinite; }
+#dsg .meter i.done { background: var(--acc); animation: none; }
+body:not(.designing) #dsg, body.atlas #dsg { opacity: 0; pointer-events: none; }
 @media (prefers-reduced-motion: reduce) { *, *::after, *::before { animation: none !important; transition: none !important; } }
 </style>
 </head>
@@ -294,6 +314,11 @@ body.atlas #world { display: none; }
   </div>
 
   <div class="plate" id="world"><div class="hd"><span class="t">World</span><span id="worldCount"></span></div><canvas id="worldc" width="344" height="244"></canvas></div>
+  <div class="plate" id="zmap"><div class="hd"><span class="t">Floorplan</span><span id="zmapCount"></span></div><canvas id="zmapc" width="344" height="244"></canvas></div>
+  <div class="plate" id="dsg"><div class="hd"><span class="t" id="dsgName">Designer</span><span id="dsgState"></span></div>
+    <div class="sub"><span id="dsgWho"></span><span id="dsgAt"></span></div>
+    <canvas id="dsgc" width="364" height="292"></canvas>
+    <div id="dsgWhy"></div><div id="dsgHist"></div><div class="meter"><i id="dsgBar"></i></div></div>
   <div class="plate" id="map"><div class="hd"><span class="t">Base</span><span id="mapCount"></span></div><canvas id="mapc" width="364" height="364"></canvas></div>
   <div class="plate" id="bp"><div class="hd"><span class="t" id="bpName">–</span><span id="bpPct"></span></div><canvas id="bpc" width="364" height="190"></canvas><div class="meter"><i id="bpBar"></i></div></div>
   <div class="plate" id="bar">
@@ -887,7 +912,8 @@ function render(d) {
   const stages = d.atlas ? atlasStages(d) : rm.stages || [];
   // each part on its own: one odd field never blanks the rest of the overlay
   for (const part of [() => atlasRender(d), () => renderTop(d, L, stages), () => renderBar(d, L), () => renderBrain(d, L),
-    () => renderThoughts(L), () => renderResearch(L, rm), () => renderWorld(d.atlas ? null : L.world)]) {
+    () => renderThoughts(L), () => renderResearch(L, rm), () => renderWorld(d.atlas ? null : L.world),
+    () => brainViz(d)]) {
     try { part(); } catch (e) { console.error(e); }
   }
 }
@@ -1130,6 +1156,137 @@ function renderLoop() {
   setText("llmCost", llm.calls ? `AI $${(+llm.spent).toFixed(3)}` : "AI");
   setText("bill", `$${(+(llm.spent || 0)).toFixed(3)}`);
 }
+
+// ---------------------------------------------------------------- brain: the floorplan and the factory designer (viz.py)
+const ZN = { rev: null, run: null, plan: null, img: null, bus: [], pos: null, D: null, key: null, flash: new Map(), t0: 0 };
+const ZTONE = { ".": "#24221f", "y": "#2f2b26", "=": "#3b2f1f", "o": "#262b38", "~": "#1b3546", "r": "#4a4036", "#": "#5c5750", "L": "#c9c1b4" };
+async function zonesPlan(d) {
+  const z = (d.live || {}).zones;
+  document.body.classList.toggle("zoned", !!(z && z.plan_rev));
+  ZN.pos = ((d.live || {}).world || {}).position || null;
+  if (!z || !z.plan_rev || (z.plan_rev === ZN.rev && d.id === ZN.run)) return;
+  ZN.rev = z.plan_rev; ZN.run = d.id;
+  try {
+    const r = await fetch(`/api/zones-plan/${d.id}`, { cache: "no-store" });
+    if (!r.ok) return;
+    const P = await r.json(), c = document.createElement("canvas");
+    c.width = P.w; c.height = P.h;
+    const g = c.getContext("2d"), bus = [];
+    P.raster.forEach((row, y) => { for (let x = 0; x < row.length; x++) { const ch = row[x], t = ZTONE[ch]; if (t) { g.fillStyle = t; g.fillRect(x, y, 1, 1); } if (ch === "L") bus.push([x, y]); } });
+    ZN.plan = P; ZN.img = c; ZN.bus = bus;
+  } catch (e) { console.error(e); }
+}
+const LETTER = { "iron-gear-wheel": "G", "electronic-circuit": "E", "automation-science-pack": "R", "logistic-science-pack": "L",
+  "chemical-science-pack": "B", "advanced-circuit": "A", "engine-unit": "N", "copper-cable": "W", "plastic-bar": "P", "sulfur": "S" };
+function drawZones(t) {
+  const P = ZN.plan, cv = $("zmapc"), g = cv.getContext("2d");
+  g.clearRect(0, 0, cv.width, cv.height);
+  if (!P || !ZN.img) return;
+  const k = Math.min(cv.width / P.w, cv.height / P.h), ox = (cv.width - P.w * k) / 2, oy = (cv.height - P.h * k) / 2;
+  const X = wx => ox + (wx - P.origin[0]) / P.cell * k, Y = wy => oy + (wy - P.origin[1]) / P.cell * k;
+  g.imageSmoothingEnabled = false;
+  g.drawImage(ZN.img, ox, oy, P.w * k, P.h * k);
+  for (let i = 0; i < ZN.bus.length; i++) {                        // items riding the laid bus belts
+    const [bx, by] = ZN.bus[i];
+    if ((i * 7 + Math.floor(t / 90)) % 9 === 0) { g.fillStyle = "#ff9a1f"; g.fillRect(ox + bx * k, oy + by * k, k + .5, k + .5); }
+  }
+  let built = 0, planned = 0;
+  g.font = "800 13px 'Barlow Condensed', 'Arial Narrow', sans-serif"; g.textAlign = "center"; g.textBaseline = "middle";
+  for (const s of P.slots || []) {
+    const [x0, y0, w, h] = s.rect, px = X(x0), py = Y(y0), pw = w / P.cell * k, ph = h / P.cell * k;
+    if (s.item) planned++;
+    if (s.state === "built") {
+      built++; g.fillStyle = "#ff9a1f"; g.fillRect(px, py, pw, ph);
+      g.fillStyle = "rgba(31,19,6,.35)"; g.fillRect(px, py + ph * .66, pw, ph * .34);
+      g.fillStyle = "#1f1306"; g.fillText(LETTER[s.item] || "■", px + pw / 2, py + ph / 2);
+    } else if (s.state === "building") {
+      hazard(g, px, py, pw, ph, t);
+      g.strokeStyle = `rgba(255,154,31,${.5 + .5 * Math.sin(t / 180)})`; g.lineWidth = 2; g.strokeRect(px - 2, py - 2, pw + 4, ph + 4);
+    } else if (s.state === "planned") {
+      g.strokeStyle = "#ff9a1f"; g.lineWidth = 1.5; g.strokeRect(px + .75, py + .75, pw - 1.5, ph - 1.5);
+      g.fillStyle = "#ff9a1f"; g.fillText(LETTER[s.item] || "", px + pw / 2, py + ph / 2);
+    } else {
+      g.strokeStyle = "#57514a"; g.lineWidth = 1; g.setLineDash([3, 3]); g.strokeRect(px + .5, py + .5, pw - 1, ph - 1); g.setLineDash([]);
+      g.fillStyle = "#57514a"; g.fillText(s.zone === "silo" ? "silo" : s.zone === "science" ? "labs" : "", px + pw / 2, py + ph / 2);
+    }
+  }
+  setText("zmapCount", planned ? `${built}/${planned} blocks · bus ${P.bus_laid || 0}` : `${(P.slots || []).length} slots reserved`);
+  if (ZN.pos) {                                                     // the character
+    const x = X(ZN.pos[0]), y = Y(ZN.pos[1]), r = 3 + 3 * ((t / 600) % 1);
+    g.strokeStyle = `rgba(244,239,230,${1 - (t / 600) % 1})`; g.lineWidth = 2; g.beginPath(); g.arc(x, y, r + 3, 0, 7); g.stroke();
+    g.fillStyle = "#f4efe6"; g.beginPath(); g.arc(x, y, 3, 0, 7); g.fill();
+  }
+}
+const PLACER = { llm: "AI designer", search: "layout search", slot: "bus slot", fallback: "layout search" };
+function renderDesign(D) {
+  document.body.classList.toggle("designing", !!(D && D.ents && D.ents.length) || !!(D && D.status === "drawing"));
+  ZN.D = D;
+  if (!D) return;
+  const key = `${D.item}|${D.attempt}|${D.status}|${D.slot}`;
+  if (key !== ZN.key) { ZN.key = key; ZN.t0 = performance.now(); if (D.status !== "building") ZN.flash.clear(); }
+  setText("dsgName", `${nice(D.item)} · ${D.rate}/min`);
+  const st = { drawing: "DESIGNING", refused: "REFUSED", kept: "DESIGNED", building: "BUILDING" }[D.status] || "";
+  setText("dsgState", D.attempt ? `${st} · #${D.attempt}` : st);
+  setText("dsgWho", PLACER[D.placer] || D.placer || "");
+  setText("dsgAt", D.at ? `at (${D.at[0]}, ${D.at[1]})` : (D.slot ? `slot ${D.slot}` : ""));
+  const why = $("dsgWhy");
+  const msg = D.status === "drawing" ? "drawing a layout for this spot…" : D.status === "refused" ? `✗ ${D.why}` :
+    D.status === "building" ? `placing ${D.placed || 0} of ${(D.ents || []).length} buildings` : `✓ ${D.why || "it fits: building it"}`;
+  if (why.textContent !== msg) why.textContent = msg;
+  why.className = D.status === "refused" ? "bad" : D.status === "drawing" ? "" : "good";
+  const h = $("dsgHist"), want = (D.history || []).map(x => x.ok ? "ok" : "no").join(",");
+  if (h.dataset.k !== want) {
+    h.dataset.k = want; h.innerHTML = "";
+    for (const x of D.history || []) { const i = document.createElement("i"); i.className = x.ok ? "ok" : "no"; i.textContent = x.ok ? "✓" : "✗"; i.title = x.why; h.appendChild(i); }
+  }
+  const pct = D.status === "building" ? Math.round(100 * (D.placed || 0) / Math.max(1, (D.ents || []).length)) : D.status === "kept" ? 0 : 0;
+  $("dsgBar").style.width = `${D.status === "building" ? pct : D.status === "drawing" ? 100 : 0}%`;
+  $("dsgBar").classList.toggle("done", pct >= 100);
+}
+function drawDesign(t) {
+  const D = ZN.D, cv = $("dsgc"), g = cv.getContext("2d");
+  g.clearRect(0, 0, cv.width, cv.height);
+  if (!D) return;
+  const age = performance.now() - ZN.t0;
+  if (!D.ents || !D.ents.length) {                                  // a design being drawn: the hazard sweep
+    hazard(g, 0, cv.height / 2 - 3, cv.width * ((t / 1400) % 1), 6, t);
+    g.fillStyle = "#6f6960"; g.font = "700 15px 'Barlow Condensed', sans-serif"; g.textAlign = "center";
+    g.fillText("the designer is drawing…", cv.width / 2, cv.height / 2 + 26);
+    return;
+  }
+  const k = Math.min(cv.width / Math.max(1, D.w), cv.height / Math.max(1, D.h)), ox = (cv.width - D.w * k) / 2, oy = (cv.height - D.h * k) / 2;
+  const n = D.ents.length, placed = D.status === "building" ? (D.placed || 0) : 0;
+  const reveal = D.status === "building" ? n : Math.min(n, Math.ceil(n * age / 900));   // a new layout draws itself in
+  const refused = D.status === "refused", col = { b: "#a8a197", u: "#d8cfc2", s: "#8a96a0", i: "#ff9a1f", p: "#6f6960", c: "#f4efe6", f: "#7f95a8" };
+  for (let i = 0; i < reveal; i++) {
+    const [x, y, w, h, kind] = D.ents[i], px = ox + x * k, py = oy + y * k, pw = w * k, ph = h * k;
+    const on = D.status === "building" ? i < placed : true;
+    if (D.status === "building" && on && !ZN.flash.has(i)) ZN.flash.set(i, t);
+    if (kind === "m" || kind === "f") {
+      if (refused) { g.strokeStyle = "#ff6a55"; g.lineWidth = 1.5; g.strokeRect(px + 1, py + 1, pw - 2, ph - 2); }
+      else if (on && (D.status === "building" || D.status === "kept")) {
+        g.fillStyle = kind === "f" ? "#7f95a8" : "#ff9a1f"; g.fillRect(px + 1, py + 1, pw - 2, ph - 2);
+        g.fillStyle = "rgba(31,19,6,.4)"; g.fillRect(px + pw * .3, py + ph * .3, pw * .4, ph * .4);
+      } else { g.strokeStyle = "#57514a"; g.lineWidth = 1; g.strokeRect(px + 1.5, py + 1.5, pw - 3, ph - 3); }
+    } else {
+      const sz = kind === "i" || kind === "p" ? .5 : .8;
+      g.fillStyle = refused ? "#6b2a22" : on && D.status !== "kept" ? (col[kind] || "#a8a197") : D.status === "kept" ? (col[kind] || "#a8a197") : "#2f2c28";
+      if (D.status === "building" && !on) g.fillStyle = "#2f2c28";
+      g.fillRect(px + pw * (1 - sz) / 2, py + ph * (1 - sz) / 2, pw * sz, ph * sz);
+    }
+    const f = ZN.flash.get(i);
+    if (f !== undefined) { const glow = Math.max(0, 1 - (t - f) / 450); if (glow > 0) { g.fillStyle = `rgba(255,255,255,${.85 * glow})`; g.fillRect(px - 1, py - 1, pw + 2, ph + 2); } }
+  }
+  if (refused && age < 700) { g.fillStyle = `rgba(255,83,64,${.35 * (1 - age / 700)})`; g.fillRect(0, 0, cv.width, cv.height); }
+}
+function brainViz(d) {
+  if (d.atlas) { document.body.classList.remove("zoned", "designing"); return; }
+  zonesPlan(d);
+  renderDesign((d.live || {}).design || null);
+}
+function brainFrame(t) { try { if (ZN.plan) drawZones(t); drawDesign(t); } catch (e) { console.error(e); } requestAnimationFrame(brainFrame); }
+requestAnimationFrame(brainFrame);
+
 function atlasRender(d) {
   document.body.classList.toggle("atlas", !!d.atlas);
   if (!d.atlas) return;
