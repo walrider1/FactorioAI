@@ -64,7 +64,8 @@ GOAL_HELP = """Goals you may give (JSON objects, done in order by the crew):
                                                     name them): fluid and items stop at a gap
 - {"do": "act", "steps": [{"op": ...}, ...]}         ANY direct action, done exactly as said, step by step:
                                                     insert {site|at, item, count}, take {site|at, item, count},
-                                                    craft {item, count}, go {at}, place {entity, at, dir},
+                                                    craft {item, count}, go {at}, place {entity, at, dir}
+                                                    (+ belt_type input|output for an underground belt),
                                                     pickup {at}, mine {item, count}, wait {seconds}. For anything
                                                     no other goal does (hand-feed a machine, carry packs to labs,
                                                     clear a tile, move the character). Never pipes: placing or

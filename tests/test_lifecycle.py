@@ -140,6 +140,33 @@ def test_a_plate_belt_feeding_more_than_its_drill_gets_a_spare_chest_fed_in():
     assert crew._overloaded() == []
 
 
+def test_a_short_belt_is_fed_from_a_tap_of_a_belt_with_some_to_spare():
+    """Run 4f7178: the bus head got 60 iron a minute of 130 while a line 15 tiles off had 96 to spare; only
+    sources with no link at all counted as spare, so no extra feed was ever laid. A belt with some to spare is
+    tapped now, and its source is booked for what it gives."""
+    crew, w, _ = _crew()
+    mine = crew.base.add(Site("electric_mine", {"resource": "iron-ore", "into": "furnace"}, (0, 5),
+                              chests=[(0.5, 0.5, "iron-plate"), (0.5, 10.5, "iron-plate")],
+                              entities=[("stone-furnace", 3.0, 3.0, "north"), ("steel-furnace", 3.0, 13.0, "north")]))
+    w.used |= {(0, 0), (0, 10)}
+    fac = crew.base.add(Site("factory", {"item": "iron-gear-wheel", "per_minute": 20}, (30, 0)))
+    red = crew.base.add(Site("factory", {"item": "x"}, (30, 10)))
+    short = _link(crew, (0.5, 0.5), fac.id, "iron-plate", _row(2, 25, 0), per=40.0)
+    rich = _link(crew, (0.5, 10.5), red.id, "iron-plate", _row(2, 25, 10), per=5.0)
+    assert crew._spare("iron-plate") == []                            # both chests have a link
+    [c] = crew.short_chains()
+    assert c["chest"] == [0.5, 0.5] and c["spare_sources"] == 1 and c["boost_may_retry"]
+    crew._note_link_fail(("boost", 0.5, 0.5), "iron-plate", fac,
+                         "no belt route from a spare iron-plate source to the side of its belts")
+    assert crew.short_chains()[0]["boost_may_retry"]                 # that failure never tried a tap
+    done, failed = crew.boost_links()
+    assert len(done) == 1, failed
+    boost = crew.links[-1]
+    assert boost["boost_into"] is short and boost.get("tap_of") is rich
+    load, supply = crew._budget("iron-plate")[(0.5, 10.5)]
+    assert load > 5.0                                                 # the tapped source gives what it lends
+
+
 # ------------------------------------------------------------------ 3. rates after an upgrade
 def test_an_upgraded_factory_makes_more_and_asks_more_of_its_inputs():
     crew, w, _ = _crew(unlocked=("assembling-machine-2",))

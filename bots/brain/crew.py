@@ -526,7 +526,9 @@ class Crew:
             {"op": "craft", "item": i, "count": n}                             by hand (ingredients made as needed)
             {"op": "go", "at": [x, y]}                                         walk there
             {"op": "place", "entity": e, "at": [x, y], "dir": d}              one building (recorded as a "manual"
-                                                                               site, so it can be removed later)
+                                                                               site, so it can be removed later); an
+                                                                               underground belt adds "belt_type":
+                                                                               "input" (entrance) or "output" (exit)
             {"op": "pickup", "at": [x, y]}                                     take a building of ours back
             {"op": "mine", "item": resource, "count": n}                       by hand, at the nearest patch
             {"op": "wait", "seconds": s}                                       let the base run"""
@@ -620,10 +622,26 @@ class Crew:
                 self.make({ent: 1}, extra=True)
             d = st.get("dir") or "north"
             tiles = self.w.footprint(ent, float(x), float(y), d)
+            ug = ent.endswith("underground-belt")
+            typ = st.get("belt_type") or st.get("type")
+            if ug and typ not in ("input", "output"):
+                # run 4f7178: the overseer's underground pair was refused twice by the API for want of this
+                raise BuildError(f"an {ent} needs \"belt_type\": \"input\" (the entrance) or \"output\" (the exit)")
             rec: list = []
             self.w.recorder = rec
             try:
-                self.w.place(ent, float(x), float(y), d, tiles)
+                if ug:                               # the API takes an underground's belt type (as belts.lay does)
+                    self.w.clear(tiles)
+                    self.w.near(float(x), float(y))
+                    opts = self.w.belt_opts(ent) if hasattr(self.w, "belt_opts") else {}
+                    r = self.w.run.place(ent, float(x), float(y), d, typ, **opts)
+                    if not r.get("ok"):
+                        raise BuildError(f"place {ent} at ({x}, {y}) {d} {typ}: {r.get('code')} "
+                                         f"{r.get('message', '')}")
+                    self.w.used.update(tiles)
+                    self.w.inventory[ent] = max(0, self.w.inventory.get(ent, 0) - 1)
+                else:
+                    self.w.place(ent, float(x), float(y), d, tiles)
             finally:
                 self.w.recorder = None
             self.base.add(Site("manual", {"entity": ent}, (float(x), float(y)), entities=rec,
@@ -4221,7 +4239,7 @@ class Crew:
             if root is not None:
                 row(root, it)[0] += float((ln.get("port") or {}).get("per_minute") or 0)
         for ln, it in boosts:                         # after every port is counted: what each chain lacks
-            src = row(tuple(ln["source"]), it)
+            src = row(self._coal_root(ln) or tuple(ln["source"]), it)    # a tap's boost: the tapped belt's source
             give = max(0.0, src[1] - src[0])
             if ln.get("boost_of") is not None:
                 chain = row(tuple(ln["boost_of"]), it)
@@ -4274,9 +4292,14 @@ class Crew:
             sites = sorted({ln["to_site"] for ln in self.links if ln["item"] == item
                             and ln.get("boost_into") is None and self._coal_root(ln) == root})
             spare = len(self._spare(item))
+            key = ("boost",) + tuple(root)
+            retry = self._may_retry(key)
+            if (not spare or not retry) and sites and self._boost_taps(item, root, self.base.get(sites[0])):
+                spare = max(spare, 1)                 # a belt with some to spare is tapped (boost_links)
+                retry = retry or "tap" not in ((self._link_fails.get(key) or {}).get("reason") or "")
             out.append({"item": item, "chest": list(root), "feeds_sites": sites, "burns_per_min": round(load, 1),
                         "gets_per_min": round(supply, 1), "spare_sources": spare, "spare_coal_chests": spare,
-                        "boost_may_retry": self._may_retry(("boost",) + tuple(root))})
+                        "boost_may_retry": retry})
         return out
 
     def coal_chains(self) -> list[dict]:
@@ -4422,13 +4445,19 @@ class Crew:
             spare = self._spare(item)
             chain = [ln for ln in self.links if ln["item"] == item and ln.get("boost_into") is None
                      and ln.get("kind") not in ("trunk", "science") and self._coal_root(ln) == root]
-            if not spare or not chain:
+            if not chain:
+                continue
+            site = self.base.get(chain[0]["to_site"])
+            taps = self._boost_taps(item, root, site)
+            if not spare and not taps:
                 continue
             targets = self._sideload_ports(chain, item)
-            if not self._may_retry(key) and not (targets and self._no_join_before(key)):
+            # a failure from before taps were tried (its reason names no tap) is void once a tap is there
+            no_tap_before = taps and "tap" not in ((self._link_fails.get(tuple(key)) or {}).get("reason") or "")
+            if not self._may_retry(key) and not (targets and self._no_join_before(key)) and not no_tap_before:
                 continue                              # (it failed for want of a join point and now has one)
-            site = self.base.get(chain[0]["to_site"])
-            near = lambda q: min(math.dist(q[0]["end"], (x, y)) for x, y, _ in spare)
+            near = lambda q: min([math.dist(q[0]["end"], (x, y)) for x, y, _ in spare]
+                                 + [math.dist(q[0]["end"], t) for t, _ in taps])
             rec = None
             # the nearest side-joins first; then the three nearest again with a wide detour (run 20261122-133537:
             # "no belt route from a spare ... source to the side of its belts" on every build, mines standing full)
@@ -4436,7 +4465,7 @@ class Crew:
                 [(t, 70) for t in sorted(targets, key=near)[:3]]
             for (port, ln), margin in order:
                 srcs = sorted(spare, key=lambda q: math.dist(q[:2], port["end"]))[:3]
-                plan = self._plan_link(port, srcs, [], margin, False)
+                plan = self._plan_link(port, srcs, taps, margin, False)
                 if plan is None:
                     continue
                 try:
@@ -4446,7 +4475,8 @@ class Crew:
                     continue
                 break
             if rec is None:
-                why = (f"no belt route from a spare {item} source to the side of its belts" if targets else
+                why = (f"no belt route from a spare {item} source{' or a tap of a belt with some to spare' if taps else ''}"
+                       " to the side of its belts" if targets else
                        "its belts have no free straight stretch to join from the side")
                 self._note_link_fail(key, item, site, why)
                 failed.append(f"extra {item} into the chain from {list(root)} (sites "
@@ -4458,6 +4488,22 @@ class Crew:
         return done, failed
 
     boost_coal = boost_links
+
+    BOOST_TAP_MIN = 20.0           # a minute a belt must have to spare to be tapped for a short chain
+
+    def _boost_taps(self, item: str, root: tuple, site) -> list:
+        """Belts of `item` with some to spare that may be tapped to feed a short chain from the side. Run 4f7178:
+        the bus head got 60 iron a minute of the 130 it takes while a line 15 tiles off had 96 a minute to spare;
+        only sources with no link at all counted as spare (the nearest was 300 tiles off), so the boost never
+        found a route and green science ran at 2.7 a minute for 300 game minutes."""
+        load, supply = self._budget(item).get(tuple(root)) or [0.0, 0.0]
+        short = load - supply
+        if short <= 0.5:
+            return []
+        try:
+            return self._belt_taps(item, site, min(short, self.BOOST_TAP_MIN))
+        except Exception:  # noqa: BLE001 - a stub crew without lines
+            return []
 
     def link(self) -> str:
         """The manager's link step: science outputs to research stations, then every input port that has a

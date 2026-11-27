@@ -59,3 +59,26 @@ def test_hand_steps_never_lay_or_cut_a_fluid_line():
         crew.act([{"op": "go", "at": [28, 168]}, {"op": "pickup", "at": [24.5, 171.5]}])
     assert log == []                                          # refused before the first step
     assert "Never pipes" in __import__("brain.brain", fromlist=["GOAL_HELP"]).GOAL_HELP
+
+
+def test_a_hand_placed_underground_belt_carries_its_belt_type_to_the_game():
+    """Run 4f7178: the overseer's underground pair over a blocked tile was refused twice ("an underground-belt needs
+    belt_type"): the act dropped the field. It goes through now, and without it the step says what it needs."""
+    crew, w, labs, log = _setup()
+    sent = []
+    w.inventory["underground-belt"] = 2
+    w.footprint = lambda ent, x, y, d: {(int(x), int(y))}
+    w.clear = lambda tiles: None
+    w.near = lambda x, y: None
+    w.used = set()
+
+    class Run:
+        def place(self, ent, x, y, d, typ=None, **k):
+            sent.append((ent, x, y, d, typ))
+            return {"ok": True, "data": {"entity": {"name": ent, "x": x, "y": y, "direction": d}}}
+    w.run = Run()
+    crew.act([{"op": "place", "entity": "underground-belt", "at": [74.5, -12.5], "dir": "east", "belt_type": "input"},
+              {"op": "place", "entity": "underground-belt", "at": [78.5, -12.5], "dir": "east", "belt_type": "output"}])
+    assert [s[4] for s in sent] == ["input", "output"]
+    with pytest.raises(BuildError, match='needs "belt_type"'):
+        crew.act([{"op": "place", "entity": "underground-belt", "at": [70.5, -12.5], "dir": "east"}])
