@@ -37,6 +37,9 @@ def test_a_place_moves_onto_the_nearest_clear_square():
 def test_chains_split_into_small_blocks_and_plates_always_come_in():
     kn = _kn()
     from fab import recipes as fr
+    early, _ = F.free_supplied(kn, {"item": "automation-science-pack", "per_minute": 30})
+    assert "iron-gear-wheel" in early               # no undergrounds yet: gears always from a feeder
+    kn.unlocked = set(kn.unlocked) | {"underground-belt"}
     for item, rate in (("logistic-science-pack", 15), ("chemical-science-pack", 10), ("automation-science-pack", 15)):
         sup, pl = F.free_supplied(kn, {"item": item, "per_minute": rate})
         asm = {k: v for k, v in pl.machines.items() if k in fr.RECIPES and k not in sup}

@@ -17,7 +17,9 @@ needs_catalog = pytest.mark.skipif(catalog.get().empty, reason="needs config/cat
 
 def _kn():
     from brain.knowledge import Knowledge
-    return Knowledge(json.loads(json.dumps(catalog.get().data)))
+    kn = Knowledge(json.loads(json.dumps(catalog.get().data)))
+    kn.unlocked = set(kn.unlocked) | {"underground-belt"}     # green science comes after logistics
+    return kn
 
 
 # ------------------------------------------------------------------ 1. feeders first

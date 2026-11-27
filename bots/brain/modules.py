@@ -981,6 +981,11 @@ class Factory(Module):
     # recipe factories routed 18 of 18: small blocks, belted together, instead of one big tangle.
     MAX_ASM = 6
     MAX_RECIPES = 3
+    # Before logistics no underground belt exists and no two belts may cross: run 20261127-161020 tried a 30/min red
+    # science factory (6 red + 2 gear assemblers) at five places with both placers, every one "iron-gear-wheel: no
+    # belt route", 23 game minutes. Until undergrounds: at most 4 assemblers, intermediates always from feeders,
+    # and the first try at the rate 4 machines make (more follows once science runs short again)
+    MAX_ASM_NO_UG = 4
     FEEDS = True                             # plates come in on one belt each (a feed), once lines exist
     # Set by the crew around one build (Crew._set_probes): probe(grid, design) -> [why an input or the output
     # cannot be belted there]; avoid: [(centre, input)] where this item's factory already stood walled in
@@ -1114,11 +1119,14 @@ class Factory(Module):
         from fab import recipes as fr
         self.can_make(kn)
         supplied = set(fr.inputs_needed(item)) | set(split)
+        no_ug = "underground-belt" not in (getattr(kn, "unlocked", None) or ())
+        cap = self.MAX_ASM_NO_UG if no_ug else self.MAX_ASM
         while True:
             pl = fr.plan(item, rate, supplied=supplied)
             asm = {k: v for k, v in pl.machines.items() if k in fr.RECIPES and k not in supplied}
-            # the item's own machines are what they are: past MAX_ASM of them alone, only the recipe cap splits
-            too_big = sum(asm.values()) > self.MAX_ASM and asm.get(item, 0) < self.MAX_ASM
+            # the item's own machines are what they are: past the cap of them alone, only the recipe cap splits
+            # (before undergrounds every intermediate goes to a feeder anyway: nothing may cross)
+            too_big = sum(asm.values()) > cap and (no_ug or asm.get(item, 0) < cap)
             if not too_big and len(asm) <= self.MAX_RECIPES:
                 return supplied, pl
             cands = [(v, k) for k, v in asm.items() if k != item]
@@ -1309,6 +1317,17 @@ class Factory(Module):
         # nearest place. The designs run in the background (FreeWorld.think), so a longer budget costs no upkeep.
         room = max(24, int(getattr(self, "room_side", 0) or 0) // 2 + 12)   # a bigger factory: a bigger box
         ladder = [(rate, room, ug * 2, places), (rate, 14, ug, places[:1])]
+        if not ug and not self.quick:            # no undergrounds: first at the rate MAX_ASM_NO_UG machines make
+            try:
+                from fab import recipes as fr
+                n_item = fr.plan(item, rate, supplied=set(supplied)).machines.get(item, 0)
+                if n_item > self.MAX_ASM_NO_UG:
+                    fit = round(rate * self.MAX_ASM_NO_UG / n_item, 1)
+                    ladder = [(fit, room, 0, places)] + ladder
+                    w.log(f"[fab] no underground belts yet: the {item} factory first at {fit}/min "
+                          f"({self.MAX_ASM_NO_UG} machines), more once logistics is in")
+            except Exception:  # noqa: BLE001 - the ladder as before
+                pass
         ladder += [(round(rate * f, 1), room, ug * 2, wide)
                    for f in ((2 / 3, 1 / 2, 1 / 3) if w.blocking else (2 / 3, 1 / 2)) if rate * f >= 1]
         budget = 420 if w.blocking else 300

@@ -121,6 +121,21 @@ def _ore_soon(crew, resource: str, o: dict) -> str | None:
     patches run out within ORE_SOON_MIN, or they are full while the plate is short. Run 20261124-015025: iron near
     the base ran dry from minute 330, the outpost came only after burner mines and hand feeding, 20 and 33 minutes
     late, and iron stood at 38/min against 207 wanted."""
+    if resource == "coal":
+        # everything burns it: a small first patch (run 20261127-161020: 89 tiles, a burner drill on mined-out
+        # ground by minute 120, coal mined 0.8/min against 12 burned) gets its next patch now, not as a warning
+        left = o.get("minutes_left")
+        if left is not None and left < ORE_SOON_MIN:
+            return f"about {left} game minutes of coal left"
+        if not o.get("room_for_more"):
+            try:
+                b = crew.coal_budget() or {}
+                if float(b.get("net_per_min") or 0) < 0:
+                    return (f"the coal patches near the base are full and coal burns faster than it is mined "
+                            f"({b.get('mined_per_min')}/min mined, {b.get('burned_per_min')}/min burned)")
+            except Exception:  # noqa: BLE001 - stub crews
+                return None
+        return None
     if resource not in ("iron-ore", "copper-ore") or not electric_coal(crew):
         return None
     left = o.get("minutes_left")
