@@ -45,3 +45,17 @@ def test_a_failing_step_says_why_and_what_was_done_before_it():
         crew.act([{"op": "go", "at": [1, 1]}, {"op": "insert", "site": 99, "item": "x"}])
     with pytest.raises(BuildError, match="unknown op 'fly'"):
         crew.act([{"op": "fly"}])
+
+
+def test_hand_steps_never_lay_or_cut_a_fluid_line():
+    """The overnight zones test: 15 hand "act" goals re-laid the oil floor's crude line, picked up its inlet, and
+    blue science never started. Pipes are the modules' (and repair's) to lay; nothing of the act is done."""
+    crew, w, labs, log = _setup()
+    oil = crew.base.add(Site("workshop", {"item": "plastic-bar"}, (24, 171),
+                             entities=[("pipe-to-ground", 24.5, 171.5, "west"), ("oil-refinery", 30.5, 171.5, "north")]))
+    with pytest.raises(BuildError, match="no hand-placed pipe-to-ground"):
+        crew.act([{"op": "go", "at": [28, 168]}, {"op": "place", "entity": "pipe-to-ground", "at": [24, 171]}])
+    with pytest.raises(BuildError, match=rf"part of site {oil.id}'s fluid line"):
+        crew.act([{"op": "go", "at": [28, 168]}, {"op": "pickup", "at": [24.5, 171.5]}])
+    assert log == []                                          # refused before the first step
+    assert "Never pipes" in __import__("brain.brain", fromlist=["GOAL_HELP"]).GOAL_HELP

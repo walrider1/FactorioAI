@@ -29,7 +29,7 @@ import automation_bot as ab
 
 from .modules import Module, NoRoom, Site, SteamPower
 from .pipes import NAME, PUMP_EVERY, Nets, add_pumps, route, route_length
-from .production import Planner, SUPPLIED
+from .production import Planner, SUPPLIED, _amount
 from .world import BuildError, FreeWorld
 
 Tile = tuple[int, int]
@@ -186,10 +186,11 @@ class Workshop(Module):
         last = seen.get((cell.get("x"), cell.get("y")))
         return last is not None and now - last > cls.CELL_STALL_MIN
 
-    def spare(self, base, floor: District | None = None, w=None) -> dict[str, float]:
+    def spare(self, base, floor: District | None = None, w=None, headroom: bool = True) -> dict[str, float]:
         """What built cells make beyond what other cells use (per minute). Items count from every floor (the
         courier carries them); fluids only from the floor the new cells go on (pipes do not join floors). Cells
-        that have stood still for CELL_STALL_MIN count for nothing."""
+        that have stood still for CELL_STALL_MIN count for nothing. `headroom`: a refinery's unused capacity
+        counts too (Workshop._headroom)."""
         made: dict[str, float] = {}
         used: dict[str, float] = {}
         here = floor.idx if floor is not None else None
@@ -206,9 +207,72 @@ class Workshop(Module):
                 if same:
                     for k, v in c.get("fluid_out", {}).items():
                         made[k] = made.get(k, 0.0) + v
-                    for k, v in c.get("fluid_in", {}).items():
-                        used[k] = used.get(k, 0.0) + v
+                    if not c.get("sink"):                # a sink (solid fuel from leftover gas) only keeps the
+                        for k, v in c.get("fluid_in", {}).items():   # refinery from stalling: its gas is spare
+                            used[k] = used.get(k, 0.0) + v
+                    if headroom:
+                        for k, (v, _) in self._headroom(w, c).items():
+                            made[k] = made.get(k, 0.0) + v
         return {k: v - used.get(k, 0.0) for k, v in made.items() if v - used.get(k, 0.0) > 0.5}
+
+    # The overnight zones test (seed 737373): one refinery on basic oil processing was built for 30 plastic a
+    # minute (330 gas of its 540). Every sulfur build after it planned a second refinery with its own crude line,
+    # found no pipe route for that crude across the crowded oil floor, and failed 15 times in 800 game minutes:
+    # blue science never started, while the first refinery stood with its pumpjacks backed up. A refinery that
+    # makes one fluid has room for more: new gas users draw on it (and on its crude line) first.
+    HEADROOM_USE = 0.9             # of a refinery's full speed: its crude does not always keep it at 100%
+
+    def _headroom(self, w, c: dict) -> dict[str, tuple[float, float]]:
+        """A built crude-fed cell with a single fluid product (a refinery on basic oil processing): what more of
+        that fluid it could make a minute, and the crude each unit of it takes. {} for every other cell."""
+        kn = getattr(w, "kn", None)
+        rec = (getattr(kn, "recipes", None) or {}).get(c.get("recipe")) if kn is not None else None
+        if not rec or not c.get("machine"):
+            return {}
+        crude = sum(float(i.get("amount") or 0) for i in rec.get("ingredients") or [] if i.get("name") == "crude-oil")
+        prods = rec.get("products") or []
+        if not crude or len(prods) != 1 or prods[0].get("type") != "fluid":
+            return {}
+        name, amt = prods[0]["name"], _amount(prods[0])
+        if amt <= 0:
+            return {}
+        cap = Planner(kn).crafts_per_min(c["recipe"], c["machine"])
+        planned = float((c.get("fluid_out") or {}).get(name, 0.0)) / amt
+        more = cap * self.HEADROOM_USE - planned
+        return {name: (round(more * amt, 2), crude / amt)} if more > 0.05 else {}
+
+    CRUDE_PER_JACK = 600.0         # crude a minute from one pumpjack on a well at 100% yield (10/s)
+
+    def _crude_check(self, w, base, d: District | None, plan) -> tuple[float, float]:
+        """Crude a plan draws through a refinery's headroom (more than its pumpjacks were planned for), and how
+        much of it the floor's joined pumpjacks cannot cover (at CRUDE_PER_JACK). (0, 0) when it uses none."""
+        if d is None:
+            return 0.0, 0.0
+        now = w.now_tick() / 3600 if w is not None and hasattr(w, "now_tick") else None
+        per: dict[str, float] = {}
+        room: dict[str, float] = {}
+        for s in base.sites:
+            for c in s.cells:
+                if c.get("floor", 0) == d.idx and not self.stalled(s, c, now):
+                    for k, (v, cr) in self._headroom(w, c).items():
+                        room[k] = room.get(k, 0.0) + v
+                        per[k] = cr
+        if not room:
+            return 0.0, 0.0
+        spare = self.spare(base, d, w)
+        old = {k: max(0.0, spare.get(k, 0.0) - v) for k, v in room.items()}   # what was spare without the headroom
+        extra = 0.0
+        for k, v in room.items():
+            want = sum(float(n.fluid_in.get(k, 0.0)) for n in plan.cells) \
+                - sum(float(n.fluid_out.get(k, 0.0)) for n in plan.cells) - old.get(k, 0.0)
+            extra += max(0.0, min(v, want)) * per[k]
+        if extra <= 0:
+            return 0.0, 0.0
+        jacks = {(x, y) for s in base.of("pumpjack") for n, x, y, _ in s.entities if n == "pumpjack"}
+        supply = len(jacks & d.pumpjacks_joined) * self.CRUDE_PER_JACK
+        burn = sum(float((c.get("fluid_in") or {}).get("crude-oil", 0.0)) for s in base.sites for c in s.cells
+                   if c.get("floor", 0) == d.idx and not self.stalled(s, c, now))
+        return round(extra, 1), round(max(0.0, extra - max(0.0, supply - burn)), 1)
 
     def _design(self, w: FreeWorld, base, p: dict) -> dict:
         item, rate = p["item"], float(p.get("per_minute", 5))
@@ -232,6 +296,17 @@ class Workshop(Module):
             d = self.district = None                 # its fluids do not reach the new floor: plan again
             plan = plan_for(None)
             n = sum(c.count for c in plan.cells)
+        if "crude-oil" in plan.fluids:
+            # a floor whose refinery has room covers this without a crude line of its own: it goes there
+            for f in self.floors:
+                if f is d or not f.nets.tiles("crude-oil"):
+                    continue
+                p2 = plan_for(f)
+                n2 = sum(c.count for c in p2.cells)
+                if "crude-oil" not in p2.fluids and self._fits(w, base, f, n2):
+                    w.log(f"[workshop] {item} goes on floor {f.idx}: its refinery has room for the gas")
+                    d, plan, n = f, p2, n2
+                    break
         if "crude-oil" in plan.fluids and not base.of("pumpjack"):
             k = max(1, math.ceil(plan.fluids["crude-oil"] / 300))
             raise BuildError(f"{item} needs {plan.fluids['crude-oil']:.0f} crude oil a minute: build pumpjacks "
@@ -296,8 +371,21 @@ class Workshop(Module):
                                  f"{self._engine_note(w, base)}. The crew hand-crafts the pumps, so no pump factory "
                                  f"is needed: once {pumps} engine units are made, build this again and the water "
                                  "line gets a pump every 200 tiles")
+        extra, short = self._crude_check(w, base, d, plan)
+        if extra:
+            # gas from a refinery's headroom: it burns more crude than its pumpjacks were planned for. Pumpjacks
+            # no floor has joined yet go onto this floor's crude line now (best effort: a far one is skipped)
+            plan.join_crude = True
+            if short:
+                w.log(f"[workshop] {item} runs the refinery harder: about {extra:.0f} more crude a minute, "
+                      f"{short:.0f} of it beyond what its pumpjacks are counted for")
         design = self._place_plan(w, base, d, plan)
         design["plan"] = plan
+        if extra and short:
+            k = max(1, math.ceil(short / self.CRUDE_PER_JACK))
+            design["crude_short"] = (f"the refinery may run {short:.0f} crude a minute short: "
+                                     f'{{"do": "build", "module": "pumpjack", "count": {k}}} adds wells, and the '
+                                     "next workshop build on this floor joins them to its crude line")
         design["power_kw"] = planner.power_kw(plan)
         self.designs[key] = design
         return design
@@ -520,7 +608,8 @@ class Workshop(Module):
         # one net per fluid: its sources first (pump, pumpjacks, producing cells), then every consumer
         # long lines first (water from the shore, crude from the oil field): they have the fewest ways in,
         # and the short nets between cells route around them
-        fluids = sorted({pt["fluid"] for c in cells for pt in c["ports"] if pt["fluid"]},
+        fluids = sorted({pt["fluid"] for c in cells for pt in c["ports"] if pt["fluid"]}
+                        | ({"crude-oil"} if getattr(plan, "join_crude", False) and d.nets.tiles("crude-oil") else set()),
                         key=lambda f: (f not in ("water", "crude-oil"), f))
         routes: dict[str, list[tuple]] = {}
         unpumped: list[str] = []                       # long lines laid without pumps for now
@@ -536,6 +625,11 @@ class Workshop(Module):
             if fl == "crude-oil":
                 for t in self._pumpjack_ports(w, base, d):
                     terminals.append(t)
+                if not any(pt["fluid"] == fl for c in cells for pt in c["ports"]):
+                    # only joining spare pumpjacks for a refinery's headroom: nearby ones, never a long new line
+                    bx0, by0, bx1, by1 = d.box()
+                    terminals = [t for t in terminals if abs(t[0] - (bx0 + bx1) / 2) + abs(t[1] - (by0 + by1) / 2)
+                                 <= self.OIL_FLOOR_REACH]
                 if not terminals and not d.nets.tiles("crude-oil"):
                     raise BuildError("every pumpjack already feeds another floor: build more "
                                      '({"do": "build", "module": "pumpjack", "count": 2})')
@@ -874,6 +968,8 @@ class Workshop(Module):
         site.cells = [{k: c[k] for k in ("machine", "recipe", "x", "y", "in", "out", "item_in", "item_out",
                                          "fluid_in", "fluid_out", "slot", "sink")} | {"floor": d.idx, "port": c.get("belt_port")}
                       for c in design["cells"]]
+        if design.get("crude_short"):                  # shown in the build's result line for the planners
+            site.params["crude_short"] = design["crude_short"]
         if gaps:
             site.params["pipe_gaps"] = gaps
         if refused:                                    # gaps.py: the gap alert has repair place them

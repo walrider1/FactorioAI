@@ -528,6 +528,9 @@ class Crew:
             {"op": "pickup", "at": [x, y]}                                     take a building of ours back
             {"op": "mine", "item": resource, "count": n}                       by hand, at the nearest patch
             {"op": "wait", "seconds": s}                                       let the base run"""
+        why = self._act_pipe_refusal(steps)
+        if why:
+            raise BuildError(why)
         done: list[str] = []
         for k, st in enumerate(list(steps)[:self.ACT_MAX_STEPS]):
             op = (st or {}).get("op")
@@ -540,6 +543,28 @@ class Crew:
                 raise BuildError(f"step {k + 1} ({op}) failed: {str(exc)[:200]}"
                                  + (f"; done before it: {'; '.join(done)[:300]}" if done else "")) from None
         return "; ".join(done)[:600] or "nothing to do"
+
+    # The overnight zones test (seed 737373): from minute 521 the overseer (and plans after it) laid and re-laid the
+    # oil floor's crude line by hand in 15 "act" goals ("a crude bridge"); they picked up its inlet at (24, 171),
+    # the refinery stood dry, and blue science never started. A site's pipes are laid by the module that routed
+    # them; gaps are closed by repair, which knows the net. Hand steps keep away from pipes.
+    ACT_PIPE_PARTS = ("pipe", "pipe-to-ground", "pump")
+
+    def _act_pipe_refusal(self, steps) -> str | None:
+        for st in list(steps or [])[:self.ACT_MAX_STEPS]:
+            st = st or {}
+            if st.get("op") == "place" and st.get("entity") in self.ACT_PIPE_PARTS:
+                return (f"act refused: no hand-placed {st['entity']} (a site's fluid lines are routed by its module): "
+                        'close a gap with {"do": "repair", "site": id}, or build the workshop again so it routes '
+                        "its own pipes")
+            if st.get("op") == "pickup" and st.get("at") is not None:
+                x, y = float(st["at"][0]), float(st["at"][1])
+                for s in self.base.sites:
+                    hit = next((e for e in s.entities if abs(e[1] - x) < 0.6 and abs(e[2] - y) < 0.6), None)
+                    if hit is not None and hit[0] in self.ACT_PIPE_PARTS:
+                        return (f"act refused: the {hit[0]} at ({x:g}, {y:g}) is part of site {s.id}'s fluid line; "
+                                f'picking it up cuts the line. {{"do": "repair", "site": {s.id}}} closes gaps')
+        return None
 
     def _act_targets(self, st: dict) -> list[tuple[str, float, float]]:
         """The buildings a step means: one at "at", or every machine and chest of a site."""

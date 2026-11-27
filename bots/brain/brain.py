@@ -67,7 +67,9 @@ GOAL_HELP = """Goals you may give (JSON objects, done in order by the crew):
                                                     craft {item, count}, go {at}, place {entity, at, dir},
                                                     pickup {at}, mine {item, count}, wait {seconds}. For anything
                                                     no other goal does (hand-feed a machine, carry packs to labs,
-                                                    clear a tile, move the character)
+                                                    clear a tile, move the character). Never pipes: placing or
+                                                    picking up pipes, pipe-to-ground or pumps is refused (repair
+                                                    and repipe fix fluid lines)
 - {"do": "modules", "site": <id>}                    productivity modules into a site's machines (the silo first,
                                                     then science and rocket intermediates); the crew does this
                                                     by itself once modules can be had

@@ -433,3 +433,80 @@ def test_no_underground_of_another_fluid_crosses_a_port_lane():
     nets.walk |= {(x, 53) for x in range(0, 15)}
     steps = route(nets, "petroleum-gas", (7, 55), lambda t: True, goals={(7, 50)})
     assert steps and any(s[0] == "ptg" and s[1] == (7, 54) for s in steps)   # its own lane starts the underground
+
+
+@needs_catalog
+def test_sulfur_draws_on_the_plastic_refinerys_spare_gas():
+    """The overnight zones test (seed 737373): a refinery built for 30 plastic a minute has room for ~210 more gas,
+    yet every sulfur build planned a second refinery with its own crude line and failed on the pipe route for 800
+    game minutes. Sulfur now goes on that floor with no refinery and no crude of its own, piped from the gas net."""
+    from brain.modules import Site
+    from brain.workshop import Workshop
+    kn = _kn()
+    kn.unlocked.discard("advanced-oil-processing")          # as in the run: basic oil processing only
+    w, base = FakeWorld(kn), PumpBase()
+    ws = Workshop()
+    d1 = ws._design(w, base, {"item": "plastic-bar", "per_minute": 30})
+    dist = d1["district"]
+    dist.nets = d1["nets"]                                  # as if built
+    for c in d1["cells"]:
+        dist.used[c["slot"]] = -1
+    dist.pumpjacks_joined = {(40.5, -40.5)}
+    site = Site("workshop", {"item": "plastic-bar", "per_minute": 30}, (0, 0))
+    site.cells = [{k: c[k] for k in ("machine", "recipe", "x", "y", "item_in", "item_out", "fluid_in", "fluid_out",
+                                     "slot", "sink")} | {"floor": dist.idx} for c in d1["cells"]]
+    base.sites.append(site)
+    refinery = next(c for c in site.cells if c["machine"] == "oil-refinery")
+    room = ws._headroom(w, refinery)
+    assert 150 < room["petroleum-gas"][0] < 260 and room["petroleum-gas"][1] == pytest.approx(100 / 45)
+    assert ws.spare(base, dist, w)["petroleum-gas"] == pytest.approx(room["petroleum-gas"][0], abs=1)
+    assert "petroleum-gas" not in ws.spare(base, dist, w, headroom=False)
+    ws.designs.clear()
+    d2 = ws._design(w, base, {"item": "sulfur", "per_minute": 6.5})
+    assert d2["district"] is dist
+    assert [c["recipe"] for c in d2["cells"]] == ["sulfur"]                 # no second refinery
+    assert "crude-oil" not in d2["plan"].fluids
+    assert '"module": "pumpjack"' in d2["crude_short"]     # one well (600/min) is short of the refinery's 733+238
+    base.sites.append(Site("pumpjack", {"count": 1}, (44.5, -40.5), entities=[("pumpjack", 44.5, -40.5, "north")]))
+    ws.designs.clear()                                      # a second well nobody joined: piped into the crude line
+    d3 = ws._design(w, base, {"item": "sulfur", "per_minute": 6.5})
+    port = ws._pumpjack_ports(w, base, dist)
+    assert d3["routes"].get("crude-oil") and port and d3["nets"].pipe.get(port[0]) == "crude-oil"
+    assert [c["recipe"] for c in d3["cells"]] == ["sulfur"]
+    dist.pumpjacks_joined.add((44.5, -40.5))
+    ws.designs.clear()
+    d2 = ws._design(w, base, {"item": "sulfur", "per_minute": 6.5})
+    assert [c["recipe"] for c in d2["cells"]] == ["sulfur"] and not d2.get("crude_short")   # two wells cover it
+    for c in d2["cells"]:                                   # its gas and water joined to their nets
+        for pt in c["ports"]:
+            if pt["fluid"]:
+                assert d2["nets"].pipe.get(pt["target"]) == pt["fluid"], pt
+    # more gas than the refinery has room for still plans a refinery of its own
+    ws.designs.clear()
+    big = ws._design(w, base, {"item": "sulfur", "per_minute": 60})
+    assert any(c["machine"] == "oil-refinery" for c in big["cells"])
+
+
+@needs_catalog
+def test_gas_a_refinery_burns_into_solid_fuel_is_spare():
+    """Advanced oil processing: petroleum nobody uses goes into solid fuel only so the refinery never stalls. A gas
+    user takes that gas first; it gets no refinery of its own."""
+    from brain.modules import Site
+    from brain.workshop import Workshop
+    kn = _kn()
+    w, base = FakeWorld(kn), PumpBase()
+    ws = Workshop()
+    d1 = ws._design(w, base, {"item": "plastic-bar", "per_minute": 30})
+    assert any(c.get("sink") for c in d1["cells"])
+    dist = d1["district"]
+    dist.nets = d1["nets"]
+    for c in d1["cells"]:
+        dist.used[c["slot"]] = -1
+    site = Site("workshop", {"item": "plastic-bar", "per_minute": 30}, (0, 0))
+    site.cells = [{k: c[k] for k in ("machine", "recipe", "x", "y", "item_in", "item_out", "fluid_in", "fluid_out",
+                                     "slot", "sink")} | {"floor": dist.idx} for c in d1["cells"]]
+    base.sites.append(site)
+    assert ws.spare(base, dist, w)["petroleum-gas"] > 200
+    ws.designs.clear()
+    d2 = ws._design(w, base, {"item": "sulfur", "per_minute": 6.5})
+    assert [c["recipe"] for c in d2["cells"]] == ["sulfur"] and "crude-oil" not in d2["plan"].fluids
