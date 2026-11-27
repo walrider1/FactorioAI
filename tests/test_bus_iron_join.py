@@ -108,3 +108,15 @@ def test_the_oil_scan_looks_at_the_new_field_not_the_two_known_wells():
     wells = w.oil_wells((0, 0), more=True)
     assert looked and looked[0][0] < -200                        # the new field got its full look
     assert len(wells) == 5 and w.oil_rings == 0                  # every well the scan saw is known now
+
+
+def test_purity_only_names_inserters_the_game_has():
+    import json
+    from pathlib import Path
+    from brain import purity
+    data = Path(__file__).resolve().parent.parent / "bots" / "atlas" / "data" / "factorio-base.json"
+    if not data.exists():
+        data = Path(__file__).resolve().parent.parent.parent / "freeplay" / "bots" / "atlas" / "data" / "factorio-base.json"
+    text = data.read_text(encoding="utf-8")
+    assert all(f'"{n}"' in text for n in purity.INSERTERS)
+    assert "filter-inserter" not in purity.INSERTERS and "stack-inserter" not in purity.INSERTERS
