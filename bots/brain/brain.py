@@ -136,8 +136,10 @@ def report(crew: Crew, task: dict, last_results: list[dict]) -> dict:
         shared = agenda_of(crew).summary(crew)
     except Exception:  # noqa: BLE001 - stub crews in tests
         shared = None
+    from .zones import report_of
     return {
         "agenda": shared,
+        "zones": report_of(crew),
         "game_minute": round(w.now_tick() / 3600, 1),
         "minutes_left": round(w.minutes_left, 1),
         "milestones_reached": [m["name"] for m in milestones if m["id"] in reached],
@@ -378,6 +380,11 @@ You never act yourself. A scripted crew carries out your goals at full speed: it
 (gathering plates, ore, stone, wood and coal on the way), unlocks what the kit needs (trigger technologies
 and research), and builds the module. A foreman keeps everything fuelled and feeds the labs. The game keeps
 running while you think, so plan several steps ahead.
+
+The floorplan (when the report has "zones"): the base grows along a main bus. A bus site carries plates from its
+head past reserved slots, and slot factories (sites with a "slot") take their inputs from the bus. When the bus
+runs short, the fix is plates into its head ("trunk" on the bus site, or a bigger smelter feeding it); never
+forbid the bus's trunks and never replace or remove a slot factory to route around the bus (both are refused).
 
 One agenda, shared by every decider ("agenda" in the report): every queued goal with who asked for it, the
 overseer's vetoes, the goals the overseer dropped recently and why, and the latest decisions with their authors.

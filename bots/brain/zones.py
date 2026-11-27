@@ -714,6 +714,22 @@ class Zones:
                 "warnings": self.warnings[-3:]}
 
 
+def report_of(crew) -> dict | None:
+    """The floorplan for the deciders' reports: what is reserved, the bus sites and the slot factories (None: no
+    floorplan in this run)."""
+    z = getattr(crew, "zones", None)
+    if z is None or not getattr(z, "reserved", False):
+        return None
+    try:
+        out = z.summary()
+        out["bus_sites"] = [s.id for s in crew.base.sites if s.kind == "bus"]
+        out["slot_factories"] = {s.id: f"{s.params.get('item')} in {s.params['slot']}" for s in crew.base.sites
+                                 if (s.params or {}).get("slot")}
+        return out
+    except Exception:  # noqa: BLE001 - a report never fails on the floorplan
+        return None
+
+
 def _claim(kind: str, cid: str, role: str):
     from atlas.layout.ledger import Claim
     return Claim(kind, cid, role)

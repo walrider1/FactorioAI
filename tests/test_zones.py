@@ -704,3 +704,18 @@ def test_zones_never_start_in_an_old_world():
         assert zones.after_build(crew, site) == "" and crew.zones is None
     finally:
         zones.ENABLED = old
+
+
+def test_deciders_may_not_route_around_the_bus():
+    from types import SimpleNamespace
+    from brain.overseer import floorplan_guard
+    bus = SimpleNamespace(id=21, kind="bus", params={})
+    slot = SimpleNamespace(id=23, kind="factory", params={"slot": "make-1", "item": "iron-gear-wheel"})
+    plain = SimpleNamespace(id=5, kind="factory", params={"item": "iron-gear-wheel"})
+    sites = {s.id: s for s in (bus, slot, plain)}
+    crew = SimpleNamespace(base=SimpleNamespace(get=sites.get))
+    assert floorplan_guard(crew, {"do": "trunk", "site": 21})
+    assert floorplan_guard(crew, {"do": "replace", "site": 23, "force": True, "with": {"do": "build"}})
+    assert floorplan_guard(crew, {"do": "remove", "site": 23})
+    assert floorplan_guard(crew, {"do": "replace", "site": 5, "with": {"do": "build"}}) is None
+    assert floorplan_guard(crew, {"do": "relink", "site": 23, "item": "iron-plate"}) is None

@@ -1028,7 +1028,9 @@ def situation(crew, alerts: list[dict], doctrine: str = "") -> dict:
     w, base = crew.w, crew.base
     cur = crew.current
     rs = w.research or {}
+    from .zones import report_of
     return {
+        "zones": report_of(crew),
         "game_minute": round(w.now_tick() / 3600, 1),
         "doing_now": w.activity[:100],
         "current_goal": ({"goal": cur["goal"], "minutes": round((w.now_tick() - cur["tick"]) / 3600, 1),
@@ -1112,6 +1114,11 @@ ASSESS_PROMPT = """You are the shift supervisor of a Factorio AI racing to launc
 build order; a scripted crew carries out one goal at a time, and goals can take many minutes. You see the base
 every minute or two, and at once when something new goes wrong. Your job is to keep the base running and moving
 at full speed: amend the plan as soon as a problem appears, not when the current goal happens to end.
+
+The floorplan (when the report has "zones"): the base grows along a main bus. A bus site carries plates from its
+head past reserved slots, and slot factories (sites with a "slot") take their inputs from the bus. When the bus
+runs short, the fix is plates into its head ("trunk" on the bus site, or a bigger smelter feeding it); never
+forbid the bus's trunks and never replace or remove a slot factory to route around the bus (both are refused).
 
 One agenda, shared by every decider ("agenda" in the report): every queued goal with who asked for it, the
 overseer's vetoes, the goals the overseer dropped recently and why, and the latest decisions with their authors.
@@ -1343,6 +1350,12 @@ class Supervisor:
                 continue
             if who != "rules" and forbidden(crew, g) is not None:
                 continue                                 # refused when it ran anyway: not queued at all
+            if who != "rules":
+                from .overseer import floorplan_guard
+                plan_why = floorplan_guard(crew, g)
+                if plan_why is not None:                 # the zones floorplan: the bus is fixed, not bypassed
+                    changed.append(f"{_short(g)}: {plan_why}"[:200])
+                    continue
             try:
                 from .nodes import consumer_block
                 held = consumer_block(crew, g)

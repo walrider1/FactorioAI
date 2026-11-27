@@ -66,6 +66,11 @@ fuel and power alerts, a fixer troubleshoots repeated failures, a foreman refuel
 carries out one goal at a time. Each is narrow and none sees the others' mistakes. You see everything, every few
 game minutes, and you think it through properly before you act.
 
+The floorplan (when the report has "zones"): the base grows along a main bus. A bus site carries plates from its
+head past reserved slots, and slot factories (sites with a "slot") take their inputs from the bus. When the bus
+runs short, the fix is plates into its head ("trunk" on the bus site, or a bigger smelter feeding it); never
+forbid the bus's trunks and never replace or remove a slot factory to route around the bus (both are refused).
+
 One agenda, shared by every decider ("agenda" in the report): every queued goal with who asked for it, the
 overseer's vetoes, the goals the overseer dropped recently and why, and the latest decisions with their authors.
 Read it before you act. Do not ask again for something already queued or running (it is merged, not done twice),
@@ -526,6 +531,26 @@ def _closeout_match(crew, match: dict) -> dict | None:
     return None
 
 
+def floorplan_guard(crew, g: dict) -> str | None:
+    """Why an AI decider may not do this to the zones floorplan (None: it may). The bus is fed by its trunks, and a
+    slot factory takes its inputs from the bus: the fix for a short bus is plates into its head, never a factory
+    torn down and rebuilt elsewhere. The overnight zones test (seed 737373): the overseer forbade the bus head's
+    iron trunk ("existing plate lines will do"), its relink failed 3x, then it ordered the gear and green science
+    slot factories replaced by organic ones."""
+    base = getattr(crew, "base", None)
+    if base is None or not isinstance(g, dict):
+        return None
+    site = base.get(g.get("site")) if g.get("site") is not None else None
+    if site is None:
+        return None
+    if g.get("do") == "trunk" and site.kind == "bus":
+        return f"site {site.id} is the floorplan's bus: its trunks are how plates reach it"
+    if g.get("do") in ("replace", "remove") and (site.params or {}).get("slot"):
+        return (f"site {site.id} is the slot factory of {site.params['slot']}: it takes its inputs from the bus; "
+                "a short input is fixed at the bus (trunk plates into its head), not by moving the factory")
+    return None
+
+
 def _guard_force(crew, g: dict) -> tuple[dict, str | None]:
     """A forced removal passes the sealed-site guard only: the crew's own removal guard (last source of a plate,
     only power station, researching labs, last coal mine, a working site built minutes ago) still holds (run
@@ -581,6 +606,10 @@ def apply_orders(crew, d: dict, log=print, event=lambda kind, **data: None) -> l
             changed.append(f"allowed again: {fs.pop(a)['match']}")
     for f in (d.get("forbid") or [])[:FORBID_MAX]:
         if isinstance(f, dict) and isinstance(f.get("match"), dict) and f["match"]:
+            plan_why = floorplan_guard(crew, f["match"])
+            if plan_why is not None:
+                changed.append(f"forbid {f['match']} refused: {plan_why}"[:240])
+                continue
             hit = _closeout_match(crew, f["match"])
             if hit is not None:
                 changed.append(f"forbid {f['match']} refused: the close-out needs {_short(hit)}")
@@ -622,6 +651,10 @@ def apply_orders(crew, d: dict, log=print, event=lambda kind, **data: None) -> l
         g, refused = _guard_force(crew, {k: v for k, v in g.items() if k != "reflex"})
         if refused:
             changed.append(refused)
+        plan_why = floorplan_guard(crew, g)
+        if plan_why is not None:
+            changed.append(f"not ordered: {_short(g)}: {plan_why}"[:240])
+            continue
         if _bare(g) in busy:                                 # already running or queued: not twice (run
             changed.append(f"already under way: {_short(g)}")    # 20261120-084046: a second coal mine at minute 1)
             continue
@@ -644,7 +677,8 @@ def apply_orders(crew, d: dict, log=print, event=lambda kind, **data: None) -> l
     if isinstance(plan, list) and not str(d.get("plan_why") or "").strip():
         changed.append("plan kept: no plan_why given")
     elif isinstance(plan, list):
-        goals = [g for g in plan if isinstance(g, dict) and g.get("do") in GOAL_DOS][:PLAN_MAX]
+        goals = [g for g in plan if isinstance(g, dict) and g.get("do") in GOAL_DOS
+                 and floorplan_guard(crew, g) is None][:PLAN_MAX]
         drop_forbidden(crew, goals)
         # remembered by key (not tagged: an untagged goal is the plan's own, which pauses and ages as such), so
         # a strategist plan after this one keeps what it does not cover
