@@ -169,3 +169,20 @@ def test_a_coal_feed_hand_mines_only_a_bridge():
     inv["coal"] += 0
     got = Crew._coal_for_feed(crew, 200)
     assert mined == [Crew.FEED_HAND_MINE_MAX] and got == 10 + Crew.FEED_HAND_MINE_MAX   # (the stub's mines add 0)
+
+
+def test_a_steam_station_crafts_the_pipes_its_water_line_needs():
+    from types import SimpleNamespace
+    from brain.modules import SteamPower
+    crafted = []
+    inv = {"pipe": 12, "iron-plate": 100}
+
+    def craft(recipe, n):
+        crafted.append((recipe, n))
+        inv[recipe] = inv.get(recipe, 0) + n
+
+    w = SimpleNamespace(inventory=inv, craft=craft)
+    SteamPower._pipes_for(w, {"path": [(0, y) for y in range(15)], "parts": [(0, 0, "north", "pipe")]})
+    assert crafted == [("pipe", 4)]
+    SteamPower._pipes_for(w, {"path": [(0, 0)], "parts": []})
+    assert crafted == [("pipe", 4)]                                 # enough held: nothing crafted

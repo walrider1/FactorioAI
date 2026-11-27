@@ -581,6 +581,7 @@ class SteamPower(Module):
                 w.bad_shore.add(land)
             raise PumpRejected(f"the shore tile {land} did not take a pump: {r['code']} {msg}")
         w.used.add(land)
+        self._pipes_for(w, lay)
         ab.lay(w, "pipe", lay["path"])
         pole = self._place_parts(w, lay, coal)
         w.log(f"[power] pump at {land} facing {d}, {lay['engines']} engine(s), {len(lay['path'])} pipes")
@@ -588,11 +589,25 @@ class SteamPower(Module):
 
     def place_tap(self, w: FreeWorld, lay: dict, coal: int) -> Tile:
         """A station on the water line of another: the pipe (whose first tile joins the old line), then the rest."""
+        self._pipes_for(w, lay)
         ab.lay(w, "pipe", lay["path"])
         pole = self._place_parts(w, lay, coal)
         w.log(f"[power] tapped the water line of site {lay['tap_site']}: {lay['engines']} engine(s), "
               f"{len(lay['path'])} pipes, no new pump")
         return pole
+
+    @staticmethod
+    def _pipes_for(w: FreeWorld, lay: dict) -> None:
+        """Craft the pipes this layout's water line and parts need beyond what is held: the kit carries a fixed 12,
+        and a longer line ran out halfway (the zones test, seed 737373: "pipe line (2, 55)->(2, 47):
+        not_in_inventory" five times over, each time a half-built station taken down again)."""
+        need = len(lay.get("path") or []) + sum(1 for *_, name in lay.get("parts") or [] if name == "pipe")
+        short = need - w.inventory.get("pipe", 0)
+        if short > 0 and w.inventory.get("iron-plate", 0) >= short:
+            try:
+                w.craft("pipe", short)
+            except BuildError:
+                pass                                    # the lay below says what is missing
 
     def _place_parts(self, w: FreeWorld, lay: dict, coal: int) -> Tile:
         bx, by = lay["centre"]
