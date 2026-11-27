@@ -155,6 +155,8 @@ class Telemetry:
                         "fixer": {"notes": getattr(crew, "fix_notes", [])[-8:],
                                   "dig_outs": list(getattr(crew.w, "trap_notes", []))[-8:]},
                         "designs": getattr(crew, "designs", [])[-12:],
+                        "design": self._design(crew),
+                        "zones": self._zones(crew),
                         "supervisor": {"notes": (crew.supervisor.notes[-8:] if getattr(crew, "supervisor", None)
                                                  else []),
                                        "alerts": [{k: a.get(k) for k in ("level", "what")}
@@ -179,6 +181,36 @@ class Telemetry:
             out["strategist_name"] = st.name
             out["doctrine"] = getattr(st, "doctrine", "")
         return out
+
+    def _design(self, crew):
+        try:
+            from .viz import design_feed
+            return design_feed(crew)
+        except Exception:  # noqa: BLE001 - the overlay's feed never disturbs the game
+            return None
+
+    ZONES_PLAN_EVERY = 3.0         # seconds between rewrites of zones_plan.json while it changes
+
+    def _zones(self, crew):
+        """The floorplan's live part for bot_live.json; the picture itself goes to zones_plan.json on a change."""
+        try:
+            from .viz import zones_key, zones_plan
+            key = zones_key(crew)
+            if key is None:
+                return None
+            now = time.time()
+            if self.dir and (key != getattr(self, "_zkey", None) or now - getattr(self, "_zat", 0) > 60) \
+                    and now - getattr(self, "_zat", 0) >= self.ZONES_PLAN_EVERY:
+                plan = zones_plan(crew)
+                if plan is not None:
+                    tmp = self.dir / "zones_plan.json.tmp"
+                    tmp.write_text(json.dumps(plan, default=str), encoding="utf-8")
+                    os.replace(tmp, self.dir / "zones_plan.json")
+                    self._zkey, self._zat = key, now
+                    self._zrev = int(now)
+            return {"plan_rev": getattr(self, "_zrev", None)}
+        except Exception:  # noqa: BLE001
+            return None
 
     def flush(self) -> None:
         if not self.dir:

@@ -438,6 +438,8 @@ class Runs:
                                   for s in (live.get("base") or []) if s.get("at") or s.get("near")]}
         sup = live.get("supervisor") or {}
         out["supervisor_notes"] = (sup.get("notes") or [])[-4:]
+        out["design"] = live.get("design")                  # the brain's factory designer, live (viz.py)
+        out["zones"] = live.get("zones")                    # the brain's floorplan: its rev (the picture: below)
         clock = self.clock(d)
         real = {"now": round(clock.now(time.time()) / 60, 3), "ratio": round(clock.ratio(), 4),
                 "game": round((clock.ticks[-1] if clock.ticks else 0) / 3600, 3)}
@@ -546,6 +548,13 @@ def _handler(runs: Runs):
                         return self._send(404, b'{"error":"no such run"}', "application/json")
                     same_map = "pb=map" in (self.path.split("?", 1)[1:] or [""])[0].split("&")
                     return self._send(200, json.dumps(runs.overlay(d, same_map), default=str).encode(), "application/json")
+                if path.startswith("/api/zones-plan/"):            # the brain's floorplan picture (viz.py)
+                    rid = path.rsplit("/", 1)[-1]
+                    d = runs.latest() if rid == "latest" else runs.find(rid)
+                    f = d / "zones_plan.json" if d is not None else None
+                    if f is None or not f.exists():
+                        return self._send(404, b'{"error":"no plan"}', "application/json")
+                    return self._send(200, f.read_bytes(), "application/json")
                 if path.startswith("/api/atlas-plan/"):            # the Atlas plan: large, fetched once per change
                     rid = path.rsplit("/", 1)[-1]
                     d = runs.latest() if rid == "latest" else runs.find(rid)

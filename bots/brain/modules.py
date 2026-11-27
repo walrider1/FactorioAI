@@ -1269,6 +1269,8 @@ class Factory(Module):
                     bad = w.think(f"checking the belt routes into a {item} factory at ({focus[0]:.0f}, "
                                   f"{focus[1]:.0f})", probe, grid, d)
                     if bad:
+                        from . import viz
+                        viz.design_attempt(item, r, focus, d.placer, d, "refused", f"route check: {bad[0]}")
                         walled[tuple(focus)] = bad[0]
                         causes["walled-in input"] = causes.get("walled-in input", 0) + 1
                         tried.append(f"{r}/min at ({focus[0]:.0f}, {focus[1]:.0f}) [probe: {bad[0][:90]}]")
@@ -1444,6 +1446,8 @@ class Factory(Module):
             # one belt per plate first; a chain one belt cannot thread through every consumer falls back to the
             # chest inputs (replays of saved terrain: feeds designed 41 of 54 cases, chests 38, not the same ones)
             for fed in ((feeds, frozenset()) if feeds else (frozenset(),)):
+                from . import viz
+                viz.design_attempt(item, r, focus, placer, None, "drawing")
                 d = w.think(f"designing a {item} factory ({who}): {r}/min at ({focus[0]:.0f}, {focus[1]:.0f})",
                             design_factory, grid, item, r, near=focus, placer=placer,
                             llm=self.designer if placer == "llm" else None, log=lambda *a: None,
@@ -1453,6 +1457,9 @@ class Factory(Module):
                 if d.ok:
                     break
             who = f"designer {self.designer.model}" if d.placer == "llm" else "search"
+            from . import viz
+            viz.design_attempt(item, r, focus, d.placer, d, "kept" if d.ok else "refused",
+                               "" if d.ok else (d.problems[0] if d.problems else "no layout"))
             w.log(f"[fab] {who}: {r}/min, room {margin} at ({focus[0]:.0f}, {focus[1]:.0f}): {d.summary()} "
                   f"({time.monotonic() - t0:.1f} s" + (f", ${self.designer.cost_usd:.3f} so far)"
                                                          if self.designer is not None else ")"))
@@ -1686,7 +1693,9 @@ class Factory(Module):
         gap the site keeps (repairs place it later), as with fab designs. Its input ports are feed ports on the
         spine edge, fed by the segment bus's taps (zones.bus_first lays them before this build; zones.feed_ports
         marks them fed). A product another slot uses goes onto the bus; any other into a chest past its port."""
+        from . import viz
         from . import zones as zmod
+        viz.design_slot(d.block)
         placed, failed, gaps = zmod.place_steps(w, d.all_steps())
         block = d.block
         site = Site(self.name, {"item": p["item"], "per_minute": float(d.per_minute), "slot": block.slot.id,

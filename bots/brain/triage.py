@@ -57,6 +57,9 @@ def _short(goal: dict) -> str:
         (f" with {goal['with'].get('module')}" if isinstance(goal.get("with"), dict) else "")
 
 
+SETTLE_MIN = 8.0               # game minutes a newly laid belt gets to fill before a cause-less relink takes it up
+
+
 def _links_into(crew, site, item: str) -> list[dict]:
     ends = {tuple(pt["end"]) for pt in site.params.get("ports", []) if pt.get("item") == item}
     return [ln for ln in getattr(crew, "links", []) if tuple((ln.get("port") or {}).get("end") or ()) in ends
@@ -216,6 +219,19 @@ def diagnose(crew, site_id, item: str | None = None, depth: int = 0) -> dict:
                    why=f"its {item} input was relinked within {NO_EFFECT_MIN:.0f} min and it still starves: "
                        "this time from a different source",
                    avoid=list(dict.fromkeys(roots)))
+        return out
+    young = [ln for ln in _links_into(crew, site, item) if ln.get("minute") is not None]
+    try:
+        now = crew._minute()
+    except Exception:  # noqa: BLE001 - stub crews in tests
+        now = None
+    if now is not None and young and all(now - float(ln["minute"]) < SETTLE_MIN for ln in young):
+        # a belt laid minutes ago is still filling: taking it up and laying it again only restarts that (the zones
+        # test, seed 626262: red science's copper and the bus's copper head were relinked with "no measurable
+        # cause", each right after its belt was laid)
+        age = min(now - float(ln["minute"]) for ln in young)
+        out.update(cause="settling", fix={"skip": True},
+                   why=f"its {item} belt was laid {age:.0f} min ago and is still filling: no relink")
         return out
     out["why"] = "no measurable cause (belt there, source running and not overdrawn): relinked once"
     return out
