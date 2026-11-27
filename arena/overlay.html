@@ -1181,13 +1181,19 @@ async function zonesPlan(d) {
     ZN.plan = P; ZN.img = c; ZN.bus = bus;
   } catch (e) { console.error(e); }
 }
-const LETTER = { "iron-gear-wheel": "G", "electronic-circuit": "E", "automation-science-pack": "R", "logistic-science-pack": "L",
-  "chemical-science-pack": "B", "advanced-circuit": "A", "engine-unit": "N", "copper-cable": "W", "plastic-bar": "P", "sulfur": "S" };
+// every slot kind has its own colour, a short word inside and a full name in the key under the map
+const SLOT = { "iron-gear-wheel": ["#9aa3ab", "GEAR", "gears"], "electronic-circuit": ["#3fb8a0", "CIRC", "circuits"],
+  "copper-cable": ["#c97b45", "WIRE", "copper wire"], "automation-science-pack": ["#e0503c", "RED", "red science"],
+  "logistic-science-pack": ["#58c45a", "GRN", "green science"], "chemical-science-pack": ["#4a90e0", "BLUE", "blue science"],
+  "research": ["#f4efe6", "LABS", "labs"], "advanced-circuit": ["#c070e0", "ADV", "adv. circuits"],
+  "plastic-bar": ["#e8e2d6", "PLAS", "plastic"], "sulfur": ["#e8d44a", "SULF", "sulfur"], "engine-unit": ["#b98a55", "ENG", "engines"] };
+const ZONE_WORD = { silo: "SILO", oil: "OIL", science: "LABS", reserve: "" };
 function drawZones(t) {
   const P = ZN.plan, cv = $("zmapc"), g = cv.getContext("2d");
   g.clearRect(0, 0, cv.width, cv.height);
   if (!P || !ZN.img) return;
-  const k = Math.min(cv.width / P.w, cv.height / P.h), ox = (cv.width - P.w * k) / 2, oy = (cv.height - P.h * k) / 2;
+  const KEY = 18, mh = cv.height - KEY;                             // the key's row under the map
+  const k = Math.min(cv.width / P.w, mh / P.h), ox = (cv.width - P.w * k) / 2, oy = (mh - P.h * k) / 2;
   const X = wx => ox + (wx - P.origin[0]) / P.cell * k, Y = wy => oy + (wy - P.origin[1]) / P.cell * k;
   g.imageSmoothingEnabled = false;
   g.drawImage(ZN.img, ox, oy, P.w * k, P.h * k);
@@ -1196,24 +1202,41 @@ function drawZones(t) {
     if ((i * 7 + Math.floor(t / 90)) % 9 === 0) { g.fillStyle = "#ff9a1f"; g.fillRect(ox + bx * k, oy + by * k, k + .5, k + .5); }
   }
   let built = 0, planned = 0;
-  g.font = "800 13px 'Barlow Condensed', 'Arial Narrow', sans-serif"; g.textAlign = "center"; g.textBaseline = "middle";
+  const shown = [];
+  g.textAlign = "center"; g.textBaseline = "middle";
   for (const s of P.slots || []) {
     const [x0, y0, w, h] = s.rect, px = X(x0), py = Y(y0), pw = w / P.cell * k, ph = h / P.cell * k;
+    const sl = SLOT[s.item] || null, col = sl ? sl[0] : "#57514a";
     if (s.item) planned++;
+    if (sl && !shown.includes(s.item)) shown.push(s.item);
+    g.font = `800 ${Math.max(8, Math.min(12, Math.floor(pw / 3)))}px 'Barlow Condensed', 'Arial Narrow', sans-serif`;
     if (s.state === "built") {
-      built++; g.fillStyle = "#ff9a1f"; g.fillRect(px, py, pw, ph);
-      g.fillStyle = "rgba(31,19,6,.35)"; g.fillRect(px, py + ph * .66, pw, ph * .34);
-      g.fillStyle = "#1f1306"; g.fillText(LETTER[s.item] || "■", px + pw / 2, py + ph / 2);
+      built++; g.fillStyle = col; g.fillRect(px, py, pw, ph);
+      g.fillStyle = "#1f1306"; g.fillText(sl ? sl[1] : "", px + pw / 2, py + ph / 2);
     } else if (s.state === "building") {
       hazard(g, px, py, pw, ph, t);
-      g.strokeStyle = `rgba(255,154,31,${.5 + .5 * Math.sin(t / 180)})`; g.lineWidth = 2; g.strokeRect(px - 2, py - 2, pw + 4, ph + 4);
+      g.strokeStyle = col; g.lineWidth = 2; g.strokeRect(px - 1, py - 1, pw + 2, ph + 2);
     } else if (s.state === "planned") {
-      g.strokeStyle = "#ff9a1f"; g.lineWidth = 1.5; g.strokeRect(px + .75, py + .75, pw - 1.5, ph - 1.5);
-      g.fillStyle = "#ff9a1f"; g.fillText(LETTER[s.item] || "", px + pw / 2, py + ph / 2);
+      g.fillStyle = "rgba(20,18,16,.55)"; g.fillRect(px, py, pw, ph);
+      g.strokeStyle = col; g.lineWidth = 1.5; g.strokeRect(px + .75, py + .75, pw - 1.5, ph - 1.5);
+      g.fillStyle = col; g.fillText(sl ? sl[1] : "", px + pw / 2, py + ph / 2);
     } else {
       g.strokeStyle = "#57514a"; g.lineWidth = 1; g.setLineDash([3, 3]); g.strokeRect(px + .5, py + .5, pw - 1, ph - 1); g.setLineDash([]);
-      g.fillStyle = "#57514a"; g.fillText(s.zone === "silo" ? "silo" : s.zone === "science" ? "labs" : "", px + pw / 2, py + ph / 2);
+      g.fillStyle = "#6f6960"; g.fillText(ZONE_WORD[s.zone] || "", px + pw / 2, py + ph / 2);
     }
+  }
+  // the key: each slot kind's colour and name, then how built / planned look
+  g.font = "600 10px 'JetBrains Mono', Consolas, monospace"; g.textAlign = "left"; g.textBaseline = "middle";
+  let kx = 2;
+  const ky = cv.height - KEY / 2;
+  for (const it of shown) {
+    const [c, , name] = SLOT[it];
+    g.fillStyle = c; g.fillRect(kx, ky - 4, 8, 8); kx += 11;
+    g.fillStyle = "#a8a197"; g.fillText(name, kx, ky); kx += g.measureText(name).width + 8;
+  }
+  for (const txt of ["filled = built", "outline = planned"]) {
+    if (kx + g.measureText(txt).width > cv.width) break;
+    g.fillStyle = "#6f6960"; g.fillText(txt, kx, ky); kx += g.measureText(txt).width + 8;
   }
   setText("zmapCount", planned ? `${built}/${planned} blocks · bus ${P.bus_laid || 0}` : `${(P.slots || []).length} slots reserved`);
   if (ZN.pos) {                                                     // the character
