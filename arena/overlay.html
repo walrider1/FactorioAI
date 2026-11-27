@@ -1228,14 +1228,16 @@ function renderDesign(D) {
   // retry keeps the last attempt on screen, greyed, until the new one arrives
   if (D && D.ents && D.ents.length) ZN.prev = { item: D.item, w: D.w, h: D.h, ents: D.ents };
   const prev = D && ZN.prev && ZN.prev.item === D.item ? ZN.prev : null;
-  document.body.classList.toggle("designing", !!(D && D.ents && D.ents.length) || !!(D && D.status === "drawing" && prev));
+  document.body.classList.toggle("designing", !!(D && D.ents && D.ents.length)
+    || !!(D && D.status === "drawing"));
+  if (D) { ZN.age = +D.age || 0; ZN.ageAt = performance.now(); }
   ZN.D = D;
   if (!D) return;
   const key = `${D.item}|${D.attempt}|${D.status}|${D.slot}`;
   if (key !== ZN.key) { ZN.key = key; ZN.t0 = performance.now(); if (D.status !== "building") ZN.flash.clear(); }
   setText("dsgName", `${nice(D.item)} · ${D.rate}/min`);
   const st = { drawing: "DESIGNING", refused: "REFUSED", kept: "DESIGNED", building: "BUILDING" }[D.status] || "";
-  setText("dsgState", D.attempt ? `${st} · #${D.attempt}` : st);
+  setText("dsgState", D.status === "drawing" ? "" : D.attempt ? `${st} · #${D.attempt}` : st);
   setText("dsgWho", PLACER[D.placer] || D.placer || "");
   setText("dsgAt", D.at ? `at (${D.at[0]}, ${D.at[1]})` : (D.slot ? `slot ${D.slot}` : ""));
   const why = $("dsgWhy");
@@ -1252,15 +1254,51 @@ function renderDesign(D) {
   $("dsgBar").style.width = `${D.status === "building" ? pct : 0}%`;
   $("dsgBar").classList.toggle("done", pct >= 100);
 }
+// A first design attempt has no layout yet: the machines it has to fit, each as a 3x3 box (the box being worked
+// on pulses), and the plates belted in.
+function drawRoster(g, cv, R, t) {
+  const rows = [...R.filter(r => r[2] !== "in"), ...R.filter(r => r[2] === "in")];
+  if (!rows.length) {                                               // (a bot without the roster feed) the area
+    const a = Math.min(cv.width, cv.height) - 40, x = (cv.width - a) / 2, y = (cv.height - a) / 2;
+    g.strokeStyle = "#57514a"; g.lineWidth = 1; g.setLineDash([4, 4]); g.strokeRect(x + .5, y + .5, a, a); g.setLineDash([]);
+    return;
+  }
+  const lh = Math.min(30, Math.floor((cv.height - 8) / rows.length)), box = Math.min(22, lh - 6), lx = 132;
+  let all = 0; rows.forEach(r => { if (r[2] !== "in") all += r[1]; });
+  const hot = Math.floor(t / 500) % Math.max(1, all);
+  let k = 0;
+  g.textBaseline = "middle"; g.textAlign = "left";
+  rows.forEach((r, i) => {
+    const y = 4 + i * lh + lh / 2, inp = r[2] === "in";
+    g.fillStyle = inp ? "#7f95a8" : "#d8cfc2"; g.font = "700 14px 'Barlow Condensed', sans-serif";
+    g.fillText(nice(r[0]).slice(0, 18), 2, y);
+    if (inp) {                                                       // a belt coming in
+      g.fillStyle = "#7f95a8"; g.font = "600 12px 'JetBrains Mono', Consolas, monospace";
+      g.fillText(`→ ${r[1]} input${r[1] > 1 ? "s" : ""}`, lx, y);
+      return;
+    }
+    for (let j = 0; j < r[1]; j++, k++) {
+      const x = lx + j * (box + 5);
+      if (x + box > cv.width) break;
+      g.strokeStyle = k === hot ? "#ff9a1f" : "#57514a"; g.lineWidth = k === hot ? 2 : 1;
+      g.strokeRect(x + .5, y - box / 2 + .5, box, box);
+      if (k === hot) { g.fillStyle = "rgba(255,154,31,.18)"; g.fillRect(x + 1, y - box / 2 + 1, box - 1, box - 1); }
+    }
+  });
+}
 function drawDesign(t) {
   let D = ZN.D;
   const cv = $("dsgc"), g = cv.getContext("2d");
   g.clearRect(0, 0, cv.width, cv.height);
   if (!D) return;
   const age = performance.now() - ZN.t0;
-  if (!D.ents || !D.ents.length) {                                  // a retry being drawn: the last attempt, greyed
-    if (!ZN.prev || ZN.prev.item !== D.item) return;
-    D = { ...ZN.prev, status: "old" };
+  if (!D.ents || !D.ents.length) {
+    if (D.status === "drawing") {                                   // how long this attempt has been drawing
+      const s = Math.max(0, Math.round(ZN.age + (performance.now() - ZN.ageAt) / 1000));
+      setText("dsgState", `DESIGNING${D.attempt ? ` · #${D.attempt + 1}` : ""} · ${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`);
+    }
+    if (ZN.prev && ZN.prev.item === D.item) D = { ...ZN.prev, status: "old" };   // a retry: the last attempt, greyed
+    else { drawRoster(g, cv, D.roster || [], t); return; }                       // a first attempt: what it must fit
   }
   const k = Math.min(cv.width / Math.max(1, D.w), cv.height / Math.max(1, D.h)), ox = (cv.width - D.w * k) / 2, oy = (cv.height - D.h * k) / 2;
   const n = D.ents.length, placed = D.status === "building" ? (D.placed || 0) : 0;
