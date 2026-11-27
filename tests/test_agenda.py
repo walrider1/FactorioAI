@@ -185,3 +185,16 @@ def test_a_crew_box_goes_past_the_last_furnace_and_is_collected_from_first():
     assert site.params["crew_boxes"]["copper-plate"] == [[-8.5, 82.5]]
     assert not any(what == "copper-plate" for *_, what in site.chests)    # never a source for links
     assert crew.crew_boxes() == []                                        # once per line
+
+
+def test_a_slot_factorys_own_slot_is_open_to_its_poles_other_slots_are_not():
+    from types import SimpleNamespace
+    crew, w, minute = _crew()
+    own = SimpleNamespace(id="make-3", tiles={(1, 1), (1, 2)})
+    other = SimpleNamespace(id="make-2", tiles={(5, 5)})
+    w.zones = SimpleNamespace(slots=[own, other], refused_slots=lambda: own.tiles | other.tiles)
+    w.seen, w.blocked, w.keepout = {(1, 1), (1, 2), (5, 5)}, (lambda t: False), set()
+    site = Site("factory", {"item": "logistic-science-pack", "slot": "make-3"}, (0, 0))
+    ok = crew._pole_freer(crew._own_slot(site))
+    assert ok((1, 1)) and ok((1, 2)) and not ok((5, 5))
+    assert not crew._pole_freer()((1, 1))                         # any other site: no pole in a slot

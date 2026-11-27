@@ -1484,7 +1484,17 @@ class Crew:
         if "designed for" in site.note:
             msg += f" ({site.note.split('; ', 1)[-1]})"
         if site.electric or (site.kind == "steam_power" and len(self.base.of("steam_power")) > 1):
-            msg += "; " + self.connect(site)
+            try:
+                msg += "; " + self.connect(site)
+            except BuildError as exc:
+                # the site stands: an unpowered build is not a failed one (the zones test, seed 626262: green science
+                # stood complete after 28 minutes, was reported FAILED for its power, and the deciders ordered it
+                # rebuilt); the power alert queues its connect
+                site.powered = False
+                msg += f"; NOT POWERED YET: {str(exc)[:140]} (a connect goal follows)"
+                from .agenda import agenda_of
+                agenda_of(self).propose(self, {"do": "connect", "site": site.id,
+                                               "reflex": "rules: built, but not on the power network yet"}, "rules")
         if site.kind == "steam_power" and coal_belts_ready(self.kn):
             try:
                 self._coal_port(site)
@@ -2972,7 +2982,7 @@ class Crew:
             return (f"plugged in {plugged} engine(s) with a pole each" if plugged else "already powered") + \
                 (self.short_note() if site.kind != "steam_power" else "")
         self.w.doing(f"routing power to site {site.id}")
-        free = self._pole_freer()
+        free = self._pole_freer(self._own_slot(site))
         # Every group of the site's poles out of wire reach of the others (two pumpjacks on wells far apart,
         # cells between empty slots) is joined on its own: one bridge powers only the group it starts from.
         net = set(anchors)
@@ -5937,15 +5947,27 @@ class Crew:
             out |= {(st[0] + k * dx, st[1] + k * dy) for k in range(3)}
         return out
 
-    def _pole_freer(self):
+    def _pole_freer(self, allow=frozenset()):
         """A test for tiles a pole may go on (route_poles calls it per tile: the heads are looked up once). Never on
         a line's head (run 20261125-214645: a pole on the start of site 19's copper line left its plates no way
-        out but taps upstream of five of its six furnaces)."""
+        out but taps upstream of five of its six furnaces). `allow`: reserved tiles this site may use anyway (a
+        slot factory's own slot)."""
         heads = self.line_heads()
         z = getattr(self.w, "zones", None)
         if z is not None and z.refused_slots():          # poles may cross the zones' corridors, never their slots
-            heads = set(heads) | z.refused_slots()
+            heads = set(heads) | (z.refused_slots() - set(allow))
         return lambda t: t in self.w.seen and not self.w.blocked(t) and t not in self.w.keepout and t not in heads
+
+    def _own_slot(self, site) -> set:
+        """The tiles of the zone slot a slot factory stands in: its own poles may bridge across them (the zones test,
+        seed 626262: green science in slot make-3 was built, then 'no pole route from site 25 to the network',
+        because the bridge between its pole groups had to stand inside its own slot, which poles kept off)."""
+        z = getattr(self.w, "zones", None)
+        sid = (getattr(site, "params", None) or {}).get("slot")
+        if z is None or not sid:
+            return set()
+        sl = next((q for q in getattr(z, "slots", []) or [] if q.id == sid), None)
+        return set(sl.tiles) if sl is not None else set()
 
     def _can_power(self, t: tuple[int, int], avoid: set = frozenset()) -> bool:
         try:
