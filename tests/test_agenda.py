@@ -111,11 +111,32 @@ def test_research_without_labs_builds_the_labs_first():
         crew.base.add(Site("labs", {"count": 2}, (0, 0)))
         raise RuntimeError("stop here: the labs stand")
     crew.build = build
+    crew.base.add(Site("steam_power", {"engines": 1}, (9, 9)))
     try:
         crew.research("automation")
     except RuntimeError:
         pass
     assert built == [{"do": "build", "module": "labs", "count": 2}]
+
+
+def test_labs_first_builds_their_power_first_when_there_is_none():
+    crew, w, minute = _crew()
+    built = []
+    crew.kn.tech_path = lambda t: [t]
+    crew.kn.is_trigger = lambda t: False
+    crew.log = lambda m: None
+
+    def build(goal):
+        built.append(goal["module"])
+        if goal["module"] == "labs":
+            crew.base.add(Site("labs", {"count": 2}, (0, 0)))
+            raise RuntimeError("stop here")
+    crew.build = build
+    try:
+        crew.research("automation")
+    except RuntimeError:
+        pass
+    assert built == ["steam_power", "labs"]
 
 
 def test_the_lane_never_goes_fetching_coal():

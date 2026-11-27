@@ -3766,6 +3766,9 @@ class Crew:
                 if self.current is not None:
                     self.current["extra_min"] = (float(self.current.get("extra_min") or 0.0)
                                                  + MODULE_BUDGET_MIN.get("labs", GOAL_BUDGET_MIN["build"]))
+                if not self.base.of("steam_power"):    # labs draw power: the first station before them (the
+                    self.log("[crew] power first: labs need a steam station")   # zones test, seed 626262)
+                    self.build({"do": "build", "module": "steam_power", "engines": 1})
                 self.build({"do": "build", "module": "labs", "count": 2})
             except BuildError as exc:
                 raise BuildError(f"research {tech} needs labs, and building them first failed: {str(exc)[:160]}")                     from None
