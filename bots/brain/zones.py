@@ -72,11 +72,21 @@ from .roadmap import SCIENCE_RATE as _ROAD  # noqa: E402
 
 SEGMENTS = {1: {"automation-science-pack": _ROAD["automation-science-pack"] / 60,
                 "logistic-science-pack": _ROAD["logistic-science-pack"] / 60}}
+# Segment 2, the blue era, is cumulative: the whole floorplan planned again for red, green and blue together. Blocks
+# that keep their design keep their slot (and stay built); blocks that change (gears and circuits grow for engines
+# and advanced circuits, the labs take blue too) are reworked in their slots; the new ones (advanced circuits,
+# engines, blue science) take the free make slots; the bus is patched (atlas relay: pieces no longer planned come
+# up, missing ones go down). Oil products and steel come into the spine head by trunk, like the plates.
+SEGMENTS[2] = {**SEGMENTS[1], "chemical-science-pack": _ROAD["chemical-science-pack"] / 60}
+# items a segment takes in at its head that the brain must already make before it opens (else its new blocks wait)
+SEGMENT_INPUTS = {2: ("plastic-bar", "sulfur", "steel-plate")}
+PLAN_UPTO = 2             # the floorplan reserves land for the eras up to this one (falls back to 1 when it fits not)
 SEGMENT_ZONES = ("make", "science")       # smelting stays with the brain's fields; the spine head gets their lines
 # a segment opens only once these are unlocked (and see ready()). The strip designer needs assemblers and
 # long-handed inserters (automation): the zones test, seed 737373, researched logistics first, and segment 1
 # failed "no layout candidate" until automation was in
-OPEN_RECIPES = {1: {"underground-belt", "assembling-machine-1", "long-handed-inserter"}}
+OPEN_RECIPES = {1: {"underground-belt", "assembling-machine-1", "long-handed-inserter"},
+                2: {"chemical-science-pack", "advanced-circuit", "engine-unit"}}
 
 
 # ==================================================================== the brain's world as an Atlas map scan
@@ -494,13 +504,16 @@ class Zones:
         centre = (base.centre if base is not None else None) or getattr(world, "pos", (0.0, 0.0))
         return {"centre": tuple(centre), "yard": start_yard(world, base, centre),
                 "scan": scan_from_world(world, centre), "blocked": _dilate(site_tiles(world, base), SITE_MARGIN),
-                "want": slot_demand(1, kit_for(world))}
+                "want": slot_demand(PLAN_UPTO, kit_for(world)), "want_min": slot_demand(1, kit_for(world))}
 
     def plan(self, world=None, base=None, log=None, snap: dict | None = None):
         """The start yard and the floorplan from a snapshot (no game actions): (centre, yard, floorplan or None).
         With `snap` it touches nothing live, so it may run on a worker thread; apply() puts it into effect."""
         snap = snap or self.snapshot(world, base)
         fp = plan_floor(snap["scan"], snap["yard"], snap["blocked"], snap["want"], snap["centre"], log=log)
+        if fp is None and snap.get("want_min") and snap["want_min"] != snap["want"]:
+            # no room for the later eras' slots: segment 1's alone (that world stays in segment 1)
+            fp = plan_floor(snap["scan"], snap["yard"], snap["blocked"], snap["want_min"], snap["centre"], log=log)
         return snap["centre"], snap["yard"], fp
 
     def apply(self, centre, yard, fp, log=None) -> int:
@@ -656,6 +669,14 @@ class Zones:
     def is_open(self, n: int) -> bool:
         return ENABLED and n in self.opened
 
+    @property
+    def current(self) -> int | None:
+        """The live segment: the latest opened (an earlier one is superseded, its blocks carried over or reworked)."""
+        return max(self.opened) if self.opened else None
+
+    def live(self) -> list[int]:
+        return [self.current] if self.opened else []
+
     def ready(self, n: int, crew) -> tuple[bool, str]:
         """May segment n open? Segment 1: reservations made, underground belts unlocked, electric mining and a
         steam station built."""
@@ -667,6 +688,8 @@ class Zones:
             return False, f"segment {n} is not planned yet (hybrid-plan step 6)"
         if n > 1 and not self.is_open(n - 1):
             return False, f"segment {n - 1} first"
+        if n > 1 and self.current != n - 1:
+            return False, f"segment {self.current} is live"
         kn = getattr(crew, "kn", None)
         unlocked = set(getattr(kn, "unlocked", ()) or ())
         if not OPEN_RECIPES.get(n, set()) <= unlocked:
@@ -677,6 +700,24 @@ class Zones:
             return False, "no electric mining yet"
         if "steam_power" not in kinds:
             return False, "no steam station yet"
+        if n > 1:
+            prev = self.segment(n - 1)
+            left = [b.key for b in prev.blocks if b.ok and not b.growth and b.spec.kind == "make" and not self.is_built(b)]
+            if left:
+                return False, f"segment {n - 1}'s blocks first ({', '.join(left[:3])})"
+            makes = getattr(crew, "makes", None)
+            short = [i for i in SEGMENT_INPUTS.get(n, ())
+                     if not ((makes(i) if makes is not None else False) or _spare(crew, i) > 0)]
+            if short:
+                return False, f"its head takes {', '.join(short)}: nothing makes them yet"
+            try:
+                fp = self.floorplan()
+                need = slot_demand(n, kit_for(self.__dict__.get("_world")))
+                have = {z: sum(1 for s in fp.slots if s.zone == z and s.corridor == "spine") for z in ("make", "reserve")}
+                if have["make"] + have["reserve"] < need["make"]:
+                    return False, f"the floorplan has {have['make'] + have['reserve']} make slots, it needs {need['make']}"
+            except Exception:  # noqa: BLE001 - no floorplan at hand: design_segment says why
+                pass
         return True, ""
 
     def segment(self, n: int, world=None, kit=None, scan=None) -> Segment:
@@ -703,8 +744,11 @@ class Zones:
 
     def open_segment(self, n: int, world=None, kit=None, minute: float = 0.0, log=None) -> Segment:
         seg = self.segment(n, world, kit)
+        fresh = n not in self.opened
         self.opened.setdefault(n, {"built": {}, "minute": minute, "kit": seg.kit,
                                    "growth": any(b.growth for b in seg.blocks)})
+        if fresh and n > 1 and (n - 1) in self.opened:
+            self._carry_over(n - 1, n, seg, log)
         if seg.bus is not None:                  # the planned bus's land: no organic belt or pole crosses it now
             self.bus_tiles = set(self.__dict__.get("bus_tiles") or set()) | \
                 {t for e in seg.bus.entities for t in e.tiles}
@@ -715,16 +759,47 @@ class Zones:
                 + (f": {seg.problems[0]}" if seg.problems else ""))
         return seg
 
+    def _carry_over(self, old: int, new: int, seg: Segment, log=None) -> None:
+        """Segment `new` replaces `old`: a block whose design is the same in the same slot stays built; a built
+        block whose design changed (or that the new plan drops) is listed for rework (rework_old: its site comes
+        up, then the new block goes into the slot)."""
+        prev = self.segment(old)
+        st_old, st_new = self.opened[old], self.opened[new]
+        built_old = st_old.get("built", {})
+        by_key = {b.key: b for b in prev.blocks if b.ok}
+        rework, kept = [], []
+        for b in seg.blocks:
+            p = by_key.get(b.key)
+            if p is None or p.key not in built_old:
+                continue
+            if b.ok and _same_block(p, b):
+                st_new.setdefault("built", {})[b.key] = built_old[p.key]
+                kept.append(b.key)
+            else:
+                rework.append({"key": p.key, "slot": p.slot.id, "product": p.product, "labs": p.spec.kind == "labs"})
+        planned = {b.key for b in seg.blocks if b.ok}
+        for k in built_old:
+            if k not in planned and k in by_key:
+                rework.append({"key": k, "slot": by_key[k].slot.id, "product": by_key[k].product,
+                               "labs": by_key[k].spec.kind == "labs", "dropped": True})
+        st_new["from"] = old
+        st_new["rework"] = rework
+        st_old["superseded"] = True
+        if log:
+            log(f"[zones] segment {new} takes over from segment {old}: kept {', '.join(kept) or 'nothing'}; "
+                f"reworked {', '.join(r['key'] for r in rework) or 'nothing'}")
+
     def slot_block(self, item: str, world=None, kit=None) -> SegBlock | None:
-        """The open segment's first block of this item not built yet, with a good design (None: none, so the
-        factory goes free-form)."""
+        """The live segment's first block of this item not built yet, with a good design (None: none, so the
+        factory goes free-form). A block still to be reworked (its old site stands in the slot) waits."""
         if not ENABLED:
             return None
-        for n in sorted(self.opened):
+        for n in self.live():
+            pending = {r["slot"] for r in (self.opened[n].get("rework") or []) if not r.get("done")}
             seg = self.segment(n, world, kit)
             built = self.opened[n].get("built", {})
             for b in seg.blocks:
-                if b.product == item and b.key not in built and b.ok:
+                if b.product == item and b.key not in built and b.ok and b.slot.id not in pending:
                     return b
         return None
 
@@ -734,7 +809,7 @@ class Zones:
             st.setdefault("built", {})[block.key] = tuple(where) if where else True
 
     def block_by_key(self, key: str) -> SegBlock | None:
-        for n in sorted(self.opened):
+        for n in self.live():
             for b in self.segment(n).blocks:
                 if b.key == key:
                     return b
@@ -758,9 +833,11 @@ class Zones:
         None when no open segment has one with a good design."""
         if not ENABLED:
             return None
-        for n in sorted(self.opened):
+        for n in self.live():
+            pending = {r["slot"] for r in (self.opened[n].get("rework") or []) if not r.get("done")}
             for b in self.segment(n).blocks:
-                if b.spec.kind == "labs" and b.ok and not b.growth and (built is None or self.is_built(b) == built):
+                if b.spec.kind == "labs" and b.ok and not b.growth and b.slot.id not in pending and \
+                        (built is None or self.is_built(b) == built):
                     return b
         return None
 
@@ -826,7 +903,28 @@ def _head_terminals(fp, items: list[str], rates: dict[str, float]) -> list:
     return out
 
 
-def design_segment(z: Zones, n: int, kit, fp, growth: bool = False, skip: frozenset = frozenset()) -> Segment:
+def _same_block(a: SegBlock, b: SegBlock) -> bool:
+    """The same design in the same slot (a block carried over from one segment to the next stays built)."""
+    if a.slot.id != b.slot.id or a.wd is None or b.wd is None:
+        return False
+    if abs(float(a.spec.per_s) - float(b.spec.per_s)) > 0.01 * max(float(a.spec.per_s), 1e-9):
+        return False
+
+    def ents(blk):
+        return sorted((e["name"], tuple(sorted(tuple(t) for t in e["tiles"])), e["dir"], e.get("recipe"))
+                      for e in blk.wd.entities())
+    return ents(a) == ents(b)
+
+
+def _spare(crew, item: str) -> float:
+    try:
+        return float(crew.spare_rate(item) or 0.0)
+    except Exception:  # noqa: BLE001 - a stub crew
+        return 0.0
+
+
+def design_segment(z: Zones, n: int, kit, fp, growth: bool = False, skip: frozenset = frozenset(),
+                   fresh_bus: bool = False) -> Segment:
     from atlas.design.memory import Memory
     from atlas.layout.bus import Terminal, design_bus
     from atlas.sim.base import world_check, _reach
@@ -843,6 +941,13 @@ def design_segment(z: Zones, n: int, kit, fp, growth: bool = False, skip: frozen
     spare = list(by_zone["reserve"])
     used: set[str] = set()
     counts: dict[str, int] = {}
+    prev = None
+    if n > 1:                              # a later era: every block of the last one keeps its slot
+        try:
+            prev = z.segment(n - 1)
+        except Exception:  # noqa: BLE001 - no earlier segment to build on: laid out on its own
+            prev = None
+    keep = {b.key: b.slot for b in (prev.blocks if prev is not None else []) if b.ok and not b.growth}
     plan = [(s, False) for s in specs]
     if growth:                             # copies for the spare slots the era's own blocks leave free
         plan += [(s, True) for s in growth_specs([s for s in specs if s.id not in skip], len(spare))]
@@ -851,7 +956,13 @@ def design_segment(z: Zones, n: int, kit, fp, growth: bool = False, skip: frozen
         counts[spec.id] = copy + 1
         key = f"{spec.id}#{copy}"
         own = [s for s in by_zone.get(spec.zone, []) if s.id not in used] if not grow else []
-        tries = own[:1] + [s for s in spare if s.id not in used]
+        kept_slot = keep.get(key)
+        held = {sl.id for k2, sl in keep.items() if k2 != key}        # slots the last era's blocks keep
+        if kept_slot is not None and kept_slot.id not in used:
+            tries = [kept_slot]
+        else:
+            own = [sl for sl in own if sl.id not in held] or own
+            tries = own[:1] + [sl for sl in spare if sl.id not in used and sl.id not in held]
         best = None
         for slot in tries:
             wd, errs = place(fp, spec, slot, mem, kit)
@@ -897,7 +1008,13 @@ def design_segment(z: Zones, n: int, kit, fp, growth: bool = False, skip: frozen
                                       owner=f"{b.key}@{b.slot.id}"))
     if not any(t.io == "sink" for t in terms):
         return seg
-    bus = design_bus(fp, terms, kit)
+    patched = prev is not None and prev.bus is not None and not fresh_bus
+    if patched:
+        # the last era's bus stands: re-planned around it, its untouched lines kept on their lanes
+        from atlas.layout.bus import relay
+        bus = relay(fp, prev.bus, terms, kit)[0]
+    else:
+        bus = design_bus(fp, terms, kit)
     if growth and GROWTH_PRUNE:
         # design_bus keeps one line per spine half: a copy may take an item's line from its original, or feed no
         # line at all (6 of 22 maps: the circuit copy sourced the line, the original nothing). A copy is kept only
@@ -911,7 +1028,7 @@ def design_segment(z: Zones, n: int, kit, fp, growth: bool = False, skip: frozen
             if f"{b.key}@{b.slot.id}" not in srcs or any(f"{o.key}@{o.slot.id}" not in srcs for o in orig):
                 bad.add(b.spec.id)
         if bad:
-            return design_segment(z, n, kit, fp, growth=True, skip=frozenset(skip) | bad)
+            return design_segment(z, n, kit, fp, growth=True, skip=frozenset(skip) | bad, fresh_bus=fresh_bus)
     seg.bus = bus
     seg.problems += bus.problems
     for b in seg.blocks:
@@ -938,6 +1055,9 @@ def design_segment(z: Zones, n: int, kit, fp, growth: bool = False, skip: frozen
     for t in seg.head:                     # the trunks hand their plates onto the head terminals' edge tiles
         seeds[t.tile] = {"left": t.item, "right": t.item}
     seg.problems += world_check(ents + bus.entities, ports, seeds, kit)
+    if seg.problems and patched:
+        # the lanes kept from the last era clash with the new lines (map 3505858087): the whole bus planned again
+        return design_segment(z, n, kit, fp, growth=growth, skip=skip, fresh_bus=True)
     return seg
 
 
@@ -1336,8 +1456,36 @@ def after_build(crew, site) -> str:
             if lb is not None:
                 laid = lay_bus(crew, lb.n, z.segment(lb.n).inputs_of(z.active_blocks(lb.n)))
                 note = (note + "; " if note else "") + f"zones: labs' pack lines: {laid}"
+        nxt = (z.current or 0) + 1
+        tried = z.__dict__.setdefault("tried_era", {})
+        if z.reserved and z.current and nxt in SEGMENTS and now - tried.get(nxt, -1e9) >= RETRY_MIN:
+            ok, why_not = z.ready(nxt, crew)
+            if ok:
+                tried[nxt] = now
+                kit = kit_for(w)
+                think = getattr(w, "think", None)
+                seg = think(f"laying out segment {nxt} (slots, blocks and the bus patched)", z.segment, nxt, None,
+                            kit) if think is not None else z.segment(nxt, None, kit)
+                bad = [p for p in seg.problems] + [f"{b.key}: {b.problems[0] if b.problems else 'no design'}"
+                                                   for b in seg.blocks if not b.ok and not b.growth]
+                if bad and any(b.growth for b in seg.blocks):
+                    # the planned copies must never keep an era shut: planned without them
+                    z.__dict__.setdefault("no_growth", set()).add(nxt)
+                    z._seg = {k: v for k, v in z._seg.items() if k[0] != nxt}
+                    seg = think(f"laying out segment {nxt} without copies", z.segment, nxt, None, kit)                         if think is not None else z.segment(nxt, None, kit)
+                    bad = [p for p in seg.problems] + [f"{b.key}: {b.problems[0] if b.problems else 'no design'}"
+                                                       for b in seg.blocks if not b.ok and not b.growth]
+                if bad:
+                    crew.log(f"[zones] segment {nxt} not opened: {bad[0][:160]}")
+                    z.warnings.append(f"segment {nxt}: {bad[0][:160]}")
+                    z._seg = {k: v for k, v in z._seg.items() if k[0] != nxt}   # designed again next time
+                else:
+                    z.open_segment(nxt, w, kit, minute=now, log=crew.log)
+                    queued = propose_bus(crew, nxt, f"segment {nxt} opened")
+                    note = (note + "; " if note else "") + f"zones: segment {nxt} open" + (
+                        ", its bus and reworks queued" if queued else "")
         if site.params.get("segment_block"):            # a slot factory: ports on laid lines are fed by their taps
-            for n in sorted(z.opened):
+            for n in z.live():
                 feed_ports(crew, n)
         grown = grow_check(crew, z, now)
         if grown:
@@ -1373,7 +1521,7 @@ def _flat_out(site) -> bool | None:
 def slot_sites(crew, z, item: str) -> list:
     """The built slot factories (sites) of the open segments' blocks making this item, originals first."""
     keys = []
-    for n in sorted(z.opened):
+    for n in z.live():
         for b in z.segment(n).blocks:
             if b.ok and b.product == item and z.is_built(b):
                 keys.append(b.key)
@@ -1387,7 +1535,7 @@ def grow_slot(crew, z, item: str, why: str = "") -> str | None:
     copy included, is still unbuilt: Factory._slot_design builds that). Otherwise the slot factory's machines are
     swapped for faster ones in place (upgrade.py; assembling machine 1 -> 2 is 1.5x); raises BuildError when the
     slot factory is already at the fastest machines unlocked (then a free-form factory may cover the rest)."""
-    if not any(b.ok and b.product == item for n in sorted(z.opened) for b in z.segment(n).blocks):
+    if not any(b.ok and b.product == item for n in z.live() for b in z.segment(n).blocks):
         return None
     if z.slot_block(item) is not None:
         return None                                  # a slot or a planned copy is free: Factory builds it
@@ -1408,7 +1556,7 @@ def grow_check(crew, z, now: float) -> str:
     asked = z.__dict__.setdefault("grow_asked", {})       # copy key -> minute its goal was proposed
     sites = {s.params.get("segment_block"): s for s in crew.base.sites if (s.params or {}).get("segment_block")}
     notes = []
-    for n in sorted(z.opened):                   # (a segment without planned copies still grows by upgrades)
+    for n in z.live():                           # (a segment without planned copies still grows by upgrades)
         seg = z.segment(n)
         for b in seg.blocks:
             if b.growth or not b.ok or not z.is_built(b):
@@ -1721,15 +1869,93 @@ def propose_bus(crew, n: int, why: str) -> bool:
         return False
 
 
+def adopt_bus(crew, n: int) -> str:
+    """Segment n took over from n-1: the old bus site becomes n's. Pieces n's bus no longer plans come up; the rest
+    stay as placed (lay_bus skips them) and every network is laid again for n (only what is missing goes down)."""
+    z = crew.zones
+    old = (z.opened.get(n) or {}).get("from")
+    if old is None or bus_site(crew, n) is not None:
+        return ""
+    site = bus_site(crew, old)
+    if site is None:
+        return ""
+    keys = {step_key(st) for job in z.segment(n).jobs().values() for st in job}
+    placed = [tuple(k) for k in site.params.get("placed") or []]
+    stale = [k for k in placed if k not in keys]
+    w, up, failed = crew.w, 0, []
+    staleset = set(stale)
+    keep_ents = []
+    for e in list(site.entities):
+        k = (e[0], round(e[1] * 2) / 2, round(e[2] * 2) / 2)
+        if k not in staleset:
+            keep_ents.append(e)
+            continue
+        try:
+            w.doing(f"taking up segment {old}'s bus piece {e[0]} at ({e[1]:.0f}, {e[2]:.0f}): segment {n} re-routes")
+            if w.pickup(e[0], e[1], e[2], e[3]):
+                up += 1
+                continue
+            failed.append(f"{e[0]} at ({e[1]:.0f}, {e[2]:.0f})")
+        except Exception as exc:  # noqa: BLE001 - a piece that will not come up stays recorded
+            failed.append(f"{e[0]}: {str(exc)[:60]}")
+        keep_ents.append(e)
+    site.entities = keep_ents
+    site.params["segment"] = n
+    site.params["laid"] = []
+    site.params["placed"] = [list(k) for k in placed if k in keys]
+    site.params.pop("gaps", None)
+    site.note = f"segment {n} bus along the spine (from segment {old}'s)"
+    return f"segment {old}'s bus is segment {n}'s now: {up} piece(s) no longer planned taken up" + (
+        f", {len(failed)} would not come up" if failed else "")
+
+
+def rework_old(crew, n: int) -> list[str]:
+    """The blocks segment n reworks: each old slot site comes up, then its new design is queued (a factory goal,
+    or the labs). Done once per block (the rework entry is marked)."""
+    z = crew.zones
+    st = z.opened.get(n) or {}
+    notes = []
+    for r in st.get("rework") or []:
+        if r.get("done"):
+            continue
+        site = next((s for s in crew.base.sites if (s.params or {}).get("segment_block") == r["key"]
+                     and (s.params or {}).get("slot") == r["slot"]), None)
+        if site is not None:
+            try:
+                crew.remove(site.id, force=True)
+                notes.append(f"site {site.id} ({r['key']}) taken up for segment {n}'s design")
+            except Exception as exc:  # noqa: BLE001 - tried again on the next bus goal
+                notes.append(f"site {site.id} would not come up: {str(exc)[:80]}")
+                continue
+        r["done"] = True
+        if r.get("dropped"):
+            continue
+        blk = next((b for b in z.segment(n).blocks if b.slot.id == r["slot"] and b.ok and not b.growth), None)
+        if blk is None:
+            continue
+        if blk.spec.kind == "labs":
+            goal = {"do": "build", "module": "research_station", "count": int(getattr(blk.spec, "labs", 0) or 8),
+                    "reflex": f"zones: segment {n}'s labs ({blk.key}) go into {blk.slot.id}"}
+        else:
+            goal = {"do": "build", "module": "factory", "item": blk.product,
+                    "per_minute": round(float(blk.spec.per_s) * 60, 1),
+                    "reflex": f"zones: segment {n} reworks {blk.key} in {blk.slot.id}"}
+        if _propose(crew, goal):
+            notes.append(f"{blk.key} queued for {blk.slot.id}")
+    return notes
+
+
 def run_bus_goal(crew, goal: dict) -> str:
-    """The "bus" goal: segment n's poles, the lines its built slots use, their taps, and trunks into the head."""
+    """The "bus" goal: segment n's poles, the lines its built slots use, their taps, and trunks into the head. A
+    segment that took over from the last one first adopts its bus and reworks the blocks whose design changed."""
     z = getattr(crew, "zones", None)
     n = int(goal.get("segment") or 1)
     if z is None or not z.is_open(n):
         import automation_bot as ab
         raise ab.BuildError(f"segment {n} is not open (zones off, or not ready yet)")
     seg = z.segment(n)
-    msg = lay_bus(crew, n, seg.inputs_of(z.active_blocks(n)))
+    pre = [x for x in [adopt_bus(crew, n)] + rework_old(crew, n) if x]
+    msg = ("; ".join(pre) + "; " if pre else "") + lay_bus(crew, n, seg.inputs_of(z.active_blocks(n)))
     h = head_supply(crew, n)
     return msg + (f"; {h}" if h else "")
 

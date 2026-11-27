@@ -164,3 +164,21 @@ New: **one Agenda (a blackboard) and one arbiter.**
 
 Steps 1 to 3 fix the deciders and the waiting, and help the current world too. Steps 4 to 6 are the
 floorplan, and pay off from a fresh world.
+
+## 7. Status: the blue era (segment 2), 2026-11-27
+
+- **Reserved from the start.** The floorplan is sized for segments 1 and 2 together (7 make slots, 2 spare, the
+  science slot, the silo spot; `zones.PLAN_UPTO = 2`); it fits all 22 offline maps. A world whose land only fits
+  segment 1 keeps the smaller plan and stays in segment 1.
+- **Opens when** segment 1's blocks are all built, chemical science, advanced circuits and engines are unlocked,
+  and the brain already makes plastic, sulfur and steel (they come into the spine head by trunk, like plates).
+- **Cumulative re-plan.** Segment 2 is red + green + blue planned together. Every block of segment 1 keeps its
+  slot; one with the same design stays built (red and green), one whose design changed is reworked in its slot
+  (gears and circuits grow for engines and advanced circuits, the labs take blue too); advanced circuits, engines
+  and blue science take the free make slots. The bus is re-planned around the laid one (atlas `relay`, kept lanes
+  pinned; planned fresh where that clashes): the bus goal takes up the ~40% of pieces no longer planned and lays
+  the rest. On all 22 maps: no problems.
+- **Growth** stays as before within an era: planned copies in the spare slots where they feed the bus, faster
+  machines in place otherwise.
+- **Not done yet:** purple, yellow and the silo segment (Atlas's floorplans fit purple on 14 of 22 maps, yellow on
+  7, rocket on 0: power slots are the blocker); oil products in oil slots instead of the brain's workshops.

@@ -310,8 +310,14 @@ def test_factory_asks_the_zones_first_and_falls_back_free_form():
         assert fac.slot_block({"item": "iron-gear-wheel", "plates": "mine"}, w) is None     # own mines: free-form
         assert fac.slot_block({"item": "stone-furnace"}, w) is None                        # not in the segment
         z.mark_built(blk, (0, 0))
-        assert fac.slot_block(p, w) is None                        # its one block is built: the next goes free-form
+        copy = fac.slot_block(p, w)                                # then its planned copy, if the floorplan kept one
+        assert copy is None or (copy.growth and copy.product == "iron-gear-wheel")
+        if copy is not None:
+            z.mark_built(copy, (0, 0))
+        assert fac.slot_block(p, w) is None                        # all built: the next goes free-form
         z.opened[1]["built"].pop(blk.key)
+        if copy is not None:
+            z.opened[1]["built"].pop(copy.key)
         zones.ENABLED = False
         assert fac.slot_block(p, w) is None and fac.zones.blocks(z.block) is False
     finally:

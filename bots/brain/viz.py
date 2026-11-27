@@ -177,7 +177,7 @@ def _slot_state(z, crew, slot) -> tuple[str, str | None]:
     state = "reserved"
     cur = ((getattr(crew, "current", None) or {}).get("goal") or {})
     cur_item = cur.get("item") or (cur.get("with") or {}).get("item")
-    for n, st in (z.opened or {}).items():
+    for n, st in [(k, v) for k, v in (z.opened or {}).items() if k in (z.live() if hasattr(z, "live") else [k])]:
         try:
             seg = z.segment(n)
         except Exception:  # noqa: BLE001 - no plan at hand (just resumed): what was built, by where it stands
