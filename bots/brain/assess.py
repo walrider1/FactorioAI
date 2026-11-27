@@ -973,10 +973,11 @@ def detect(crew) -> list[dict]:
             small = bool(base.of("labs")) and crew._top_up_stalled(w.research or {}, dry=True)
         except Exception:  # noqa: BLE001 - stub crews in tests
             small = False
-    if stall and small:
+    hand_labs = [s for s in base.of("labs") if not s.params.get("bus_fed")]   # the slot's labs: fed by the bus
+    if stall and small and hand_labs:
         # a handful of hand-craftable packs is all it lacks (the zones test, seed 737373: automation at 80% for
         # 25 game minutes with nothing feeding the labs): the lab round crafts and carries them, now
-        lab = base.of("labs")[0]
+        lab = hand_labs[0]
         out.append({"level": "urgent", "key": f"labs-topup-{lab.id}", "what": stall + "; its last packs are crafted "
                     "by hand and taken to the labs now",
                     "fix": {"do": "feed", "site": lab.id, "item": "automation-science-pack"}})
@@ -989,7 +990,7 @@ def detect(crew) -> list[dict]:
     if starving:
         # labs out of packs while packs are on hand or in chests: research is what everything waits on, so the
         # rule floor feeds them at once (the crew's lab round), ahead of the goal in hand
-        lab = next((s for s in base.of("labs") if s.health.get("missing_science_packs", 0)), None)
+        lab = next((s for s in hand_labs if s.health.get("missing_science_packs", 0)), None)
         out.append({"level": "urgent", "key": f"labs-feed-{lab.id if lab else 0}",
                     "what": "labs wait for science packs that are on hand or in chests: taken to them now",
                     "fix": {"do": "feed", "site": lab.id if lab else None, "item": "automation-science-pack"}})

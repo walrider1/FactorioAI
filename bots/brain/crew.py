@@ -4918,6 +4918,9 @@ class Crew:
         ever: a research station is queued beside the science factories (build places it at their centre), and
         the old labs stay until the new ones are fed. Run 20261121-140755: red and green into site 53 failed 14x,
         retried every hour, and research stood still. Returns a note when it queued one."""
+        from .modules import ResearchStation
+        if ResearchStation.slot_labs_refusal(self.base):
+            return ""                         # the floorplan's labs take the packs by bus: no station elsewhere
         if "underground-belt" in (getattr(self.kn, "unlocked", None) or set()):
             # failures from before belts could cross count for nothing now: those links are laid again with
             # undergrounds. Run 20261125-184025: three pre-logistics failures of red science's links built a third
@@ -7311,7 +7314,7 @@ class Foreman:
     def _labs_starving(self) -> bool:
         """Do labs report missing packs while the crew holds (or its chests hold) packs the research takes?"""
         base, w = self.crew.base, self.crew.w
-        labs = base.of("labs")
+        labs = [s for s in base.of("labs") if not s.params.get("bus_fed")]    # the slot's labs: the bus feeds them
         if not labs or not any(s.health.get("missing_science_packs", 0) for s in labs):
             return False
         cur = (w.research or {}).get("current")
@@ -7367,7 +7370,8 @@ class Foreman:
         techs = [cur] + [t for t in ((w.research or {}).get("queue") or []) if t != cur][:3]
         need = list(dict.fromkeys(i["name"] for t in techs for i in kn.techs.get(t, {}).get("unit_ingredients", [])))
         self._retrofit_feeders()
-        plain = [s for s in base.of("labs") if not s.params.get("station")]
+        # labs in the floorplan's science slot get their packs by bus (zones.build_labs_slot): never fed by hand
+        plain = [s for s in base.of("labs") if not s.params.get("station") and not s.params.get("bus_fed")]
         heads = [s.labs[0] for s in base.of("labs") if s.params.get("station") and s.labs]
         belted = self.crew.belted_packs() if heads else set()   # these reach the stations by belt on their own
         feeders = [(x, y) for s in plain for x, y, what in s.chests if what == "lab-feed"]
@@ -7432,7 +7436,7 @@ class Foreman:
         """Lab rows built before feeders existed get one (once each; skipped where the ground is taken)."""
         from .modules import Labs
         for s in self.crew.base.of("labs"):
-            if s.params.get("station"):            # stations are fed by belts at their ports, never a feeder
+            if s.params.get("station") or s.params.get("bus_fed"):   # fed by belts (ports, the bus), never a feeder
                 continue
             if s.id in self._feeder_tried or any(what == "lab-feed" for *_, what in s.chests):
                 continue

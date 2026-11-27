@@ -94,7 +94,7 @@ def needs(crew, site) -> list[dict]:
             out.append({"kind": "broken", "why": f"its {pt['item']} input is not belted", "fix": {"do": "link"}})
     if site.electric and _half(site, _bad(site, "no_power")):
         out.append({"kind": "broken", "why": "no power", "fix": {"do": "connect", "site": site.id}})
-    if site.kind == "labs" and not site.params.get("station"):
+    if site.kind == "labs" and not site.params.get("station") and not site.params.get("bus_fed"):
         out.append({"kind": "hands", "why": "labs fed with packs by hand",
                     "fix": None})                     # a research station replaces them in the roadmap
     if site.params.get("pipe_gaps"):

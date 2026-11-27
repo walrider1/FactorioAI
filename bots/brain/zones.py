@@ -349,6 +349,14 @@ class Segment:
         whose product is one of these puts it on the bus; any other product goes into its output chest."""
         return {p["item"] for b in self.blocks if b.ok and b.spec.kind == "make" for p in b.ports if p["io"] == "in"}
 
+    def feeds_line(self, block) -> bool:
+        """Does a planned bus line start at this block's output (a source terminal of a kept line)? Atlas keeps
+        one line per spine half and drops one with nobody to feed, so a block's output may have none."""
+        if self.bus is None:
+            return False
+        owner = f"{block.key}@{block.slot.id}"
+        return any(t.io == "src" and t.owner == owner for ln in self.bus.lines.values() for t in ln.terms)
+
     def inputs_of(self, blocks) -> set[str]:
         """The bus lines these blocks draw on (their input ports' items)."""
         return {p["item"] for b in blocks if b.ok for p in b.ports if p["io"] == "in"}
@@ -740,6 +748,33 @@ class Zones:
     def is_built(self, block: SegBlock) -> bool:
         return block.key in (self.opened.get(block.n) or {}).get("built", {})
 
+    def labs_block(self, built: bool | None = False) -> SegBlock | None:
+        """An open segment's labs block (the science slot): unbuilt (built=False), built (True) or either (None).
+        None when no open segment has one with a good design."""
+        if not ENABLED:
+            return None
+        for n in sorted(self.opened):
+            for b in self.segment(n).blocks:
+                if b.spec.kind == "labs" and b.ok and not b.growth and (built is None or self.is_built(b) == built):
+                    return b
+        return None
+
+    def onto_bus(self, n: int, block: SegBlock | None = None) -> set[str]:
+        """Products a slot factory of segment n puts on the bus instead of into an output chest: what the make
+        blocks take (Segment.consumed), and once the segment's labs stand, the packs they take. Before the labs
+        are built the packs go into chests, where the stations elsewhere get them by belt; the planned bus has
+        their lines all along (Atlas designs the labs block's pack terminals with the rest). With `block`: the
+        packs only if a planned line starts at that block's output (Segment.feeds_line)."""
+        seg = self.segment(n)
+        out = set(seg.consumed())
+        for b in seg.blocks:
+            if b.spec.kind == "labs" and b.ok and self.is_built(b):
+                packs = {p["item"] for p in b.ports if p["io"] == "in"}
+                if block is not None and not seg.feeds_line(block):
+                    packs = set()
+                out |= packs
+        return out
+
     def summary(self) -> dict:
         return {"reserved_tiles": len(self.block), "yard": self.yard,
                 "spine_cells": len(self.corridors["spine"].cells) if "spine" in self.corridors else 0,
@@ -841,12 +876,18 @@ def design_segment(z: Zones, n: int, kit, fp, growth: bool = False) -> Segment:
     order += sorted(i for i in need if i not in order)
     seg.head = _head_terminals(fp, order, need)
     terms = list(seg.head)                 # the same objects: design_bus locates them (run, pos, side)
+    # a planned copy's packs are no source of the labs' lines: Atlas keeps one line per spine half and drops one
+    # with no labs on its side, so a copy on the labs' side took the line and the original block (the one that is
+    # built) had none (the fixture map: green's line ran from its copy in reserve-0, nothing from make-3)
+    lab_packs = {i for b in seg.blocks if b.ok and b.spec.kind == "labs" for i in b.spec.bus_in}
     for b in seg.blocks:
         if not b.ok:
             continue
         for p, tile in b.wd.port_tiles():
             for item in p.items:
                 b.ports.append({"io": p.io, "item": item, "tile": tile, "x": p.x, "rate": p.rate.get(item, 0.0)})
+                if b.growth and p.io == "out" and item in lab_packs:
+                    continue
                 terms.append(Terminal(item, "src" if p.io == "out" else "sink", tile, p.rate.get(item, 0.0),
                                       owner=f"{b.key}@{b.slot.id}"))
     if not any(t.io == "sink" for t in terms):
@@ -948,6 +989,193 @@ def slot_build(block: SegBlock, onto_bus=frozenset()) -> SlotBuild:
     return sb
 
 
+# ==================================================================== the labs slot
+# Run 20261127-101219 (and every zones run before it): segment 1 designed labs#0 in its science slot, with the
+# packs' bus lines planned from the science slots to it, but only factory goals ever went into slots. Every lab
+# went up wherever there was clear ground (a hand-fed row by the spawn, then stations whose long pack belts were
+# walled in or polluted), and the planned pack lines were never laid. Now a research_station goal builds the labs
+# block in its slot; the pack lines go down with it and the science slots switch from output chests to the bus.
+LABS_ASK_GAP_MIN = 30.0    # a labs, science or retire goal the zones proposed is proposed again after this long
+RETIRE_AFTER_MIN = 10.0    # the slot's labs work this long, every pack port fed, before the other labs go
+
+
+def labs_slot_design(w) -> SlotBuild | None:
+    """The open segment's unbuilt labs block as a SlotBuild, or None (zones off, no such block, or its ground
+    taken since: then the research station goes up free-form as before)."""
+    z = getattr(w, "zones", None)
+    if not ENABLED or z is None or not z.reserved:
+        return None
+    try:
+        block = z.labs_block()
+        if block is None:
+            return None
+        d = slot_build(block, z.onto_bus(block.n))
+    except Exception as exc:  # noqa: BLE001 - the zones are an aid: any trouble and the labs go free-form
+        w.log(f"[zones] no labs slot build ({type(exc).__name__}: {str(exc)[:120]}): free-form")
+        return None
+    taken = {t for t in d.tiles() if w.blocked(t) and t not in w.movable}
+    if taken:
+        w.log(f"[zones] labs slot {block.slot.id} lost {len(taken)} tiles: free-form instead")
+        return None
+    return d
+
+
+def labs_slot_site(base):
+    """The labs a segment's science slot holds (None: not built)."""
+    return next((s for s in base.of("labs") if (s.params or {}).get("segment_block")), None)
+
+
+def build_labs_slot(w, d: SlotBuild):
+    """Place the labs block's Atlas design step by step (a refused building is a gap that repairs place later).
+    Its pack ports are feed ports on the spine edge: the bus's pack lines tap into them (laid right after, by
+    after_build). The site is kind "labs" but no station: no science link and no foreman feeder ever goes in."""
+    import automation_bot as ab
+    from .modules import Site
+    try:
+        from . import viz
+        viz.design_slot(d.block)
+    except Exception:  # noqa: BLE001 - the stream's view is never a reason to fail
+        pass
+    placed, failed, gaps = place_steps(w, d.all_steps())
+    block = d.block
+    labs = [(s.x, s.y) for s in d.all_steps() if s.name == "lab"]
+    site = Site("labs", {"count": len(labs), "slot": block.slot.id, "segment_block": block.key, "bus_out": [],
+                         "bus_fed": True}, d.focus)
+    site.labs = labs
+    site.poles = [tuple(q) for q in d.poles]
+    ports = [dict(pt) for pt in d.ports]
+    for pt in ports:
+        w.keepout |= {tuple(pt["end"]), tuple(pt["approach"])}
+    site.params["ports"] = ports
+    site.params["inputs"] = sorted({pt["item"] for pt in ports})
+    site.port_lanes = sorted({tuple(t) for pt in ports for t in (pt["end"], pt["approach"])})
+    site.note = f"{placed} built in zone slot {block.slot.id} ({len(labs)} labs, packs by bus)" + (
+        f", {len(failed)} failed (first: {failed[0][:120]})" if failed else "")
+    if gaps:
+        from .gaps import record
+        record(site, gaps)
+    if failed and placed < len(failed) * 2:
+        raise ab.BuildError(f"labs slot mostly failed: {failed[0][:120]}")
+    w.zones.mark_built(block, d.focus)
+    w.log(f"[zones] labs block {block.key} built in {block.slot.id}: {len(labs)} labs, packs come by bus")
+    return site
+
+
+def switch_to_bus(crew, n: int, items) -> list[str]:
+    """Built slot factories of segment n whose product is one of `items` and still goes into an output chest
+    (built before the labs: Zones.onto_bus) put it on the bus from now on. Their output inserter and chest stand
+    where the planned bus line's injection goes: both come up (with the packs in the chest), and so does every
+    belt link out of that chest (the stations elsewhere lose that colour; the slot's labs take it by bus)."""
+    z = crew.zones
+    seg = z.segment(n)
+    items = set(items)
+    notes = []
+    by_key = {b.key: b for b in seg.blocks}
+    for s in list(crew.base.sites):
+        key = (s.params or {}).get("segment_block")
+        b = by_key.get(key)
+        if b is None or b.spec.kind != "make" or b.product not in items or b.product in (s.params.get("bus_out") or []):
+            continue
+        if b.product not in seg.consumed() and not seg.feeds_line(b):
+            continue                          # no planned line starts at its output: its chest stays
+        stub = slot_build(b, frozenset()).stub
+        tiles = {tuple(t) for st in stub for t in st.tiles}
+        chests = [(x, y, what) for x, y, what in s.chests if (math.floor(x), math.floor(y)) in tiles]
+        for x, y, _ in chests:
+            for ln in [q for q in getattr(crew, "links", []) if tuple(q.get("source") or ()) == (x, y)]:
+                try:
+                    crew._unlink(ln)
+                except Exception as exc:  # noqa: BLE001 - one stuck link never keeps the packs off the bus
+                    crew.log(f"[zones] taking up a link out of site {s.id}'s chest failed: {str(exc)[:100]}")
+        gone = []
+        for e in list(s.entities):
+            if (math.floor(e[1]), math.floor(e[2])) in tiles and e[0] in ("inserter", "iron-chest"):
+                try:
+                    crew.w.pickup(*e)
+                except Exception as exc:  # noqa: BLE001 - the bus line's step there becomes a gap repairs retry
+                    crew.log(f"[zones] taking up {e[0]} at ({e[1]}, {e[2]}) failed: {str(exc)[:100]}")
+                    continue
+                gone.append(e)
+        s.entities[:] = [e for e in s.entities if e not in gone]
+        s.chests[:] = [c for c in s.chests if c not in chests]
+        s.params.setdefault("bus_out", []).append(b.product)
+        notes.append(f"site {s.id} puts its {b.product} on the bus now ({len(gone)} buildings of its output "
+                     "chest taken up)")
+        crew.log(f"[zones] {notes[-1]}")
+    return notes
+
+
+def _propose(crew, goal: dict) -> bool:
+    try:
+        from .agenda import agenda_of
+        ok, _ = agenda_of(crew).propose(crew, goal, who="zones")
+        return bool(ok)
+    except Exception:  # noqa: BLE001 - a crew without an agenda: queue it plainly
+        urgent = getattr(crew, "urgent", None)
+        if urgent is None:
+            return False
+        urgent.append(goal)
+        return True
+
+
+def science_check(crew, z, now: float) -> str:
+    """The labs slot's own goals, each proposed once per LABS_ASK_GAP_MIN:
+    - the labs block, once a science slot factory stands (a research_station goal: ResearchStation builds the
+      slot's design);
+    - a science block not built yet, once the labs stand (its factory goal goes into its slot, onto the bus);
+    - the other labs, once the slot's labs have worked RETIRE_AFTER_MIN with every pack port fed: removed (their
+      packs now go to the slot, so they would stand idle)."""
+    asked = z.__dict__.setdefault("labs_asked", {})
+    due = lambda k: now - asked.get(k, -1e9) >= LABS_ASK_GAP_MIN
+    notes = []
+    lb = z.labs_block(built=None)
+    if lb is None:
+        return ""
+    seg = z.segment(lb.n)
+    packs = {p["item"] for p in lb.ports if p["io"] == "in"}
+    makers = [b for b in seg.blocks if b.spec.kind == "make" and b.ok and not b.growth and b.product in packs]
+    if not z.is_built(lb):
+        if any(z.is_built(b) for b in makers) and due("labs"):
+            goal = {"do": "build", "module": "research_station", "count": int(getattr(lb.spec, "labs", 0) or 6),
+                    "reflex": f"zones: the science slot {lb.slot.id} takes the labs ({lb.key}); the packs come "
+                              "to them by bus"}
+            if _propose(crew, goal):
+                asked["labs"] = now
+                notes.append(f"zones: labs block {lb.key} queued for {lb.slot.id}")
+        return "; ".join(notes)
+    for b in makers:
+        if not z.is_built(b) and due(b.key):
+            goal = {"do": "build", "module": "factory", "item": b.product,
+                    "per_minute": round(float(b.spec.per_s) * 60, 1),
+                    "reflex": f"zones: the slot's labs take {b.product} by bus: its block {b.key} goes into "
+                              f"{b.slot.id}"}
+            if _propose(crew, goal):
+                asked[b.key] = now
+                notes.append(f"zones: {b.product} queued for {b.slot.id}")
+    site = labs_slot_site(crew.base)
+    if site is None:
+        return "; ".join(notes)
+    fed = all(pt.get("fed") for pt in site.params.get("ports", []))
+    working = (site.health or {}).get("working", 0) > 0
+    since = z.__dict__.setdefault("labs_running", {})
+    if not (fed and working):
+        since.pop("slot", None)
+        return "; ".join(notes)
+    t0 = since.setdefault("slot", now)
+    if now - t0 < RETIRE_AFTER_MIN:
+        return "; ".join(notes)
+    for other in crew.base.of("labs"):
+        if other is site or (other.params or {}).get("segment_block") or not due(f"retire-{other.id}"):
+            continue
+        goal = {"do": "remove", "site": other.id,
+                "reflex": f"zones: the floorplan's labs (site {site.id} in {site.params.get('slot')}) take every "
+                          "pack by bus; these labs stand idle"}
+        if _propose(crew, goal):
+            asked[f"retire-{other.id}"] = now
+            notes.append(f"zones: labs site {other.id} retired (the slot's labs run)")
+    return "; ".join(notes)
+
+
 # ==================================================================== the crew's hooks
 def attach(crew, zones: Zones | None) -> None:
     """One Zones object for the crew, its world (world.free asks it) and the factory module."""
@@ -1028,12 +1256,21 @@ def after_build(crew, site) -> str:
                     queued = propose_bus(crew, 1, "segment 1 opened")
                     note = (note + "; " if note else "") + "zones: segment 1 open" + (
                         ", its bus queued" if queued else "")
+        if site.kind == "labs" and site.params.get("segment_block"):
+            # the slot's labs stand: their pack lines go down now (the science slots' chests switch to the bus)
+            lb = z.block_by_key(site.params["segment_block"])
+            if lb is not None:
+                laid = lay_bus(crew, lb.n, z.segment(lb.n).inputs_of(z.active_blocks(lb.n)))
+                note = (note + "; " if note else "") + f"zones: labs' pack lines: {laid}"
         if site.params.get("segment_block"):            # a slot factory: ports on laid lines are fed by their taps
             for n in sorted(z.opened):
                 feed_ports(crew, n)
         grown = grow_check(crew, z, now)
         if grown:
             note = (note + "; " if note else "") + grown
+        sci = science_check(crew, z, now)
+        if sci:
+            note = (note + "; " if note else "") + sci
         return note
     except Exception as exc:  # noqa: BLE001 - never let the planner break a build
         try:
@@ -1224,6 +1461,11 @@ def lay_bus(crew, n: int, items, extra=()) -> str:
     todo = [nm for nm in names if nm.split(":", 1)[1] not in laid]
     msg = ""
     if todo:
+        # a slot factory built before the labs has its output chest where its product's line injects: the chest
+        # comes up first, and the factory puts it on the bus from now on
+        switched = switch_to_bus(crew, n, {nm.split(":", 1)[1] for nm in todo} & z.onto_bus(n))
+        if switched:
+            msg = "; ".join(switched) + "; "
         done = {tuple(k) for k in site.params.setdefault("placed", [])}
         steps = [s for nm in todo for s in jobs[nm] if step_key(s) not in done]
         kit = dict(Counter(s.name for s in steps))
@@ -1247,7 +1489,7 @@ def lay_bus(crew, n: int, items, extra=()) -> str:
             record(site, gaps)
         for nm in todo:                          # a network is laid once all of it stands or is a gap to repair
             site.params["laid"].append(nm.split(":", 1)[1])
-        msg = f"laid {placed} bus pieces ({', '.join(nm[4:] for nm in todo)})" + (
+        msg += f"laid {placed} bus pieces ({', '.join(nm[4:] for nm in todo)})" + (
             f", {len(failed)} refused (gaps for repair; first: {failed[0][:100]})" if failed else "")
         if site.poles:
             try:

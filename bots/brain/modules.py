@@ -752,6 +752,9 @@ class Labs(Module):
         anchors = base.powered_poles()
         if not anchors:
             raise BuildError("labs need power: build steam_power first")
+        why = ResearchStation.slot_labs_refusal(base)
+        if why:
+            raise BuildError(why)
         home = base.centre or w.pos
         # adapt to the ground: every powered pole (nearest the base first), then a shorter row; when the labs
         # block progress, every anchor and down to one lab
@@ -830,9 +833,25 @@ class ResearchStation(Module):
     # the station site is kind "labs" (params station: True), so everything that counts or feeds labs sees it
 
     def kit(self, w, base, p):
+        from . import zones as zmod
+        d = zmod.labs_slot_design(w)
+        if d is not None:                     # the floorplan's science slot: its design's own buildings
+            return d.kit()
         n = max(2, min(10, int(p.get("count", 6))))
         ins = "fast-inserter" if "fast-inserter" in w.kn.unlocked else "inserter"
         return {"lab": n, ins: n - 1 + len(self.PORTS), "small-electric-pole": n + 2 + 6}
+
+    @staticmethod
+    def slot_labs_refusal(base) -> str | None:
+        """Why no labs go up outside the floorplan any more (None: they may): the science slot's labs stand and
+        the bus brings them every pack the segment makes."""
+        from . import zones as zmod
+        site = zmod.labs_slot_site(base)
+        if site is None:
+            return None
+        return (f"the floorplan's labs (site {site.id}, {site.params.get('count')} labs in slot "
+                f"{site.params.get('slot')}) take every science pack by bus: no labs elsewhere. Faster research "
+                "comes from more packs (the science slots' copies), not more labs")
 
     # head ports around the first lab (its top-left tile x0, y0): (inserter tile, facing = the side it picks
     # from, belt end tile, approach tile). Belts arrive head-on, so no port's belt ever points into another's.
@@ -861,6 +880,13 @@ class ResearchStation(Module):
         n = max(2, min(10, int(p.get("count", 6))))
         if not base.powered_poles():
             raise BuildError("a research station needs power: build steam_power first")
+        from . import zones as zmod
+        d = zmod.labs_slot_design(w)
+        if d is not None:                     # an open segment's science slot: Atlas's labs block, fed by the bus
+            return zmod.build_labs_slot(w, d)
+        why = self.slot_labs_refusal(base)
+        if why:
+            raise BuildError(why)
         home = tuple(p.get("near") or base.centre or w.pos)   # near the science factories when known
         spot = None
         for size in range(n, 1, -1):          # its own clear ground near the base; a shorter row if need be
@@ -987,7 +1013,7 @@ class Factory(Module):
         from . import zones as zmod
         try:
             z = getattr(w, "zones", None) or self.zones
-            d = zmod.slot_build(block, z.segment(block.n).consumed())     # made items ride the bus to their users
+            d = zmod.slot_build(block, z.onto_bus(block.n, block))     # made items ride the bus to their users (labs too)
         except Exception as exc:  # noqa: BLE001
             w.log(f"[zones] no slot build for {p.get('item')} ({type(exc).__name__}: {str(exc)[:120]}): free-form")
             return None
