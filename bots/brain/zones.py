@@ -1222,7 +1222,9 @@ def propose_trunk(crew, site, item: str) -> bool:
     goal = {"do": "trunk", "site": site.id, "item": item, "reflex": "zones: the bus head takes plates"}
     try:
         from .agenda import agenda_of
-        ok, _ = agenda_of(crew).propose(crew, goal, who="zones")
+        # first in line after the rule floor's fuel and power: every slot factory on the bus waits on it (the
+        # zones test, seed 737373: queued at the back, it was still waiting when another decider dropped it)
+        ok, _ = agenda_of(crew).propose(crew, goal, who="zones", front=True)
         return ok
     except Exception:  # noqa: BLE001 - a crew without an agenda: queue it plainly
         urgent = getattr(crew, "urgent", None)
