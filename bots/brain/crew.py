@@ -1260,6 +1260,30 @@ class Crew:
 
     SPLIT_MAX = 2                   # feeder factories split off one factory that does not fit as one block
 
+    def _grow_slot_instead(self, goal: dict) -> str | None:
+        """A factory goal for a science pack the open floorplan already makes in a slot, with no slot left for it:
+        the slot factory grows instead of a free-form copy going up elsewhere (zones.grow_slot: faster machines in
+        place). None: build as asked (no floorplan, not a floorplan science pack, a feeder for a free-form
+        factory, a slot or copy still free, or the slot factory cannot grow)."""
+        z = getattr(self, "zones", None)
+        item = goal.get("item")
+        if z is None or not item or goal.get("free_form") or not getattr(z, "opened", None):
+            return None
+        # science packs only: they reach the slot's labs by the bus whichever slot factory makes them. Gears or
+        # circuits asked for by a free-form factory (a feeder, a close-out port) must reach that factory: extra on
+        # the bus would not, so those stay free-form beside their consumer
+        if not item.endswith("science-pack") or getattr(self, "_intermediate_depth", 0):
+            return None
+        try:
+            from . import zones as zmod
+            return zmod.grow_slot(self, z, item, why=str(goal.get("reflex") or "a factory goal")[:80])
+        except BuildError as exc:
+            self.log(f"[zones] the {item} slot factory cannot grow ({str(exc)[:120]}): free-form as asked")
+            return None
+        except Exception as exc:  # noqa: BLE001 - the floorplan never breaks a build
+            self.log(f"[zones] grow check skipped: {type(exc).__name__}: {str(exc)[:120]}")
+            return None
+
     def build(self, goal: dict) -> str:
         """Build a module. A belt factory whose layout fits nowhere as one block is split: its biggest made-here
         intermediate gets a factory of its own (built first by _intermediates_first) and this one takes it by
@@ -1274,6 +1298,9 @@ class Crew:
             goal = {**goal, "near_first": True}
         if goal.get("module") != "factory":
             return self._build(goal)
+        grown = self._grow_slot_instead(goal)
+        if grown is not None:
+            return grown
         split: list[str] = []
         fac = MODULES["factory"]
         planned = self._split_memory(goal)
@@ -6129,11 +6156,22 @@ class Crew:
             return {"do": "build", "module": "workshop", "item": item, "per_minute": rate}
         return None
 
+    def makes(self, item: str) -> bool:
+        """Does a factory of ours make this item: an output chest of it, or a factory or workshop built for it
+        (a slot factory whose product rides the bus has no output chest). Run 20261127-101219: once the labs slot
+        put red and green on the bus, their slot factories' chests were taken up, "automation first" saw no
+        factory making either, and built a second red and green chain free-form (sites 69-72)."""
+        if item in {what for s in self.base.sites for *_, what in s.chests}:
+            return True
+        return any(s.kind in ("factory", "workshop") and ((s.params or {}).get("item") == item
+                                                          or item in ((s.params or {}).get("bus_out") or ()))
+                   for s in self.base.sites)
+
     def hand_or_automate(self, item: str, n: int) -> tuple[str, dict | None, str]:
         """("auto", None) when a factory makes it already; ("automate", goal) to build one first; ("hand", None)
         only when crafting n by hand costs under HAND_LIMIT_S, or nothing can automate it now (or its factory
         failed to build within the last AUTO_RETRY_MIN game minutes). The third value says why."""
-        if item in {what for s in self.base.sites for *_, what in s.chests}:
+        if self.makes(item):
             return "auto", None, f"{item} is made by our factories"
         secs = self.hand_seconds(item, n)
         if secs is not None and secs <= HAND_LIMIT_S:

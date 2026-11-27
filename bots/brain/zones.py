@@ -60,6 +60,7 @@ GROWTH_PRUNE = True       # drop a copy that would not feed the bus beside its o
 GROW_FLAT_MIN = 10.0      # a block flat out (machines working, output never backed up) this long gets its copy
 GROW_WORKING = 0.8        # share of its assemblers seen working
 GROW_FULL = 0.1           # at most this share seen with output backed up
+GROW_REPEAT_MIN = 30.0    # the same growth is asked again at most this often (an upgrade that did not happen)
 ANCHOR_SHIFTS = (0, -24, 24, -48, 48)    # where along a yard side the spine may start
 ANCHOR_GAPS = (1, 24, 48)                # how far out from the yard
 KEEP = 2                  # quick layouts finished with the oil corridor (the best by score)
@@ -1369,6 +1370,37 @@ def _flat_out(site) -> bool | None:
     return st.get("working", 0) / total >= GROW_WORKING and full / total <= GROW_FULL
 
 
+def slot_sites(crew, z, item: str) -> list:
+    """The built slot factories (sites) of the open segments' blocks making this item, originals first."""
+    keys = []
+    for n in sorted(z.opened):
+        for b in z.segment(n).blocks:
+            if b.ok and b.product == item and z.is_built(b):
+                keys.append(b.key)
+    by_key = {(s.params or {}).get("segment_block"): s for s in crew.base.sites}
+    return [by_key[k] for k in keys if k in by_key]
+
+
+def grow_slot(crew, z, item: str, why: str = "") -> str | None:
+    """More of a floorplan item: its slot factory grows instead of a free-form factory going up elsewhere.
+    None when this is not for the slot (the item is no block of an open segment, or one of its blocks, a planned
+    copy included, is still unbuilt: Factory._slot_design builds that). Otherwise the slot factory's machines are
+    swapped for faster ones in place (upgrade.py; assembling machine 1 -> 2 is 1.5x); raises BuildError when the
+    slot factory is already at the fastest machines unlocked (then a free-form factory may cover the rest)."""
+    if not any(b.ok and b.product == item for n in sorted(z.opened) for b in z.segment(n).blocks):
+        return None
+    if z.slot_block(item) is not None:
+        return None                                  # a slot or a planned copy is free: Factory builds it
+    from . import upgrade
+    for site in slot_sites(crew, z, item):
+        if upgrade.candidates(crew, site):
+            note = crew.upgrade(site.id)
+            crew.log(f"[zones] {item}: more asked ({why}); slot factory site {site.id} grows in place: {note}")
+            return f"{item} slot factory site {site.id} grew instead of a new factory: {note}"
+    from .world import BuildError
+    raise BuildError(f"every {item} slot factory already has the fastest machines unlocked")
+
+
 def grow_check(crew, z, now: float) -> str:
     """A built slot block that has run flat out for GROW_FLAT_MIN gets its planned copy: a factory goal for its
     item (Factory._slot_design puts it in the copy's spare slot, the bus taps come with it). Returns a note."""
@@ -1376,9 +1408,7 @@ def grow_check(crew, z, now: float) -> str:
     asked = z.__dict__.setdefault("grow_asked", {})       # copy key -> minute its goal was proposed
     sites = {s.params.get("segment_block"): s for s in crew.base.sites if (s.params or {}).get("segment_block")}
     notes = []
-    for n in sorted(z.opened):
-        if not z.growth_on(n):
-            continue
+    for n in sorted(z.opened):                   # (a segment without planned copies still grows by upgrades)
         seg = z.segment(n)
         for b in seg.blocks:
             if b.growth or not b.ok or not z.is_built(b):
@@ -1386,8 +1416,12 @@ def grow_check(crew, z, now: float) -> str:
             copy = next((c for c in seg.blocks if c.growth and c.ok and c.spec.id == b.spec.id
                          and not z.is_built(c)), None)
             site = sites.get(b.key)
-            if copy is None or site is None:
+            if site is None:
                 continue
+            if copy is None:                       # no copy planned (or built): faster machines in place
+                from . import upgrade
+                if not upgrade.candidates(crew, site):
+                    continue
             flat = _flat_out(site)
             if flat is None:
                 continue
@@ -1395,12 +1429,18 @@ def grow_check(crew, z, now: float) -> str:
                 watch.pop(b.key, None)
                 continue
             since = watch.setdefault(b.key, now)
-            if now - since < GROW_FLAT_MIN or copy.key in asked:
+            ask_key = copy.key if copy is not None else f"upgrade:{site.id}"
+            if now - since < GROW_FLAT_MIN or (ask_key in asked and now - asked[ask_key] < GROW_REPEAT_MIN):
                 continue
-            rate = round(float(copy.spec.per_s) * 60, 1)
-            goal = {"do": "build", "module": "factory", "item": b.product, "per_minute": rate,
-                    "reflex": f"zones: {b.key} has run flat out for {now - since:.0f} min: its copy in "
-                              f"{copy.slot.id} goes up"}
+            if copy is not None:
+                rate = round(float(copy.spec.per_s) * 60, 1)
+                goal = {"do": "build", "module": "factory", "item": b.product, "per_minute": rate,
+                        "reflex": f"zones: {b.key} has run flat out for {now - since:.0f} min: its copy in "
+                                  f"{copy.slot.id} goes up"}
+            else:
+                goal = {"do": "upgrade", "site": site.id,
+                        "reflex": f"zones: {b.key} has run flat out for {now - since:.0f} min: faster machines "
+                                  "in its slot"}
             try:
                 from .agenda import agenda_of
                 ok, _ = agenda_of(crew).propose(crew, goal, who="zones")
@@ -1410,11 +1450,11 @@ def grow_check(crew, z, now: float) -> str:
                 if ok:
                     urgent.append(goal)
             if ok:
-                asked[copy.key] = now
-                notes.append(f"zones: {b.product} x2 (its block ran flat out {now - since:.0f} min; the copy goes "
-                             f"into {copy.slot.id})")
-                crew.log(f"[zones] growing {b.key}: flat out for {now - since:.0f} min, its copy {copy.key} "
-                         f"queued for {copy.slot.id}")
+                asked[ask_key] = now
+                where = f"the copy goes into {copy.slot.id}" if copy is not None else \
+                    f"faster machines in site {site.id}"
+                notes.append(f"zones: more {b.product} (its block ran flat out {now - since:.0f} min; {where})")
+                crew.log(f"[zones] growing {b.key}: flat out for {now - since:.0f} min, {where}")
     return "; ".join(notes)
 
 

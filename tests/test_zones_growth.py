@@ -92,6 +92,69 @@ def test_a_block_flat_out_for_ten_minutes_gets_its_copy_and_later_goals_build_it
     site.census = {"assembling-machine-1": {"working": 5}}
     assert zones.grow_check(crew, z2, 50.0) == ""
     note = zones.grow_check(crew, z2, 61.0)
-    assert f"{item} x2" in note and copy.slot.id in note
+    assert f"more {item}" in note and copy.slot.id in note
     assert any(g.get("module") == "factory" and g.get("item") == item for g in crew.urgent)
     assert zones.grow_check(crew, z2, 70.0) == ""                             # asked once
+
+
+def test_a_bus_fed_slot_factory_counts_as_making_its_item():
+    """Run 20261127-101219: with red and green on the bus (no output chests), "automation first" saw no factory
+    making them and built a second chain free-form."""
+    from types import SimpleNamespace
+    from brain.crew import Crew
+    b = Base()
+    b.add(Site("factory", {"item": "automation-science-pack", "slot": "make-2", "segment_block": "x",
+                           "bus_out": ["automation-science-pack"]}, (0, 0)))
+    crew = SimpleNamespace(base=b)
+    assert Crew.makes(crew, "automation-science-pack") and not Crew.makes(crew, "logistic-science-pack")
+
+
+def test_more_of_a_slot_item_grows_its_slot_factory_instead_of_a_free_form_one():
+    scan, w, base, z, seg = planned(FIXTURE)
+    z2 = _zones_copy(z, w)
+    red = next(b for b in z2.segment(1).blocks if b.product == "automation-science-pack" and not b.growth)
+    b = Base()
+    site = b.add(Site("factory", {"item": red.product, "slot": red.slot.id, "segment_block": red.key}, (0, 0),
+                      entities=[("assembling-machine-1", 1.5, 1.5, "north"), ("assembling-machine-1", 5.5, 1.5, "north")]))
+    crew = bus_crew(z2, b)
+    upgraded = []
+    crew.upgrade = lambda sid: upgraded.append(sid) or f"upgraded 2 machine(s) in site {sid}"
+    crew.kn = type("K", (), {"unlocked": {"assembling-machine-2"}})()
+    assert zones.grow_slot(crew, z2, red.product) is None                  # its slot block is not built yet
+    z2.mark_built(red, (0, 0))
+    note = zones.grow_slot(crew, z2, red.product)
+    assert upgraded == [site.id] and "grew instead of a new factory" in note
+    assert zones.grow_slot(crew, z2, "transport-belt") is None             # no floorplan block: free-form
+    crew.kn = type("K", (), {"unlocked": set()})()                         # nothing faster unlocked
+    import pytest as _p
+    from brain.world import BuildError
+    with _p.raises(BuildError, match="fastest machines"):
+        zones.grow_slot(crew, z2, red.product)
+    # the flat-out trigger asks for the same: faster machines in its slot when no copy is planned
+    crew.kn = type("K", (), {"unlocked": {"assembling-machine-2"}})()
+    site.census = {"assembling-machine-1": {"working": 2}}
+    assert zones.grow_check(crew, z2, 100.0) == ""
+    note = zones.grow_check(crew, z2, 111.0)
+    assert f"faster machines in site {site.id}" in note
+    assert any(g.get("do") == "upgrade" and g.get("site") == site.id for g in crew.urgent)
+
+
+def test_only_science_goals_turn_into_slot_growth():
+    from types import SimpleNamespace
+    from brain.crew import Crew
+    scan, w, base, z, seg = planned(FIXTURE)
+    z2 = _zones_copy(z, w)
+    for blk in z2.segment(1).blocks:
+        z2.mark_built(blk, (0, 0))
+    calls = []
+    crew = SimpleNamespace(zones=z2, log=lambda *a: None, _intermediate_depth=0)
+    real = zones.grow_slot
+    zones.grow_slot = lambda c, zz, item, why="": calls.append(item) or f"grew {item}"
+    try:
+        assert Crew._grow_slot_instead(crew, {"item": "automation-science-pack"}) == "grew automation-science-pack"
+        assert Crew._grow_slot_instead(crew, {"item": "iron-gear-wheel"}) is None        # a free-form consumer's
+        crew._intermediate_depth = 1
+        assert Crew._grow_slot_instead(crew, {"item": "logistic-science-pack"}) is None  # a feeder: free-form
+    finally:
+        zones.grow_slot = real
+    assert calls == ["automation-science-pack"]
