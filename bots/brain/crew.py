@@ -7359,11 +7359,13 @@ class Foreman:
     def _labs_starving(self) -> bool:
         """Do labs report missing packs while the crew holds (or its chests hold) packs the research takes?"""
         base, w = self.crew.base, self.crew.w
-        labs = [s for s in base.of("labs") if not s.params.get("bus_fed")]    # the slot's labs: the bus feeds them
-        if not labs or not any(s.health.get("missing_science_packs", 0) for s in labs):
-            return False
         cur = (w.research or {}).get("current")
         need = {i["name"] for i in (self.crew.kn.techs.get(cur, {}) or {}).get("unit_ingredients", [])} if cur else set()
+        # the slot's labs: the bus feeds them their era's packs; a pack no line of theirs brings is the foreman's
+        labs = [s for s in base.of("labs") if not s.params.get("bus_fed")
+                or need - {pt.get("item") for pt in s.params.get("ports", []) if pt.get("item")}]
+        if not labs or not any(s.health.get("missing_science_packs", 0) for s in labs):
+            return False
         have = {k for k, v in w.inventory.items() if v > 0 and k.endswith("science-pack")}
         # a chest a science belt starts at belongs to its station: hand-fed labs never count on it
         linked = self.crew.science_links
@@ -7418,6 +7420,10 @@ class Foreman:
         # labs in the floorplan's science slot get their packs by bus (zones.build_labs_slot): never fed by hand
         plain = [s for s in base.of("labs") if not s.params.get("station") and not s.params.get("bus_fed")]
         heads = [s.labs[0] for s in base.of("labs") if s.params.get("station") and s.labs]
+        # the slot's labs get by bus only the packs their era plans; a later tier's pack (purple, yellow, made in
+        # a general slot) has no line to them: carried in by hand, like any lab's, until an era plans its line
+        bus_labs = [(s, {pt.get("item") for pt in s.params.get("ports", []) if pt.get("item")})
+                    for s in base.of("labs") if s.params.get("bus_fed") and s.labs]
         belted = self.crew.belted_packs() if heads else set()   # these reach the stations by belt on their own
         feeders = [(x, y) for s in plain for x, y, what in s.chests if what == "lab-feed"]
         bare = [p for s in plain if not any(what == "lab-feed" for *_, what in s.chests) for p in s.labs]
@@ -7427,6 +7433,8 @@ class Foreman:
                        if held.get(f, {}).get(pack, 0) < FEEDER_TARGET // 2)
             want += 40 if bare else 0
             want += 40 if heads and pack not in belted else 0   # a pack no belt brings: into the head lab
+            off_bus = [s for s, bus in bus_labs if pack not in bus]
+            want += sum(10 * len(s.labs) for s in off_bus)
             if want <= 0:
                 continue                              # every feeder has plenty: no trip to the labs at all
             for s in base.sites:                      # automated packs first
@@ -7460,6 +7468,11 @@ class Foreman:
                 # "still carrying 35 automation-science-pack")
                 per = max(1, w.inventory[pack] // len(heads))
                 for x, y in heads:
+                    w.insert(x, y, pack, per)
+            slot_labs = [q for s in off_bus for q in s.labs]
+            if slot_labs and w.inventory.get(pack, 0) > 0:
+                per = max(1, w.inventory[pack] // len(slot_labs))
+                for x, y in slot_labs:
                     w.insert(x, y, pack, per)
 
     def _feeder_contents(self, feeders: list) -> dict:
