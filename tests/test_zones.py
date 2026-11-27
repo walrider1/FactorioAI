@@ -684,7 +684,7 @@ if __name__ == "__main__":
 
 
 def test_a_floorplan_with_no_slot_reserves_nothing_and_is_tried_again():
-    from types import SimpleNamespace
+    from brain import zones
     z = zones.Zones()
     fp = SimpleNamespace(corridors={"spine": SimpleNamespace(kind="spine", cells=[(0, 0)], tiles={(0, 0), (0, 1)})},
                          slots=[], anchor=(0, 0), heading="east", warnings=[])
