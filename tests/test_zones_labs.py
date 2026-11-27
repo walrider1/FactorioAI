@@ -234,3 +234,16 @@ def test_the_build_hook_lays_the_pack_lines_when_the_labs_site_goes_up():
     assert "labs' pack lines" in note
     assert {"automation-science-pack", "logistic-science-pack"} <= set(zones.bus_site(crew, 1).params["laid"])
     assert all(pt["fed"] for pt in site.params["ports"])
+
+
+def test_once_the_slot_labs_stand_nobody_asks_for_stations_and_the_refusal_names_the_idle_science():
+    from brain.modules import Base, ResearchStation, Site
+    base = Base()
+    assert ResearchStation.slot_labs_refusal(base) is None
+    base.add(Site("labs", {"segment_block": "labs#0", "slot": "science-0", "count": 8, "bus_fed": True}, (0, 0)))
+    green = base.add(Site("factory", {"item": "logistic-science-pack"}, (5, 5)))
+    green.health = {"waiting_for_source_items": 13, "item_ingredient_shortage": 3}
+    why = ResearchStation.slot_labs_refusal(base)
+    assert f"site {green.id} (logistic-science-pack) make(s) nothing" in why
+    green.health = {"working": 10}
+    assert "make(s) nothing" not in ResearchStation.slot_labs_refusal(base)

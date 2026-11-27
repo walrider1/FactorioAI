@@ -374,7 +374,9 @@ def next_step(crew, science: dict, power: dict, path: list[str]) -> dict | None:
         return mall
     # labs for the long research: a research station (its own ground, belt ports), not more hand-fed rows
     labs_busy = _labs_busy(crew)
-    if path and base.count("labs") < LABS_TARGET and (labs_busy is None or labs_busy >= 0.5):
+    from .modules import ResearchStation
+    slot_labs = ResearchStation.slot_labs_refusal(base) is not None   # the floorplan's labs: no more stations
+    if path and not slot_labs and base.count("labs") < LABS_TARGET and (labs_busy is None or labs_busy >= 0.5):
         return {"do": "build", "module": "research_station", "count": max(2, min(10, LABS_TARGET - base.count("labs")))}
     # science, then other items with a rate milestone ahead (plastic): each once it is unlocked, at its target
     targets = rate_targets(crew)

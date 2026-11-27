@@ -255,6 +255,9 @@ def relocate_fix(crew, q: dict) -> dict | None:
         # extra supply into a chain that has no side to join: lay the site's input again from a spare source
         return {"do": "relink", "site": site.id, "item": q.get("item")}
     if site.kind == "labs" and site.params.get("station"):
+        from .modules import ResearchStation
+        if ResearchStation.slot_labs_refusal(crew.base):
+            return None                               # the floorplan's labs take the packs: this one retires
         new = {"do": "build", "module": "research_station", "count": int(site.params.get("count") or 2)}
     elif site.kind == "factory" and site.params.get("item"):
         new = {"do": "build", "module": "factory", "item": site.params["item"],

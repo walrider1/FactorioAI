@@ -849,9 +849,15 @@ class ResearchStation(Module):
         site = zmod.labs_slot_site(base)
         if site is None:
             return None
+        # what really holds research back: a science factory that makes nothing (run 20261127-101219: green at
+        # 0/min behind a jammed circuit slot, and the deciders answered with research stations over and over)
+        idle = [f"site {s.id} ({s.params.get('item')})" for s in base.of("factory")
+                if str(s.params.get("item") or "").endswith("science-pack") and s.health
+                and not s.health.get("working")]
         return (f"the floorplan's labs (site {site.id}, {site.params.get('count')} labs in slot "
-                f"{site.params.get('slot')}) take every science pack by bus: no labs elsewhere. Faster research "
-                "comes from more packs (the science slots' copies), not more labs")
+                f"{site.params.get('slot')}) take every science pack by bus: no labs elsewhere. Research waits on "
+                + (f"packs: {', '.join(idle)} make(s) nothing, so fix its inputs first" if idle else
+                   "packs, not labs: more science (or faster science machines) speeds it up"))
 
     # head ports around the first lab (its top-left tile x0, y0): (inserter tile, facing = the side it picks
     # from, belt end tile, approach tile). Belts arrive head-on, so no port's belt ever points into another's.

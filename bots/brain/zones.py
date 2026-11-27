@@ -1040,6 +1040,8 @@ def labs_slot_design(w) -> SlotBuild | None:
 
 def labs_slot_site(base):
     """The labs a segment's science slot holds (None: not built)."""
+    if not hasattr(base, "of"):
+        return None                           # a stub base in a test
     return next((s for s in base.of("labs") if (s.params or {}).get("segment_block")), None)
 
 
