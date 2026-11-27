@@ -9,6 +9,7 @@ with the wrong items on it.
     diagnose(crew, site, item)   the facts behind a starving input and the repair that fits them:
         no-link          a port with no belt                     -> relink (the link step lays it)
         polluted         its belt carries other items            -> purge
+        jammed           this site or a supplier jams inside      -> purge (cell)
         source-gone      its belt starts at a source that was removed  -> relink from a living source
         source-dead      its source mine is mined out            -> that mine rebuilt on fresh ore
         source-unfuelled its source's furnaces have no fuel      -> that source's coal input, diagnosed in turn
@@ -110,6 +111,21 @@ def diagnose(crew, site_id, item: str | None = None, depth: int = 0) -> dict:
         return out
     item = item or ports[0]["item"]
     facts = out["facts"]
+    # a site jammed inside (purity.cell_check), this one or one that makes what it takes: that is the cause, not
+    # this port's link. Run 20261127-101219: green science starved of circuits (site 22 jammed) while the
+    # relinks kept laying its iron again
+    try:
+        from . import purity
+        wants = {pt.get("item") for pt in site.params.get("ports", [])}
+        for a in purity.check(crew):
+            if not a["key"].startswith("cell-jam-"):
+                continue
+            other = crew.base.get(a.get("site"))
+            if other is not None and (other.id == site.id or other.params.get("item") in wants):
+                out.update(cause="jammed", why=a["what"][:200], fix=a["fix"])
+                return out
+    except Exception:  # noqa: BLE001 - a stub crew: no verdict
+        pass
     if any(not pt.get("fed") for pt in ports):
         out.update(cause="no-link", why=f"its {item} port has no belt: the link step lays one")
         return out
