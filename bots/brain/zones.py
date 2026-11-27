@@ -467,6 +467,15 @@ class Zones:
         if fp is None or "spine" not in fp.corridors:
             self.warnings.append("no spine fits out of the start yard: nothing reserved")
             return 0
+        if not [q for q in fp.slots if q.zone != "power"]:
+            # a spine stub with no slot is land taken for nothing, and as "reserved" it was never planned again
+            # (the zones test, seed 626262: 1600 tiles, a 1-cell spine, 0 slots, at the first electric build with
+            # little land seen): nothing is reserved, so the next try (RETRY_MIN) plans on more land
+            self.warnings.append("no slot fits yet (too little land seen): nothing reserved, tried again later")
+            if log:
+                log(f"[zones] no slot fits yet ({len(fp.corridors['spine'].cells)}-cell spine): nothing reserved, "
+                    f"tried again in {RETRY_MIN:.0f} min")
+            return 0
         keep = {cid: c for cid, c in fp.corridors.items() if c.kind in ("spine", "oil")}
         self.corridors = keep
         self.slots = [s for s in fp.slots if s.zone != "power"]

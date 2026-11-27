@@ -680,3 +680,13 @@ def test_the_oil_corridor_waits_until_crude_is_known_and_keeps_off_the_head(path
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))
+
+
+
+def test_a_floorplan_with_no_slot_reserves_nothing_and_is_tried_again():
+    from types import SimpleNamespace
+    z = zones.Zones()
+    fp = SimpleNamespace(corridors={"spine": SimpleNamespace(kind="spine", cells=[(0, 0)], tiles={(0, 0), (0, 1)})},
+                         slots=[], anchor=(0, 0), heading="east", warnings=[])
+    assert z.apply((0, 0), (-5, -5, 5, 5), fp) == 0
+    assert not z.reserved                                        # so after_build plans again after RETRY_MIN
