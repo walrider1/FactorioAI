@@ -400,7 +400,9 @@ class Crew:
             from . import zones
             return zones.run_bus_goal(self, goal)
         if do == "purge":
-            from .purity import purge
+            from .purity import purge, purge_cell
+            if goal.get("cell"):
+                return purge_cell(self, goal.get("site"), goal.get("item"))
             return purge(self, goal.get("site"), goal.get("item"))
         if do == "research":
             tech = goal["tech"]

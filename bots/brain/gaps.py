@@ -133,10 +133,31 @@ def holes(w, site, entities: list[dict]) -> list[dict]:
         a = ahead(t, e.get("direction", "north"))
         if a not in occupied and a not in blocked:
             ends.append((t, a))
+    unders = {_tile((e["x"], e["y"])): e for e in entities if e["name"].endswith("underground-belt")}
+
+    def downstream(start: Tile, limit: int = 600) -> set[Tile]:
+        """Every belt tile items from `start` pass (through undergrounds too)."""
+        out, t = set(), start
+        while t not in out and len(out) < limit:
+            out.add(t)
+            e = belts.get(t) or unders.get(t)
+            if e is None:
+                break
+            if e["name"].endswith("underground-belt") and e.get("belt_type") == "input" and e.get("pairs_with"):
+                t = _tile(e["pairs_with"])
+                continue
+            t = ahead(t, e.get("direction", "north"))
+        return out
+
+    # an orphan is the first belt of a line nothing feeds yet. A belt whose own line passes an inserter's drop tile
+    # is fed already: it is the tail of an output line (the belts behind where machines put their items). Run
+    # 20261127-101219 site 22: the cable line's first two belts sat behind the cable inserters' drops, the audit read
+    # them as orphans and bridged the iron line's dead end into them; iron filled the cable lane and green science
+    # stopped for 150 game minutes
     orphans = {}
     for t in own:
         e = belts.get(t)
-        if e is not None and not e.get("fed_by") and t not in drops:
+        if e is not None and not e.get("fed_by") and t not in drops and not (downstream(t) & drops):
             orphans[t] = e.get("direction", "north")
     if not ends or not orphans:
         return []
@@ -179,20 +200,13 @@ def holes(w, site, entities: list[dict]) -> list[dict]:
                 q.append((n, path + [n]))
         return None
 
-    unders = {_tile((e["x"], e["y"])): e for e in entities if e["name"].endswith("underground-belt")}
-
-    def downstream(start: Tile, limit: int = 600) -> set[Tile]:
-        """Every belt tile items from `start` pass (through undergrounds too)."""
-        out, t = set(), start
-        while t not in out and len(out) < limit:
-            out.add(t)
-            e = belts.get(t) or unders.get(t)
-            if e is None:
-                break
-            if e["name"].endswith("underground-belt") and e.get("belt_type") == "input" and e.get("pairs_with"):
-                t = _tile(e["pairs_with"])
-                continue
-            t = ahead(t, e.get("direction", "north"))
+    def carried(tiles) -> set[str]:
+        out: set[str] = set()
+        for t in tiles:
+            lanes = (belts.get(t) or unders.get(t) or {}).get("lanes") or []
+            for lane in (lanes.values() if isinstance(lanes, dict) else lanes):
+                if isinstance(lane, dict):
+                    out |= {k for k, v in lane.items() if v}
         return out
 
     found = []
@@ -200,6 +214,10 @@ def holes(w, site, entities: list[dict]) -> list[dict]:
         b = bridge(end, first)
         if b is not None and end in downstream(b[0]):
             continue                     # its own start: closing it would make a loop, not a line
+        if b is not None:
+            mine, theirs = carried([end]), carried(downstream(b[0]))
+            if mine and theirs and not (mine & theirs):
+                continue                 # two lines that carry different items are two lines, not one with a hole
         if b is not None:
             found.append((len(b[1]), end, b[0], b[1]))
     out, used_ends, used_orphans, used_tiles = [], set(), set(), set()
@@ -229,6 +247,9 @@ def audit(crew, force: bool = False) -> list[str]:
     for site in list(crew.base.sites):
         if not _site_belts(site) or not _starving(site) or pending(site):
             continue
+        if site.params.get("segment_block"):
+            continue                     # a floorplan slot's belts are its design's: a hole there is a refused tile,
+            #                              recorded at build time, never a guess (a guess joined iron into cable)
         if not force and now - seen_at.get(site.id, -1e9) < SITE_EVERY_MIN:
             continue
         tiles = [t for t, _ in _site_belts(site)] + _feed_ends(site)

@@ -107,6 +107,10 @@ def check(crew) -> list[dict]:
                            "what": f"the {ln['item']} belt into site {ln['to_site']} carries {what}: another belt "
                                    "joins it, and the foreign items block a lane the site never empties",
                            "fix": {"do": "purge", "site": ln["to_site"], "item": ln["item"]}})
+    try:
+        alerts.extend(cell_check(crew))
+    except Exception:  # noqa: BLE001 - a stub crew: no verdict inside sites
+        pass
     crew._purity_alerts = alerts
     return list(alerts)
 
@@ -233,5 +237,180 @@ def purge(crew, site_id, item: str | None = None) -> str:
         notes.append(f"{ln['item']} into site {site_id}: " + "; ".join(
             done + [f"{len(dirty)} belt(s) cleaned" if dirty else "no foreign items left on it"]) + (
             cause if dirty else ""))
+    crew._purity_at = -1e9                           # look again soon: did it hold?
+    return " | ".join(notes)
+
+
+# ------------------------------------------------------------------ jams inside a site (cells)
+# check() looks only at links between sites. Run 20261127-101219 site 22 (circuits): a gap repair joined the iron
+# line's dead end into the start of the cable line, behind where the cable inserters drop. Iron filled the cable
+# lane, the cable inserters stood "waiting for space", the circuit assembler got no cable, and green science made
+# nothing for 150 game minutes while the planners relinked iron and built labs. Nothing looked inside the site.
+CELL_WAIT = ("waiting_for_source_items", "item_ingredient_shortage", "waiting_for_ingredients", "no_ingredients",
+             "waiting_for_space_in_destination", "full_output")
+
+
+def _lanes(e: dict) -> list[dict]:
+    lanes = e.get("lanes") or []
+    if isinstance(lanes, dict):
+        lanes = list(lanes.values())
+    return [{k: int(v or 0) for k, v in ln.items() if v} if isinstance(ln, dict) else {} for ln in lanes]
+
+
+def _ahead(t, d):
+    v = VEC.get(d or "north", (0, -1))
+    return t[0] + v[0], t[1] + v[1]
+
+
+def _site_look(crew, site):
+    """(the site's belt tiles, tile -> belt entity with lanes, inserters) from one look, or None."""
+    from .gaps import _look, _site_belts
+    tiles = [t for t, _ in _site_belts(site)]
+    if not tiles:
+        return None
+    ents = _look(crew, tiles)
+    belts = {_tile((e["x"], e["y"])): e for e in ents if e["name"] in BELTS}
+    return set(tiles), belts, [e for e in ents if e["name"] in INSERTERS]
+
+
+def _line(belts, start, limit=200) -> list:
+    """The belt tiles items dropped at `start` pass, in order."""
+    out, t = [], start
+    while t in belts and t not in out and len(out) < limit:
+        out.append(t)
+        e = belts[t]
+        if e["name"].endswith("underground-belt"):
+            if e.get("belt_type") == "input" and e.get("pairs_with"):
+                t = _tile(e["pairs_with"])
+                continue
+        t = _ahead(t, e.get("direction"))
+    return out
+
+
+def _tail(belts, first, limit=40) -> list:
+    """The belts upstream of `first`, nearest first (following one feeder at a time)."""
+    out, t = [], first
+    while len(out) < limit:
+        fb = [_tile(p) for p in (belts.get(t) or {}).get("fed_by") or []]
+        fb = [q for q in fb if q in belts and q not in out and q != first]
+        if not fb:
+            break
+        t = fb[0]
+        out.append(t)
+    return out
+
+
+def _beyond(belts, drop, dropped) -> list:
+    """The belts upstream of every inserter drop on this line: what comes down them came from somewhere else."""
+    tail = _tail(belts, drop)
+    last = max([i for i, t in enumerate(tail) if t in dropped], default=-1)
+    return tail[last + 1:]
+
+
+def _held(ins: dict) -> str:
+    h = ins.get("held") or ins.get("hand") or ""
+    return h.get("name", "") if isinstance(h, dict) else str(h)
+
+
+def jams(crew, site) -> list[dict]:
+    """Lines inside the site that an inserter cannot drop onto because a lane is clogged with another item:
+    [{"item": blocked product, "intruder": item, "line": [tiles], "drop": tile}]."""
+    look = _site_look(crew, site)
+    if look is None:
+        return []
+    own, belts, inserters = look
+    dropped = {_tile(i["drop"]) for i in inserters if i.get("drop")}
+    out, seen = [], set()
+    for ins in inserters:
+        if ins.get("status") != "waiting_for_space_in_destination" or not ins.get("drop"):
+            continue
+        d = _tile(ins["drop"])
+        if d not in own or d not in belts:
+            continue
+        line = _line(belts, d)
+        if not line or belts[line[-1]].get("feeds") or line[-1] not in own:
+            continue                                  # it leaves the site: an output line backing up, not a jam
+        mixed: dict[str, int] = {}
+        for t in line:
+            for lane in _lanes(belts[t]):
+                if len(lane) >= 2:                    # two kinds on one lane of a dead-end line: a clog
+                    for k, v in lane.items():
+                        mixed[k] = mixed.get(k, 0) + v
+        if len(mixed) < 2 or sum(mixed.values()) < MIN_FOREIGN:
+            continue
+        held = _held(ins)
+        beyond = _beyond(belts, d, dropped)
+        upstream = {k for t in beyond for lane in _lanes(belts[t]) for k in lane}
+        pick = ((set(mixed) - {held}) & upstream) or (set(mixed) - {held}) or set(mixed)
+        intruder = max(sorted(pick), key=lambda k: mixed[k])
+        key = (line[-1], intruder)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"item": held or None, "intruder": intruder, "line": line, "drop": d})
+    return out
+
+
+def cell_check(crew) -> list[dict]:
+    """Urgent alerts for sites whose inner belts jam (only sites the foreman saw waiting are looked at)."""
+    alerts = []
+    for site in list(getattr(crew.base, "sites", []) or []):
+        h = site.health or {}
+        if not any(h.get(k) for k in CELL_WAIT):
+            continue
+        try:
+            found = jams(crew, site)
+        except Exception:  # noqa: BLE001 - too big for one look, a stub world: no verdict
+            continue
+        if found:
+            j = found[0]
+            what = site.params.get("item") or site.kind
+            alerts.append({"level": "urgent", "key": f"cell-jam-{site.id}", "site": site.id,
+                           "what": f"site {site.id} ({what}) is jammed inside: {j['intruder']} clogs a lane of its "
+                                   f"{j['item'] or 'output'} line at {j['drop']}, its inserters cannot drop and the "
+                                   "machines after it starve (and everything that needs its product). Purge it",
+                           "fix": {"do": "purge", "site": site.id, "item": j["intruder"], "cell": True}})
+    return alerts
+
+
+def purge_cell(crew, site_id, item: str | None = None) -> str:
+    """Unjam a site's inner line: stop the belt that runs into the tail of the output line (the belts upstream of
+    where its inserters drop, which nothing should feed), then take up and lay again each belt holding the intruder."""
+    site = crew.base.get(site_id)
+    if site is None:
+        raise BuildError(f"there is no site {site_id}")
+    found = [j for j in jams(crew, site) if item is None or j["intruder"] == item]
+    if not found:
+        return f"site {site_id}: no jammed line inside it now"
+    own, belts, inserters = _site_look(crew, site)
+    dropped = {_tile(i["drop"]) for i in inserters if i.get("drop")}
+    notes = []
+    for j in found:
+        line = j["line"]
+        tail = _tail(belts, j["drop"])
+        beyond = _beyond(belts, j["drop"], dropped)
+        leak = None
+        for i, t in enumerate(beyond):                # a turn into the line, carrying the intruder: the leak
+            prev = beyond[i - 1] if i else tail[len(tail) - len(beyond) - 1] if len(tail) > len(beyond) else j["drop"]
+            if belts[t].get("direction") != belts[prev].get("direction") and                     any(j["intruder"] in lane for lane in _lanes(belts[t])):
+                leak = t
+                break
+        done = [_stop_leak(crew, leak, set(line) | set(tail[:tail.index(leak)]))] if leak else []
+        keep = tail[:tail.index(leak)] if leak else tail
+        cleaned = 0
+        for t in list(reversed(keep)) + line:         # upstream first
+            e = belts.get(t)
+            if t not in own or e is None or not e["name"].endswith("transport-belt"):
+                continue
+            if not any(j["intruder"] in lane for lane in _lanes(e)):
+                continue
+            d = e.get("direction", "north")
+            if crew.w.pickup(e["name"], e["x"], e["y"], d):
+                crew.w.place(e["name"], e["x"], e["y"], d, crew.w.footprint(e["name"], e["x"], e["y"], d))
+                cleaned += 1
+        if leak and "took up" in done[0]:
+            site.entities = [en for en in site.entities if _tile((en[1], en[2])) != leak]
+        notes.append(f"site {site_id}'s {j['item'] or 'output'} line: " + "; ".join(
+            done + [f"{cleaned} belt(s) cleaned of {j['intruder']}"]) + ("" if leak else "; no leak found"))
     crew._purity_at = -1e9                           # look again soon: did it hold?
     return " | ".join(notes)
