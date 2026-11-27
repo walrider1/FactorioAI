@@ -47,6 +47,10 @@ SITE_MARGIN = 2           # reserved land keeps this far from any building of ou
 HEAD = 26                 # spine tiles from its start kept for the head terminals (plates come in there by trunk)
 HEAD_GAP = 4              # head terminals are this far apart (two bus taps side by side need four)
 SPARE_SLOTS = 2           # make slots reserved beyond the era's blocks: a second copy, or a slot a design fits better
+# General slots: more reserve slots along the spine for factories no era plans (belts, inserters, pipes, the next
+# tiers' chains...). A free-form factory goal is designed into a free one (Factory._general_slot_design) before
+# any open ground elsewhere: the base keeps growing along the spine instead of round the start yard.
+GENERAL_SLOTS = 4
 # Growth: a segment's bus is laid out from the start as if a copy of its science blocks stood in the spare slots
 # (re-routing a laid bus for a copy added later moved 337 of 658 bus pieces in the fixture's segment 1). Nothing of
 # a copy is built until its block runs flat out: then the copy and its few bus taps go up, nothing re-routed.
@@ -219,7 +223,7 @@ def growth_specs(specs, k: int) -> list:
 def slot_demand(n: int, kit) -> dict[str, int]:
     """Spine slots segment n needs, by zone (the silo spot is kept from segment 1 on)."""
     specs = segment_specs(n, kit)
-    return {"make": sum(1 for s in specs if s.zone == "make"), "reserve": SPARE_SLOTS,
+    return {"make": sum(1 for s in specs if s.zone == "make"), "reserve": SPARE_SLOTS + GENERAL_SLOTS,
             "science": sum(1 for s in specs if s.zone == "science"), "silo": 1}
 
 
@@ -511,6 +515,10 @@ class Zones:
         With `snap` it touches nothing live, so it may run on a worker thread; apply() puts it into effect."""
         snap = snap or self.snapshot(world, base)
         fp = plan_floor(snap["scan"], snap["yard"], snap["blocked"], snap["want"], snap["centre"], log=log)
+        if fp is None and snap["want"].get("reserve", 0) > SPARE_SLOTS:
+            # no room for the general slots too: the eras' slots and their spares only
+            fp = plan_floor(snap["scan"], snap["yard"], snap["blocked"], {**snap["want"], "reserve": SPARE_SLOTS},
+                            snap["centre"], log=log)
         if fp is None and snap.get("want_min") and snap["want_min"] != snap["want"]:
             # no room for the later eras' slots: segment 1's alone (that world stays in segment 1)
             fp = plan_floor(snap["scan"], snap["yard"], snap["blocked"], snap["want_min"], snap["centre"], log=log)
@@ -841,6 +849,25 @@ class Zones:
                     return b
         return None
 
+    def general_slots(self) -> list:
+        """Reserve slots on the spine that no block of the live segment (copies included) uses and no factory has
+        claimed: where a factory no era plans goes. Nearest the spine's start first."""
+        if not ENABLED or not self.reserved:
+            return []
+        claimed = self.__dict__.get("claimed") or {}
+        used = set()
+        for n in self.live():
+            used |= {b.slot.id for b in self.segment(n).blocks if b.ok}
+        return sorted((s for s in self.slots if s.zone == "reserve" and s.corridor == "spine" and s.id not in used
+                       and s.id not in claimed), key=lambda s: s.order)
+
+    def claim(self, slot, item: str, site_id=None) -> None:
+        """A free-form factory takes a general slot: its land is given back for buildings (the factory stands on
+        it) and no segment plans a block there any more."""
+        self.__dict__.setdefault("claimed", {})[slot.id] = {"item": item, "site": site_id}
+        self.release(slot.tiles)
+        self._seg = {k: v for k, v in self._seg.items() if k[0] in self.opened}   # later eras plan around it
+
     def onto_bus(self, n: int, block: SegBlock | None = None) -> set[str]:
         """Products a slot factory of segment n puts on the bus instead of into an output chest: what the make
         blocks take (Segment.consumed), and once the segment's labs stand, the packs they take. Before the labs
@@ -939,7 +966,7 @@ def design_segment(z: Zones, n: int, kit, fp, growth: bool = False, skip: frozen
     by_zone = {zone: sorted((s for s in fp.slots if s.zone == zone and s.corridor == "spine"), key=lambda s: s.order)
                for zone in ("make", "science", "reserve")}
     spare = list(by_zone["reserve"])
-    used: set[str] = set()
+    used: set[str] = set((z.__dict__.get("claimed") or {}).keys())     # general slots a free-form factory took
     counts: dict[str, int] = {}
     prev = None
     if n > 1:                              # a later era: every block of the last one keeps its slot
@@ -950,7 +977,8 @@ def design_segment(z: Zones, n: int, kit, fp, growth: bool = False, skip: frozen
     keep = {b.key: b.slot for b in (prev.blocks if prev is not None else []) if b.ok and not b.growth}
     plan = [(s, False) for s in specs]
     if growth:                             # copies for the spare slots the era's own blocks leave free
-        plan += [(s, True) for s in growth_specs([s for s in specs if s.id not in skip], len(spare))]
+        plan += [(s, True) for s in growth_specs([s for s in specs if s.id not in skip],
+                                                 min(SPARE_SLOTS, len([sl for sl in spare if sl.id not in used])))]
     for spec, grow in plan:
         copy = counts.get(spec.id, 0)
         counts[spec.id] = copy + 1

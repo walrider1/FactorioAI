@@ -175,6 +175,9 @@ def _slot_state(z, crew, slot) -> tuple[str, str | None]:
     """reserved | spare | planned | building | built, and the item its factory makes (if a segment has a block there)."""
     item = None
     state = "reserved"
+    took = (z.__dict__.get("claimed") or {}).get(slot.id)
+    if took:                                    # a general slot a free-form factory took
+        return "built", took.get("item")
     cur = ((getattr(crew, "current", None) or {}).get("goal") or {})
     cur_item = cur.get("item") or (cur.get("with") or {}).get("item")
     for n, st in [(k, v) for k, v in (z.opened or {}).items() if k in (z.live() if hasattr(z, "live") else [k])]:

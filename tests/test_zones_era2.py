@@ -101,7 +101,10 @@ def test_segment_two_takes_over_keeping_what_stays_and_reworking_what_changed(pa
 def test_an_old_world_with_a_segment_one_floorplan_stays_in_segment_one():
     w, z, base = _segment1_built(FIXTURE)
     crew = _crew_for(z, base)
-    z.slots = [s for s in z.slots if not (s.zone == "make" and s.id in ("make-4", "make-5", "make-6"))]
+    make = sorted((s for s in z.slots if s.zone == "make"), key=lambda s: s.order)[4:]     # an old world's plan:
+    spare = sorted((s for s in z.slots if s.zone == "reserve"), key=lambda s: s.order)[2:]  # 4 make, 2 spare
+    gone = {s.id for s in make + spare}
+    z.slots = [s for s in z.slots if s.id not in gone]
     z._fp = None
     z._seg = {k: v for k, v in z._seg.items() if k[0] == 1}
     ok, why = z.ready(2, crew)
@@ -116,3 +119,15 @@ def test_segment_two_waits_for_blue_recipes_and_its_head_inputs():
     crew.makes = lambda item: item != "sulfur"
     ok, why = z.ready(2, crew)
     assert not ok and "sulfur" in why
+
+
+def test_a_factory_no_era_plans_takes_a_general_slot_and_later_eras_plan_around_it():
+    w, z, base = _segment1_built(FIXTURE)
+    free = z.general_slots()
+    assert len(free) >= 2                                     # reserve slots beyond the planned copies
+    slot = free[0]
+    assert slot.tiles <= z.block
+    z.claim(slot, "transport-belt")
+    assert not (slot.tiles & z.block) and slot.id not in {s.id for s in z.general_slots()}
+    seg2 = z.segment(2)
+    assert slot.id not in {b.slot.id for b in seg2.blocks}    # the blue era keeps off it

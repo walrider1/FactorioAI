@@ -1165,6 +1165,9 @@ class Factory(Module):
             self.designs[key] = got
             return got
         ug = 10 if "underground-belt" in w.kn.unlocked else 0
+        got = self._general_slot_design(w, base, item, rate, supplied, key, ug)
+        if got is not None:                      # a free general slot of the floorplan: no open ground elsewhere
+            return got
         # plates come in by belt: open ground near the base, off the ore (ore is for the mine modules). No
         # fallback to drills and furnaces inside the factory: mines are modules of their own
         got = self._ladder(w, base, item, rate, supplied, self._fed_places(w, base, p), ug, key, off_ore=True)
@@ -1524,6 +1527,40 @@ class Factory(Module):
                 if acc[j + side][i + side] - acc[j][i + side] - acc[j + side][i] + acc[j][i] == 0:
                     best = (d, (cx, cy))
         return best[1] if best else None
+
+    def _general_slot_design(self, w, base, item: str, rate: float, supplied: set, key, ug: int):
+        """A factory no era of the floorplan plans goes into one of its free general slots (zones.GENERAL_SLOTS),
+        designed on that slot's land, inputs linked in across the spine like any free-form factory. The slot is
+        claimed once a design fits it. None: no floorplan, no free slot, or no design fits the first two."""
+        z = getattr(w, "zones", None) or self.zones
+        if z is None or not getattr(z, "reserved", False) or not hasattr(z, "general_slots"):
+            return None
+        try:
+            slots = z.general_slots()
+        except Exception:  # noqa: BLE001 - the floorplan never stops a factory
+            return None
+        for slot in slots[:2]:
+            x0, y0, sw, sh = slot.rect
+            focus = (x0 + sw / 2, y0 + sh / 2)
+            self._survey(w, focus)
+            grid = Grid.from_world(w)
+            grid.keepout -= set(slot.tiles)
+            grid.keepout |= set(grid.ore)
+            d = self._design_at(w, base, grid, item, rate, focus, ug * 2, max(sw, sh) // 2 + 2, full=True,
+                                supplied=supplied)
+            if not d.ok:
+                continue
+            if self.probe is not None:
+                bad = w.think(f"checking the belt routes into a {item} factory in slot {slot.id}", self.probe, grid, d)
+                if bad:
+                    continue
+            z.claim(slot, item)
+            w.log(f"[zones] {item} goes into general slot {slot.id} of the floorplan (no era plans it)")
+            d.notes.append(f"in general slot {slot.id}")
+            self.designs[key] = (d, grid, focus)
+            self._save_case(grid, item, rate, focus, f"{d.placer}: ok (general slot {slot.id})")
+            return self.designs[key]
+        return None
 
     @staticmethod
     def _open_places(w: FreeWorld, base: Base, n: int = 6) -> list[tuple[float, float]]:
