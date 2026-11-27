@@ -5581,7 +5581,12 @@ class Crew:
                 continue
             done[site.id] = self._minute()
             spot = None
-            for t in reversed(self.line_taps(site, ln)):
+            taps = list(reversed(self.line_taps(site, ln)))
+            # past the last furnace first (the whole row's plates); else anywhere on the line: a full box takes
+            # nothing more, so upstream it costs the row only its first 16 stacks (the zones test, seed 737373:
+            # three lines had one or two tiles past their last furnace, all taken by links' inserters)
+            rest = [tuple(t) for t in reversed(ln.get("tiles") or []) if tuple(t) not in taps]
+            for t in taps + rest:
                 for dx, dy in belts.VEC.values():
                     ins, box = (t[0] + dx, t[1] + dy), (t[0] + 2 * dx, t[1] + 2 * dy)
                     if {ins, box} & heads or not (self.w.free({ins}) and self.w.free({box})):
