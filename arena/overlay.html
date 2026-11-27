@@ -222,7 +222,8 @@ body.atlas #world { display: none; }
    shows, top left, while a factory is designed or built (bot_live "design"). */
 #zmap { right: 24px; top: 656px; width: 372px; height: 296px; padding: 14px 14px 0; }
 #zmap canvas { display: block; margin-top: 10px; }
-body:not(.zoned) #zmap, body.zoned #world, body.atlas #zmap { display: none; }
+/* the brain's floorplan panel stands from the start: the world map is drawn in it until the floorplan is reserved */
+body:not(.atlas) #world, body.atlas #zmap { display: none; }
 #dsg { left: 24px; top: 94px; width: 392px; height: 448px; padding: 14px 14px 0; transition: opacity .5s; }
 #dsg canvas { display: block; margin-top: 10px; }
 #dsg .hd .t { color: var(--ink); font: 800 19px/1 var(--f-d); letter-spacing: .08em; }
@@ -926,13 +927,17 @@ function render(d) {
 const ORE = { "iron-ore": ["#7f95a8", "iron"], "copper-ore": ["#c97b45", "copper"], "coal": ["#57524b", "coal"],
   "stone": ["#a8967a", "stone"], "uranium-ore": ["#6cc04a", "uranium"], "crude-oil": ["#b77be0", "oil"] };
 function renderWorld(W) {
-  const cv = $("worldc"), g = cv.getContext("2d"), w = cv.width, h = cv.height;
+  // brain bot: drawn in the floorplan panel until the floorplan is reserved (then drawZones owns that canvas)
+  const early = !document.body.classList.contains("atlas");
+  if (early && (document.body.classList.contains("zoned") || ZN.plan)) return;
+  const cv = $(early ? "zmapc" : "worldc"), g = cv.getContext("2d"), w = cv.width, h = cv.height;
   g.clearRect(0, 0, w, h);
   if (!W) return;
   const P = (W.patches || []).filter(p => Array.isArray(p.box) && p.box.length === 4);
   const oil = (W.oil_wells || []).filter(t => Array.isArray(t)), sites = (W.sites || []).filter(s => Array.isArray(s.at));
   const pos = Array.isArray(W.position) ? W.position : null;
-  $("worldCount").textContent = `${P.length} patches · ${oil.length} wells · ${sites.length} sites`;
+  $(early ? "zmapCount" : "worldCount").textContent = early ? `not drawn yet · ${sites.length} sites`
+    : `${P.length} patches · ${oil.length} wells · ${sites.length} sites`;
   if (!sites.length && !pos) return;
   const legend = 18, vh = h - legend, edge = 9;
   const pts = sites.length ? sites.map(s => s.at) : [pos];
