@@ -83,6 +83,7 @@ def _slot_ents(block) -> tuple[int, int, list]:
     return _relative(boxes)
 
 
+REFUSED_SHOW_S = 120            # a refused attempt stays on the overlay this long unless another follows
 DESIGN_ROSTER: dict[str, list] = {}       # item -> its last roster (kept across attempts)
 
 
@@ -137,15 +138,23 @@ def design_feed(crew) -> dict | None:
         d = dict(DESIGN)
     if not d:
         return None
-    goal = ((getattr(crew, "current", None) or {}).get("goal") or {}) if crew is not None else {}
-    building = goal.get("module") == "factory" and goal.get("item") == d.get("item") \
-        or (goal.get("with") or {}).get("item") == d.get("item")
+    age = time.time() - d.get("t", 0)
+    if d.get("status") == "refused" and age > REFUSED_SHOW_S:
+        return None                                   # the designer moved on (another place, a feeder, a saved one)
     rec = getattr(getattr(crew, "w", None), "recorder", None) if crew is not None else None
-    if building and isinstance(rec, list) and d.get("status") == "kept":
-        d["placed"] = min(len(rec), len(d.get("ents") or []))
-        d["status"] = "building" if rec else "kept"
-    elif not building and time.time() - d.get("t", 0) > (1200 if d.get("status") == "drawing" else 240):
+    if d.get("status") == "kept" and isinstance(rec, list) and age < 1800:
+        # its build: what the recorder holds beyond what it held when the design was kept (a feeder or mine built
+        # first in the same goal is not counted)
+        with LOCK:
+            if DESIGN.get("t") == d.get("t") and "rec0" not in DESIGN:
+                DESIGN["rec0"] = len(rec)
+            rec0 = DESIGN.get("rec0", 0) if DESIGN.get("t") == d.get("t") else 0
+        placed = max(0, len(rec) - rec0)
+        d["placed"] = min(placed, len(d.get("ents") or []))
+        d["status"] = "building" if placed else "kept"
+    elif age > (1200 if d.get("status") == "drawing" else 240):
         return None                                   # (a model drawing a layout can take minutes per attempt)
+    d.pop("rec0", None)
     d["age"] = round(time.time() - d.get("t", time.time()), 1)
     d.pop("since", None)
     return d

@@ -1706,6 +1706,9 @@ class Factory(Module):
                         d.notes.append(f"asked {rate}/min, designed {saved}/min")
                     if off_ore:
                         d.notes.append("plates come in through input ports")
+                    from . import viz              # the overlay shows a saved design being built, like a new one
+                    viz.design_attempt(item, rate, at, "saved", d, "kept",
+                                       f"a saved design ({n} earlier build{'s' if n != 1 else ''})")
                     self.designs[key] = (d, grid, at)
                     return self.designs[key]
         w.log(f"[fab] {len(recs)} saved {item} design(s) fit none of {len(places)} places on today's ground "
