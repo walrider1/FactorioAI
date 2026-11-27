@@ -607,7 +607,7 @@ class Zones:
     def _head_keep(self) -> set[Tile]:
         """The head terminals' trunk ends and the land just outside them: the oil corridor keeps off."""
         out: set[Tile] = set()
-        for (n, _k), seg in self._seg.items():
+        for seg in self._seg.values():          # (keys: n, kit, growth)
             if "spine" in self.corridors:
                 for hp in seg.head_ports(self.corridors["spine"]):
                     out |= _dilate({tuple(hp["end"]), tuple(hp["approach"])}, 2)
