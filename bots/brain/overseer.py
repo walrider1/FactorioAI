@@ -51,7 +51,7 @@ MIN_GAP_MIN = 4.0              # game minutes after its last answer before an ea
                                # need time to run; two looks 0.1-1 min apart only said "not run yet" (run 20261120-023103)
 FIRST_LOOK_MIN = 10.0          # its first look: at minute 0 there is nothing to oversee; it only re-ordered the
                                # strategist's first goal (a duplicate coal mine) and replaced its plan (run 20261120-084046)
-GAP_RANGE = (5.0, 20.0)        # what it may ask for as its next look
+GAP_RANGE = (10.0, 30.0)       # what it may ask for as its next look (every look costs $0.05-0.12)
 PLAN_MAX = 10
 FORBID_MAX_MIN = 30.0
 FORBID_DEFAULT_MIN = 10.0
@@ -161,7 +161,7 @@ How to act (only for a problem named above):
   strategist and assessor must follow from now on, in plain words; they treat it as binding.
 - Pausing or dropping the goal in hand costs the work it did: do it only when that goal is the mistake or
   blocks something urgent, not to reorder the queue (your orders run first anyway when it ends). Ask for your
-  next look (5-20 game minutes) by how soon your orders can show results: longer while a big build runs.
+  next look (10-30 game minutes) by how soon your orders can show results: longer while a big build runs.
 - Be decisive but not destructive: never remove a working site that the base needs, the only power station,
   or the last source of a plate. When everything runs well, give no orders and say so.
 
