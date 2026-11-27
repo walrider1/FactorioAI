@@ -217,3 +217,20 @@ def test_the_zones_queue_the_labs_then_the_missing_science_then_retire_the_other
     assert not [g for g in crew.urgent if g["do"] == "remove"]           # running, but not long enough yet
     zones.science_check(crew, z, 45.0 + zones.RETIRE_AFTER_MIN)
     assert [g["site"] for g in crew.urgent if g["do"] == "remove"] == [old.id]
+
+
+def test_the_build_hook_lays_the_pack_lines_when_the_labs_site_goes_up():
+    from brain import zones
+    from brain.modules import Base, Site
+    scan, w, z, seg = fresh_zones()
+    labs, _, _ = _blocks(seg)
+    base = Base()
+    crew = bus_crew(z, base)
+    _labs_world(crew)
+    z.mark_built(labs, (0, 0))
+    site = base.add(Site("labs", {"segment_block": labs.key, "slot": labs.slot.id, "bus_fed": True,
+                                  "ports": [dict(p) for p in zones.slot_build(labs).ports]}, (0, 0)))
+    note = zones.after_build(crew, site)
+    assert "labs' pack lines" in note
+    assert {"automation-science-pack", "logistic-science-pack"} <= set(zones.bus_site(crew, 1).params["laid"])
+    assert all(pt["fed"] for pt in site.params["ports"])
