@@ -51,7 +51,12 @@ SPARE_SLOTS = 2           # make slots reserved beyond the era's blocks: a secon
 # (re-routing a laid bus for a copy added later moved 337 of 658 bus pieces in the fixture's segment 1). Nothing of
 # a copy is built until its block runs flat out: then the copy and its few bus taps go up, nothing re-routed.
 GROWTH = True
-GROWTH_FIRST = ("logistic-science-pack", "automation-science-pack", "chemical-science-pack")
+# No copies of the science blocks: the slot's labs take each pack from one bus line (design_bus keeps one line
+# per spine half), the originals feed those lines, and bus-fed labs are not hand-fed, so a science copy's packs
+# would only fill its chest. The intermediates every science block draws on (gears, circuits) get the copies.
+GROWTH_SKIP = ("automation-science-pack", "logistic-science-pack", "chemical-science-pack",
+               "military-science-pack", "production-science-pack", "utility-science-pack")
+GROWTH_PRUNE = True       # drop a copy that would not feed the bus beside its original (design_segment)
 GROW_FLAT_MIN = 10.0      # a block flat out (machines working, output never backed up) this long gets its copy
 GROW_WORKING = 0.8        # share of its assemblers seen working
 GROW_FULL = 0.1           # at most this share seen with output backed up
@@ -189,12 +194,11 @@ def segment_specs(n: int, kit) -> list:
 
 
 def growth_specs(specs, k: int) -> list:
-    """Up to k planned copies for the spare slots: the science blocks first, then the busiest make blocks."""
-    make = [s for s in specs if s.zone == "make" and s.kind == "make"]
-    first = [s for item in GROWTH_FIRST for s in make if s.product == item]
-    rest = sorted((s for s in make if s not in first), key=lambda s: -float(getattr(s, "per_s", 0) or 0))
+    """Up to k planned copies for the spare slots: the busiest intermediate make blocks (never a science block:
+    GROWTH_SKIP)."""
+    make = [s for s in specs if s.zone == "make" and s.kind == "make" and s.product not in GROWTH_SKIP]
     out, seen = [], set()
-    for s in first + rest:
+    for s in sorted(make, key=lambda s: -float(getattr(s, "per_s", 0) or 0)):
         if s.id not in seen:
             out.append(s)
             seen.add(s.id)
@@ -821,7 +825,7 @@ def _head_terminals(fp, items: list[str], rates: dict[str, float]) -> list:
     return out
 
 
-def design_segment(z: Zones, n: int, kit, fp, growth: bool = False) -> Segment:
+def design_segment(z: Zones, n: int, kit, fp, growth: bool = False, skip: frozenset = frozenset()) -> Segment:
     from atlas.design.memory import Memory
     from atlas.layout.bus import Terminal, design_bus
     from atlas.sim.base import world_check, _reach
@@ -840,7 +844,7 @@ def design_segment(z: Zones, n: int, kit, fp, growth: bool = False) -> Segment:
     counts: dict[str, int] = {}
     plan = [(s, False) for s in specs]
     if growth:                             # copies for the spare slots the era's own blocks leave free
-        plan += [(s, True) for s in growth_specs(specs, len(spare))]
+        plan += [(s, True) for s in growth_specs([s for s in specs if s.id not in skip], len(spare))]
     for spec, grow in plan:
         copy = counts.get(spec.id, 0)
         counts[spec.id] = copy + 1
@@ -893,6 +897,20 @@ def design_segment(z: Zones, n: int, kit, fp, growth: bool = False) -> Segment:
     if not any(t.io == "sink" for t in terms):
         return seg
     bus = design_bus(fp, terms, kit)
+    if growth and GROWTH_PRUNE:
+        # design_bus keeps one line per spine half: a copy may take an item's line from its original, or feed no
+        # line at all (6 of 22 maps: the circuit copy sourced the line, the original nothing). A copy is kept only
+        # when it and its original both feed the bus; otherwise it is left out and the bus laid out again
+        srcs = {t.owner for ln in bus.lines.values() for t in ln.terms if t.io == "src"}
+        bad = set()
+        for b in seg.blocks:
+            if not (b.ok and b.growth):
+                continue
+            orig = [o for o in seg.blocks if o.ok and not o.growth and o.spec.id == b.spec.id]
+            if f"{b.key}@{b.slot.id}" not in srcs or any(f"{o.key}@{o.slot.id}" not in srcs for o in orig):
+                bad.add(b.spec.id)
+        if bad:
+            return design_segment(z, n, kit, fp, growth=True, skip=frozenset(skip) | bad)
     seg.bus = bus
     seg.problems += bus.problems
     for b in seg.blocks:

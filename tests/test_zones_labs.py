@@ -88,7 +88,7 @@ def test_the_planned_bus_has_the_pack_lines_from_the_science_slots_to_the_labs()
 def test_the_built_science_blocks_feed_the_labs_lines_never_their_planned_copies():
     scan, w, z, seg = fresh_zones()
     labs, red, green = _blocks(seg)
-    assert z.growth_on(1) and any(b.growth for b in seg.blocks)   # the fixture plans copies
+    assert not any(b.growth and b.product in labs.spec.bus_in for b in seg.blocks)   # no science copies (GROWTH_SKIP)
     assert seg.feeds_line(red) and seg.feeds_line(green)
     for b in seg.blocks:
         if b.growth and b.product in labs.spec.bus_in:
