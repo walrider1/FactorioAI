@@ -32,7 +32,7 @@ from typing import Any
 from .belts import LINK_REACH
 
 FUELS = ("coal", "wood")
-CRITICAL = ("coal", "boiler", "power", "fuel", "pipe", "belt-foreign", "gap-", "labs-feed")   # keys the rule floor fixes itself
+CRITICAL = ("coal", "boiler", "power", "fuel", "pipe", "belt-foreign", "gap-", "labs-feed", "labs-topup")   # keys the rule floor fixes itself
 SOON = ("rebuild-", "swap-", "ore-soon-", "trunk-", "modules-", "retire-", "headroom-", "scout-")  # keys it queues by itself without pausing the goal in hand (planned)
 FAR_LINK = "a link reaches"     # in a link failure: only the distance stopped it (Crew._link_port), a trunk fixes it
 TRUNK_AUTO_MAX = 600            # Manhattan tiles: a farther source is better made next to the site than belted over
@@ -967,7 +967,20 @@ def detect(crew) -> list[dict]:
 
     # research, and the goal in hand
     stall = crew.research_stall()
+    small = False
     if stall:
+        try:
+            small = bool(base.of("labs")) and crew._top_up_stalled(w.research or {}, dry=True)
+        except Exception:  # noqa: BLE001 - stub crews in tests
+            small = False
+    if stall and small:
+        # a handful of hand-craftable packs is all it lacks (the zones test, seed 737373: automation at 80% for
+        # 25 game minutes with nothing feeding the labs): the lab round crafts and carries them, now
+        lab = base.of("labs")[0]
+        out.append({"level": "urgent", "key": f"labs-topup-{lab.id}", "what": stall + "; its last packs are crafted "
+                    "by hand and taken to the labs now",
+                    "fix": {"do": "feed", "site": lab.id, "item": "automation-science-pack"}})
+    elif stall:
         out.append({"level": "warn", "key": "research-stalled", "what": stall, "fix": None})
     try:
         starving = crew.foreman._labs_starving()

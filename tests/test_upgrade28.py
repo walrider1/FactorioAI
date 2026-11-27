@@ -134,3 +134,21 @@ def test_the_pole_on_a_line_start_moves_beside_it():
     x, y = placed[0][1] - 0.5, placed[0][2] - 0.5
     assert (x, y) not in crew.line_heads() and (x, y) not in {tuple(t) for t in ln["tiles"]}
     assert crew._free_line_heads() == []             # once per line
+
+
+def test_stalled_research_tops_up_a_handful_of_packs():
+    from types import SimpleNamespace
+    from brain.crew import Crew
+    logs = []
+    kn = SimpleNamespace(techs={"automation": {"unit_count": 10, "unit_ingredients": [
+                             {"name": "automation-science-pack", "amount": 1}]},
+                         "big": {"unit_count": 200, "unit_ingredients": [
+                             {"name": "automation-science-pack", "amount": 1}]}},
+                         recipe_for=lambda item, hand=False: {"name": item})
+    crew = SimpleNamespace(kn=kn, hand_allow={}, log=logs.append, STALL_TOPUP_MAX=Crew.STALL_TOPUP_MAX)
+    top = Crew._top_up_stalled
+    assert top(crew, {"current": "automation", "progress": 0.8}, dry=True) and crew.hand_allow == {}
+    assert top(crew, {"current": "automation", "progress": 0.8})
+    assert crew.hand_allow == {"automation-science-pack": 3} and logs
+    assert not top(crew, {"current": "big", "progress": 0.1})          # 181 packs: not a handful
+    assert not top(crew, {"current": None})

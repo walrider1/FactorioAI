@@ -2404,6 +2404,8 @@ class Crew:
             # Before this "feed" only fuelled: the overseer could not get packs into idle labs (run 20261125-184025:
             # red packs backed up in their factory while every lab waited, research stalled for an hour)
             before = self.foreman.hand_packs
+            if self.research_stall():
+                self._top_up_stalled(self.w.research or {})   # a handful left: crafted on this round
             self.foreman._labs(True)
             held = {k: v for k, v in self.w.inventory.items() if k.endswith("science-pack") and v}
             return (f"lab round done: packs taken to the labs ({self.foreman.hand_packs - before} crafted by hand)"
@@ -6083,6 +6085,7 @@ class Crew:
         mark, since = None, self._minute()
         rs0 = self.w.research or {}
         first = (self._minute(), rs0.get("current"), float(rs0.get("progress") or 0))
+        topped: set = set()
         while time.monotonic() < deadline and self.w.minutes_left > 0.5:
             self.checkpoint()
             rs = self.w.research or {}
@@ -6097,6 +6100,10 @@ class Crew:
             if now_mark != mark:
                 mark, since = now_mark, self._minute()
             elif self._minute() - since >= self.RESEARCH_STALL_MIN:
+                if rs.get("current") not in topped and self._top_up_stalled(rs):
+                    topped.add(rs.get("current"))      # once per tech: the foreman crafts the few that are left
+                    since = self._minute()
+                    continue
                 raise BuildError(self._research_stalled(tech, rs, self._minute() - since))
             if rs.get("current") and rs.get("current") != first[1]:
                 # the next tech of the path is on now: the pace is judged from here (run 20261125-214645: the
@@ -6132,6 +6139,31 @@ class Crew:
         rest = sum(self.kn.research_seconds(t, labs) / 60.0 for t in path
                    if t != cur and t not in self.kn.researched)
         return (1.0 - p) / rate + slow * rest
+
+    # The overnight zones test (seed 737373): automation stopped at 80% with the labs out of packs; it needed 2 more
+    # red packs (10 s of crafting), the wait gave up instead, and the base sat 25 game minutes until the overseer
+    # ordered 50 packs. A stalled tech whose remaining packs are this few, all hand-craftable, gets them by hand.
+    STALL_TOPUP_MAX = 30
+
+    def _top_up_stalled(self, rs: dict, dry: bool = False) -> bool:
+        """Let the foreman hand-craft what the stalled current tech still needs, when that is a handful (True if
+        it may). The wait's patrol (feed_hard) or a lab feed crafts and carries them. `dry`: only say whether."""
+        cur = rs.get("current")
+        t = self.kn.techs.get(cur) if cur else None
+        if not t or not t.get("unit_count") or not hasattr(self.kn, "recipe_for"):
+            return False                               # an unknown cost: never guessed
+        left = math.ceil((1.0 - float(rs.get("progress") or 0)) * t["unit_count"]) + 1
+        need = {i["name"]: int(i["amount"]) * left for i in t.get("unit_ingredients") or []}
+        if not need or any(n > self.STALL_TOPUP_MAX or not self.kn.recipe_for(k, hand=True)
+                           for k, n in need.items()):
+            return False
+        if dry:
+            return True
+        for k, n in need.items():
+            self.hand_allow[k] = max(int(self.hand_allow.get(k, 0) or 0), n)
+        self.log(f"[crew] research {cur} stalled with its labs out of packs: crafting the last "
+                 f"{', '.join(f'{n} {k}' for k, n in need.items())} by hand")
+        return True
 
     def _research_stalled(self, tech: str, rs: dict, minutes: float) -> str:
         cur = rs.get("current") or tech
