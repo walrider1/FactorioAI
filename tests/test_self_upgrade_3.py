@@ -81,6 +81,40 @@ def test_a_trunk_goal_lays_one_long_belt_from_the_far_source_into_the_port():
     assert rec["long"] and belts.route_len(rec["steps"]) > belts.LINK_ROUTE_MAX
 
 
+def test_a_fed_port_short_of_its_far_trunk_gets_a_second_trunk_of_its_own():
+    """Run 4f7178: a far mine's one belt (one line's worth) came home and was split among more than it carried.
+    A port that gets less than it takes now gets a second long belt from another source, joined into its belt
+    from the side near the port, instead of "no unfed input port"."""
+    w = GridWorld()
+    w.look = lambda *a, **k: None
+    w.doing = lambda *a: None
+    crew = _link_crew(w)
+    first = crew.base.add(Site("electric_mine", {"resource": "copper-ore", "into": "chest"}, (0, 0)))
+    first.chests.append((0.5, 0.5, "copper-plate"))
+    port = {"item": "copper-plate", "end": [330, 0], "approach": [329, 0], "fed": None, "per_minute": 60.0}
+    site = crew.base.add(Site("factory", {"item": "copper-cable", "ports": [port]}, (332, 0)))
+    crew._source_rate = lambda root, item: 20.0 if tuple(root) == (0.5, 0.5) else 50.0  # the port takes 60
+    crew.trunk(site.id, "copper-plate")
+    assert port["fed"] and crew._overloaded("copper-plate") == [(0.5, 0.5)]
+    second = crew.base.add(Site("electric_mine", {"resource": "copper-ore", "into": "chest"}, (0, 20)))
+    second.chests.append((0.5, 20.5, "copper-plate"))
+    msg = crew.trunk(site.id, "copper-plate")
+    assert "a second" in msg and "trunk carries copper-plate" in msg
+    rec = crew.links[-1]
+    assert rec["boost_into"] is crew.links[0] and tuple(rec["source"]) == (0.5, 20.5) and rec["long"]
+    assert crew._overloaded("copper-plate") == []                    # 20 + the 40 it lacks from the second
+    with pytest.raises(BuildError, match="no unfed input port"):     # nothing short now, nothing to add
+        crew.trunk(site.id, "copper-plate")
+
+
+def test_an_outpost_never_puts_more_on_one_trunk_than_its_belt_carries():
+    from brain.outposts import Outpost, belt_drills
+    assert belt_drills(set()) == 27 and belt_drills(set(), dense=False) == 13          # yellow: 810 / 405 a minute
+    assert belt_drills({"fast-transport-belt"}) == 54
+    assert Outpost._n({"resource": "iron-ore", "count": 40}, set()) == 27
+    assert Outpost._n({"resource": "iron-ore", "count": 40}) == 30                    # no research known: as before
+
+
 def test_a_far_patch_gets_no_plate_mine_but_an_outpost_is_named():
     crew, w, _ = _crew()
     _ore_world(w, box=(400, 0, 440, 20))

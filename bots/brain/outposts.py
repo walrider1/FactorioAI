@@ -54,6 +54,15 @@ NEAR_FIELD_MAX = 200.0          # tiles from the base to a patch's nearest tile:
 NEAR_FIELD_MIN = 4              # a near field of fewer drills than this is no better than a row: "no room"
 
 
+def belt_drills(unlocked, dense: bool = True) -> int:
+    """Drills whose ore one trunk carries: what the fastest researched belt carries with room (a dense band fills
+    both lanes, a row one), at DRILL_PER_MIN. A field asked to be bigger gets a second band with its own trunk
+    (Crew._finish_outpost): two belts home, not one belt that caps the field's rate."""
+    from . import belts
+    t = belts.tier(unlocked, 1e12)
+    return max(2, int(belts.TIER_ROOM * t["per_minute"] * (1.0 if dense else 0.5) // DRILL_PER_MIN))
+
+
 # ------------------------------------------------------------------ the patches we work, and the next ones
 def _box_near(box, pt, margin: float = 8.0) -> bool:
     return box[0] - margin <= pt[0] <= box[2] + margin and box[1] - margin <= pt[1] <= box[3] + margin
@@ -210,14 +219,16 @@ class Outpost(Module):
         return why
 
     @staticmethod
-    def _n(p: dict) -> int:
+    def _n(p: dict, unlocked=None) -> int:
         top = 30 if p.get("dense", True) else 14
+        if unlocked is not None:                       # never more than one trunk belt carries
+            top = min(top, belt_drills(unlocked, p.get("dense", True)))
         # near the base no long trip has to pay off: sized to the gap like a mine row
         lo = NEAR_FIELD_MIN if p.get("near_base") else min(top, OUTPOST_MIN.get(p.get("resource"), 2))
         return max(lo, min(top, int(p.get("count") or FIELD_DRILLS)))
 
     def kit(self, w, base, p):
-        n = self._n(p)
+        n = self._n(p, getattr(getattr(w, "kn", None), "unlocked", None))
         if p.get("dense", True):
             return {"electric-mining-drill": n, "transport-belt": 2 * n + 6, POLE: n // 4 + 3}
         return {"electric-mining-drill": n, "transport-belt": 3 * n + 2, POLE: n // 2 + 2}
@@ -417,7 +428,18 @@ class Outpost(Module):
         return best
 
     def build(self, w, base, p):
-        r, n = p["resource"], self._n(p)
+        site = self._build(w, base, p)
+        unlocked = getattr(getattr(w, "kn", None), "unlocked", None)
+        cap = belt_drills(unlocked, p.get("dense", True)) if unlocked is not None else None
+        wanted = int(p.get("count") or 0)
+        if cap is not None and wanted > cap and not p.get("near_base"):
+            # more than one belt carries: the rest is a band of its own with its own trunk home
+            site.params["more_drills"] = wanted - int(site.params.get("count") or 0)
+        return site
+
+    def _build(self, w, base, p):
+        r = p["resource"]
+        n = self._n(p, getattr(getattr(w, "kn", None), "unlocked", None))
         if not base.powered_poles():
             raise BuildError("an outpost needs the power network to reach it: build steam_power first")
         cands = spare_patches(w, base, r)

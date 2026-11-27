@@ -946,9 +946,23 @@ class Crew:
             return f"outpost site {site.id} is being finished already"
         busy.add(site.id)
         try:
-            return self._finish_outpost_once(site)
+            msg = self._finish_outpost_once(site)
         finally:
             busy.discard(site.id)
+        more = int(site.params.get("more_drills") or 0)
+        if more >= 2 and site.params.get("trunk_to") is not None:
+            # the field was asked bigger than one trunk belt carries: a second band, its own belt home
+            site.params.pop("more_drills", None)
+            goal = {"do": "build", "module": "outpost", "resource": site.params["resource"], "count": more,
+                    "reflex": f"outpost {site.id}'s trunk is one belt's worth: {more} more drills get a belt of "
+                              "their own"}
+            try:
+                from .agenda import agenda_of
+                agenda_of(self).propose(self, goal, who="rules")
+                msg += f"; {more} more drills queued as a second band with its own trunk"
+            except Exception:  # noqa: BLE001 - a crew without an agenda
+                self.urgent.append(goal)
+        return msg
 
     def _finish_outpost_once(self, site: Site) -> str:
         from . import outposts
@@ -4728,7 +4742,11 @@ class Crew:
             ports = [pt for pt in site.params.get("ports", []) if pt.get("item")
                      and not pt.get("fed") and (item is None or pt["item"] == item)]
             if not ports:
-                raise BuildError(f"site {site.id} has no unfed input port" + (f" for {item}" if item else ""))
+                second = self._second_trunk(site, item)
+                if second:
+                    return second
+                raise BuildError(f"site {site.id} has no unfed input port" + (f" for {item}" if item else "")
+                                 + " and its fed ones get what they take (or no second source reaches them)")
             port = ports[0]
             if port.get("trunk"):
                 # a column's ore port is what a trunk is for: its source is the outpost's head. Run 20261122-133537:
@@ -4791,6 +4809,69 @@ class Crew:
         self._note_link_fail(fail_key, it, site, "trunk: " + "; ".join(errors)[:200])
         raise BuildError(f"no {it} trunk into site {site.id}: " + "; ".join(errors)[:300]
                          + ". A mine, smelter or factory of it next to the site avoids the long belt")
+
+    def _trunk_starts(self, key: tuple, others: set) -> list[tuple]:
+        """Where a long belt from source `key` starts: a line's tail runs on (no inserter), else an inserter beside
+        the chest and the belt beyond it. [(start, inserter, its facing)]."""
+        from . import belts
+        ln = self.line_at(key)
+        if ln is not None:
+            return [(tuple(ln["start"]), None, None)]
+        c = (math.floor(key[0]), math.floor(key[1]))
+        out = []
+        for dx, dy in belts.VEC.values():
+            ins, start = (c[0] + dx, c[1] + dy), (c[0] + 2 * dx, c[1] + 2 * dy)
+            if not all(self._belt_free(t) for t in (ins, start)) or {ins, start} & (others | self.bad_tiles()):
+                continue
+            out.append((start, ins, next(k for k, v in belts.VEC.items() if v == (-dx, -dy))))
+        return out
+
+    def _second_trunk(self, site: Site, item: str | None) -> str | None:
+        """A fed port whose belt brings less than it takes gets a second long belt from another source, joined into
+        its belt from the side near the port: two belts home, not one belt split among more than it carries (the
+        first trunk from a far mine is often one line's worth). None when no port is short or nothing reaches."""
+        from . import belts, outposts
+        budget = self._budget()
+        for pt in site.params.get("ports", []):
+            it = pt.get("item")
+            if not it or not pt.get("fed") or pt.get("trunk") or (item is not None and it != item):
+                continue
+            chain = [ln for ln in self.links if ln.get("port") is pt and ln.get("boost_into") is None
+                     and ln.get("kind") not in ("science", "trunk")]
+            if not chain:
+                continue
+            root = self._coal_root(chain[0])
+            load, supply = budget.get(tuple(root)) if root is not None and tuple(root) in budget else (0.0, 0.0)
+            short = load - supply
+            if root is None or short <= 0.5:
+                continue
+            targets = sorted(self._sideload_ports(chain, it), key=lambda q: math.dist(q[0]["end"], pt["end"]))[:4]
+            srcs = [q for q in self._free_outputs(it, site, short) if (q[0], q[1]) != tuple(root)]
+            srcs = sorted(srcs, key=lambda q: self._manhattan(q[:2], pt["end"]))[:self.TRUNK_SOURCES]
+            if not targets or not srcs:
+                continue
+            others = {tuple(t) for s, q in self.all_ports() for t in (q["end"], q["approach"])}
+            for x, y, src in srcs:
+                label = f"site {src.id}" if src is not None else f"({x:.0f}, {y:.0f})"
+                for start, ins, facing in self._trunk_starts((x, y), others):
+                    for tgt, ln in targets:
+                        steps = outposts.plan_trunk(self, start, tgt, block={ins} if ins is not None else set())
+                        if not steps:
+                            continue
+                        if ins is not None and not self._can_power(ins, avoid=others | set(belts.tiles_of(steps))
+                                                                   | {ins}):
+                            continue
+                        plan = {"ins": ins, "facing": facing, "steps": steps, "source": (x, y), "from": label,
+                                "tap": None, "rip": [], "relay": None}
+                        try:
+                            with self.w.step("build"):
+                                rec = self._build_link(plan, tgt, site, "item", None,
+                                                       extra={"long": True, "boost_into": ln, "boost_of": tuple(root)})
+                        except BuildError:
+                            continue
+                        return (f"a second {rec['belts']}-belt trunk carries {it} from {label} into the belt of "
+                                f"site {site.id} (it got {supply:.0f}/min of the {load:.0f} its ports take)")
+        return None
 
     LINE_RETRY_MIN = 30.0
 
