@@ -5531,6 +5531,54 @@ class Crew:
                          f"{spot}: its plates can run on into a link now")
         return notes
 
+    CREW_BOX = "wooden-chest"      # small (16 stacks): it fills from what passes, then takes nothing more
+
+    def crew_boxes(self) -> list[str]:
+        """A crew box on every plate line: an inserter past the line's last furnace into a small chest the crew
+        takes construction plates from (Crew._plates_loop looks there first), instead of mining ore and smelting
+        by hand while the plates ride belts out of its reach (the game lets it pick up from chests and machines,
+        never from a belt). Kept apart from the site's chests, so no link ever starts there. Once per line."""
+        from . import belts
+        notes = []
+        done = self.__dict__.setdefault("_boxed_lines", {})
+        heads = self.line_heads()
+        for site, ln in self.lines():
+            item = ln.get("item")
+            if item not in PLATES or site.id in done or (site.params.get("crew_boxes") or {}).get(item):
+                continue
+            done[site.id] = self._minute()
+            spot = None
+            for t in reversed(self.line_taps(site, ln)):
+                for dx, dy in belts.VEC.values():
+                    ins, box = (t[0] + dx, t[1] + dy), (t[0] + 2 * dx, t[1] + 2 * dy)
+                    if {ins, box} & heads or not (self.w.free({ins}) and self.w.free({box})):
+                        continue
+                    spot = (t, ins, box, next(k for k, v in belts.VEC.items() if v == (-dx, -dy)))
+                    break
+                if spot:
+                    break
+            if spot is None:
+                notes.append(f"site {site.id}'s {item} line has no room for a crew box")
+                continue
+            t, ins, box, facing = spot
+            try:
+                self.make({"inserter": 1, self.CREW_BOX: 1}, extra=True)
+                rec: list = []
+                self.w.recorder = rec
+                try:
+                    self.w.place("inserter", ins[0] + 0.5, ins[1] + 0.5, facing, {ins})
+                    self.w.place(self.CREW_BOX, box[0] + 0.5, box[1] + 0.5, "north", {box})
+                finally:
+                    self.w.recorder = None
+                site.entities += rec
+                site.params.setdefault("crew_boxes", {}).setdefault(item, []).append([box[0] + 0.5, box[1] + 0.5])
+                self._power_tile(ins)
+                notes.append(f"crew box on site {site.id}'s {item} line at {box}: construction plates from it, "
+                             "not by hand")
+            except BuildError as exc:
+                notes.append(f"crew box on site {site.id}'s {item} line not built: {str(exc)[:100]}")
+        return notes
+
     def _line_open(self, site: Site, ln: dict) -> bool:
         """Can a link take this line's whole flow: its start free for a belt, or a tap past its last furnace with
         room for an inserter and the belt beyond?"""
@@ -6404,7 +6452,8 @@ class Crew:
         dry: set = set()                              # spots that gave nothing (run 20261121-140755: 61 empty visits)
 
         def smelters():                  # furnaces we smelt in, and the chests electric mines and cells fill
-            return ([(x, y) for s in self.base.sites for x, y, p in s.plate_furnaces if p == plate]
+            return ([tuple(b) for s in self.base.sites for b in (s.params.get("crew_boxes") or {}).get(plate, [])]
+                    + [(x, y) for s in self.base.sites for x, y, p in s.plate_furnaces if p == plate]
                     + [(x, y) for s in self.base.sites for x, y, what in s.chests if what == plate])
         while time.monotonic() < deadline:
             self.w.refresh()
@@ -6813,6 +6862,7 @@ class Foreman:
                 self._labs(feed_hard)
                 w.foreman("links")
                 self._audit_links()
+                self._crew_boxes()
                 w.foreman("courier")
                 done = self.crew.courier()
                 if done:
@@ -7083,6 +7133,21 @@ class Foreman:
             from .agenda import agenda_of
             agenda_of(crew).propose(crew, {"do": "link", "reflex": "foreman: a broken belt link was taken up"},
                                     "foreman")
+
+    CREW_BOX_EVERY_MIN = 10.0      # game minutes between the foreman's looks for lines with no crew box
+
+    def _crew_boxes(self) -> None:
+        crew = self.crew
+        now = crew._minute()
+        if now - self.__dict__.get("_boxes_at", -1e9) < self.CREW_BOX_EVERY_MIN:
+            return
+        self._boxes_at = now
+        try:
+            for n in crew.crew_boxes():
+                self.note(n)
+                crew.log(f"[foreman] {n}")
+        except BuildError as exc:
+            self.note(f"crew box: {str(exc)[:100]}")
 
     def _labs_starving(self) -> bool:
         """Do labs report missing packs while the crew holds (or its chests hold) packs the research takes?"""

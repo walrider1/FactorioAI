@@ -166,3 +166,22 @@ def test_a_lines_start_is_never_banned_and_old_bans_rest():
     assert (5, 5) in crew.bad_tiles()
     minute["now"] += crew.BAD_BELT_REST_MIN
     assert (5, 5) not in crew.bad_tiles()                        # a ban rests, then the tile is tried again
+
+
+def test_a_crew_box_goes_past_the_last_furnace_and_is_collected_from_first():
+    from test_lifecycle import _copper_row
+    crew, w, minute = _crew()
+    crew.log = lambda m: None
+    site, ln = _copper_row(crew)
+    placed = []
+    w.free = lambda tiles: all(t[1] != 84 and t[1] != 85 for t in tiles)   # the line row and its inserter row taken
+    w.place = lambda name, x, y, d, tiles: placed.append((name, x, y, d))
+    crew.make = lambda kit, extra=False: None
+    crew._power_tile = lambda t, avoid=frozenset(), plan=None: None
+    [note] = crew.crew_boxes()
+    assert "crew box" in note and [p[0] for p in placed] == ["inserter", "wooden-chest"]
+    ins, box = placed
+    assert (ins[1], ins[2]) == (-8.5, 83.5) and ins[3] == "south"          # beside the tail, picking from it
+    assert site.params["crew_boxes"]["copper-plate"] == [[-8.5, 82.5]]
+    assert not any(what == "copper-plate" for *_, what in site.chests)    # never a source for links
+    assert crew.crew_boxes() == []                                        # once per line
