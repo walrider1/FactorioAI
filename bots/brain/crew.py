@@ -1307,6 +1307,29 @@ class Crew:
         except Exception as exc:  # noqa: BLE001 - the zones never stop a factory
             self.log(f"[zones] {item} could not join the zones: {type(exc).__name__}: {str(exc)[:100]}")
 
+    def _wait_for_zone(self, goal: dict) -> str | None:
+        """A factory for an item a later floorplan era plans, once that era's recipes are in: the era is opened
+        now if it may (then the factory goes into its slot as usual); else the goal fails with why it waits
+        (zones.waits_for_zone; at most ERA_WAIT_MAX game minutes, then free-form). Feeders of a free-form factory
+        and goals that ask for free-form never wait. Run 4f7178: blue science and advanced circuits went up round
+        the start yard while the blue era's slots stood empty."""
+        z = getattr(self, "zones", None)
+        item = goal.get("item")
+        if z is None or not item or goal.get("free_form") or getattr(self, "_intermediate_depth", 0):
+            return None
+        try:
+            from . import zones as zmod
+            why = zmod.waits_for_zone(self, item)
+            if why is None:
+                return None
+            note = zmod.try_open_next(self)
+            if note:
+                self.log(f"[zones] {item} asked for its era: {note}")
+            return zmod.waits_for_zone(self, item)
+        except Exception as exc:  # noqa: BLE001 - the zones never stop a factory
+            self.log(f"[zones] wait check for {item} skipped: {type(exc).__name__}: {str(exc)[:100]}")
+            return None
+
     def _grow_slot_instead(self, goal: dict) -> str | None:
         """A factory goal for a science pack the open floorplan already makes in a slot, with no slot left for it:
         the slot factory grows instead of a free-form copy going up elsewhere (zones.grow_slot: faster machines in
@@ -1345,6 +1368,9 @@ class Crew:
             goal = {**goal, "near_first": True}
         if goal.get("module") != "factory":
             return self._build(goal)
+        waiting = self._wait_for_zone(goal)
+        if waiting:
+            raise BuildError(waiting)
         grown = self._grow_slot_instead(goal)
         if grown is not None:
             return grown

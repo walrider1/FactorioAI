@@ -82,8 +82,22 @@ SEGMENTS = {1: {"automation-science-pack": _ROAD["automation-science-pack"] / 60
 # engines, blue science) take the free make slots; the bus is patched (atlas relay: pieces no longer planned come
 # up, missing ones go down). Oil products and steel come into the spine head by trunk, like the plates.
 SEGMENTS[2] = {**SEGMENTS[1], "chemical-science-pack": _ROAD["chemical-science-pack"] / 60}
-# items a segment takes in at its head that the brain must already make before it opens (else its new blocks wait)
-SEGMENT_INPUTS = {2: ("plastic-bar", "sulfur", "steel-plate")}
+# The later eras, cumulative the same way: purple (rail, electric furnaces, productivity modules), yellow (low
+# density structures, robot frames) and the rocket (more of them for the silo). Their fluid-made parts (batteries,
+# processing units, electric engines, rocket fuel) are the brain's workshops, brought into the spine head like the
+# plates; everything an assembler makes from bus items goes into a slot. An era that needs more slots than the
+# floorplan holds grows the spine (Zones.extend): new slots past its end, the bus patched onto them.
+SEGMENTS[3] = {**SEGMENTS[2], "production-science-pack": _ROAD["production-science-pack"] / 60}
+SEGMENTS[4] = {**SEGMENTS[3], "utility-science-pack": _ROAD["utility-science-pack"] / 60}
+ROCKET_PARTS_PER_MIN = 1.0
+SEGMENTS[5] = {**SEGMENTS[4], "rocket-part": ROCKET_PARTS_PER_MIN / 60}
+# items a segment takes in at its head that the brain makes outside the slots (queued when it opens, if nothing does)
+SEGMENT_INPUTS = {2: ("plastic-bar", "sulfur", "steel-plate"),
+                  3: ("plastic-bar", "sulfur", "steel-plate", "stone-brick", "stone"),
+                  4: ("plastic-bar", "sulfur", "steel-plate", "stone-brick", "stone", "battery", "processing-unit",
+                      "electric-engine-unit"),
+                  5: ("plastic-bar", "sulfur", "steel-plate", "stone-brick", "stone", "battery", "processing-unit",
+                      "electric-engine-unit", "rocket-fuel")}
 PLAN_UPTO = 2             # the floorplan reserves land for the eras up to this one (falls back to 1 when it fits not)
 SEGMENT_ZONES = ("make", "science")       # smelting stays with the brain's fields; the spine head gets their lines
 # a segment opens only once these are unlocked (and see ready()). The strip designer needs assemblers and
@@ -93,7 +107,16 @@ SEGMENT_ZONES = ("make", "science")       # smelting stays with the brain's fiel
 # start yard; zoning starts with green (run 20261127-145615: its first red factory went 150 tiles out along the
 # spine before any bus, the copper belt to it failed twice, and red was automated only at game minute 66)
 OPEN_RECIPES = {1: {"underground-belt", "assembling-machine-1", "long-handed-inserter", "logistic-science-pack"},
-                2: {"chemical-science-pack", "advanced-circuit", "engine-unit"}}
+                2: {"chemical-science-pack", "advanced-circuit", "engine-unit"},
+                3: {"production-science-pack", "rail", "electric-furnace", "productivity-module"},
+                4: {"utility-science-pack", "low-density-structure", "flying-robot-frame", "processing-unit"},
+                5: {"rocket-silo", "rocket-part"}}
+# A factory for an item a later era plans waits for that era's slot once the era's recipes are in (instead of
+# going up round the start yard), at most this many game minutes; past that (the era cannot open) it goes free-form
+ERA_WAIT_MAX = 45.0
+KEEP_COVER = 0.95         # a built block making at least this share of the next era's rate keeps its design
+EXTEND_CELLS = 8          # spine cells one extension adds at most
+EXTEND_TURNS = 3          # turns an extension may take where the land ahead is taken
 
 
 # ==================================================================== the brain's world as an Atlas map scan
@@ -642,6 +665,129 @@ class Zones:
         slots = [s for s in fp.slots if s.zone == "oil" and s not in self.slots]
         return corr, slots
 
+    # ------------------------------------------------------------ more slots for a later era: the spine grows
+    def room(self, era: int, kit) -> tuple[int, int]:
+        """(spine make + reserve slots no factory claimed, what era `era` needs of them: its make blocks plus
+        SPARE_SLOTS for copies)."""
+        claimed = self.__dict__.get("claimed") or {}
+        have = sum(1 for s in self.slots if s.zone in ("make", "reserve") and s.corridor == "spine"
+                   and s.id not in claimed)
+        need = slot_demand(era, kit)["make"] + SPARE_SLOTS
+        return have, need
+
+    def plan_more(self, snap: dict, make: int, reserve: int = SPARE_SLOTS):
+        """The spine grown past its end (straight, turning where the land ahead is taken) and `make` + `reserve`
+        new slots along the new part, around everything reserved and built: (the whole new spine, the new
+        slots), or (None, []) when the spine cannot grow. The fewest cells that hold them all (corners and taken
+        land hold fewer than SLOTS_PER_CELL), else the most slots EXTEND_CELLS hold."""
+        from atlas.layout.floorplan import SLOTS_PER_CELL
+        best = (None, [])
+        k = math.ceil((make + reserve) / SLOTS_PER_CELL) + 1
+        while True:
+            got = self._grow_once(snap, make, reserve, min(k, EXTEND_CELLS))
+            if got[0] is not None and len(got[1]) > len(best[1]):
+                best = got
+            if len(best[1]) >= make + reserve or k >= EXTEND_CELLS or got[0] is None:
+                return best
+            k += 2
+
+    def _grow_once(self, snap: dict, make: int, reserve: int, want_cells: int):
+        from atlas.layout.floorplan import MAX_SPINE, SELF_GAP, SPINE_W, Corridor, Floorplan, place_slots
+        from atlas.layout.ledger import rect
+        sp = self.corridors.get("spine")
+        if sp is None or not sp.cells:
+            return None, []
+        scan_p = planning_scan(snap["scan"], snap["blocked"] | rect_tiles(snap["yard"]) | self._head_keep())
+        led = _base_ledger(scan_p)
+        for cid, c in self.corridors.items():
+            claim = _claim("corridor", cid, c.kind)
+            led._claims[cid], led._tiles[cid] = claim, set(c.tiles)
+            for t in c.tiles:
+                led._owner[t] = claim
+        for sl in self.slots:
+            claim = _claim("slot", sl.id, sl.zone)
+            led._claims[sl.id], led._tiles[sl.id] = claim, set(sl.tiles)
+            for t in sl.tiles:
+                led._owner[t] = claim
+        cells, dirs = list(sp.cells), list(sp.cell_dirs)
+        want_cells = min(want_cells, MAX_SPINE - len(cells))
+
+        def cheb(a, b):
+            return max(abs(a[0] - b[0]), abs(a[1] - b[1])) // SPINE_W
+
+        def ok(c):
+            return c not in cells and led.fits(rect(c[0], c[1], SPINE_W, SPINE_W), allow_ore=True) and \
+                all(cheb(c, o) >= SELF_GAP for o in cells[:-(SELF_GAP + 1)])
+
+        def ahead(c, d):
+            return (c[0] + d[0] * SPINE_W, c[1] + d[1] * SPINE_W)
+
+        def run(c, d, cap=6):
+            n = 0
+            while n < cap:
+                c = ahead(c, d)
+                if not ok(c):
+                    break
+                n += 1
+            return n
+
+        added, turns, d = 0, 0, dirs[-1]
+        while added < want_cells:
+            nxt = ahead(cells[-1], d)
+            if ok(nxt):
+                cells.append(nxt)
+                dirs.append(d)
+                added += 1
+                continue
+            if turns >= EXTEND_TURNS:
+                break
+            best = max(((run(cells[-1], nd), nd) for nd in ((d[1], -d[0]), (-d[1], d[0]))), key=lambda o: o[0])
+            if best[0] == 0:
+                break
+            d, turns = best[1], turns + 1
+            dirs[-1] = d                       # the corner cell faces the new way
+        if not added:
+            return None, []
+        fp = Floorplan(scan_p, led, self.anchor or (0, 0), self.heading or (1, 0), dict(self.corridors),
+                       list(self.slots), demand={"make": make, "reserve": reserve})
+        # the built spine stays claimed as it is (its tiles are built on, so not open land); the new cells join
+        # its claim, and the corridor record is laid out again over all the cells (as _claim_spine does)
+        new_tiles: set = set()
+        for c in cells[len(sp.cells):]:
+            new_tiles |= rect(c[0], c[1], SPINE_W, SPINE_W)
+        led.claim(new_tiles, led._claims["spine"])
+        path = []
+        for k, c in enumerate(cells):
+            path.append((c, dirs[k]))
+            if k + 1 < len(cells):
+                nx = cells[k + 1]
+                step = ((nx[0] - c[0]) // SPINE_W, (nx[1] - c[1]) // SPINE_W)
+                path += [((c[0] + step[0] * i, c[1] + step[1] * i), step) for i in range(1, SPINE_W)]
+        new = Corridor("spine", "spine", SPINE_W, path, set(sp.tiles) | new_tiles, lanes=list(sp.lanes),
+                       cells=list(cells), cell_dirs=list(dirs))
+        fp.corridors["spine"] = new
+        slots = place_slots(fp, new, {"make": make, "reserve": reserve}, first=len(sp.path))
+        return new, slots
+
+    def apply_more(self, spine, slots: list, log=None) -> int:
+        """Keep the grown spine and its new slots (tiles reserved like the first ones). Returns the new slots."""
+        if spine is None or not slots:
+            return 0
+        old = set(self.corridors["spine"].tiles)
+        self.corridors["spine"] = spine
+        self.slots = list(self.slots) + list(slots)
+        corr = set(spine.tiles) - old
+        st = set().union(*(sl.tiles for sl in slots))
+        self.block |= corr | st
+        self.belt_ok |= corr - st
+        self._refresh()
+        self._fp = None
+        self.__dict__.setdefault("extended", []).append({"cells": len(spine.cells), "slots": [sl.id for sl in slots]})
+        if log:
+            log(f"[zones] the spine grew to {len(spine.cells)} cells: {len(slots)} new slots "
+                f"({', '.join(sl.id for sl in slots)})")
+        return len(slots)
+
     def apply_oil(self, corr: dict, slots: list, log=None) -> int:
         if not corr:
             self.warnings.append("no oil corridor fits yet")
@@ -801,7 +947,7 @@ class Zones:
         seg = self.segment(n, world, kit)
         fresh = n not in self.opened
         self.opened.setdefault(n, {"built": {}, "minute": minute, "kit": seg.kit,
-                                   "growth": any(b.growth for b in seg.blocks)})
+                                   "growth": any(b.growth for b in seg.blocks), "keep_cover": True})
         if fresh and n > 1 and (n - 1) in self.opened:
             self._carry_over(n - 1, n, seg, log)
         if seg.bus is not None:                  # the planned bus's land: no organic belt or pole crosses it now
@@ -1037,6 +1183,12 @@ def design_segment(z: Zones, n: int, kit, fp, growth: bool = False, skip: frozen
         except Exception:  # noqa: BLE001 - no earlier segment to build on: laid out on its own
             prev = None
     keep = {b.key: b.slot for b in (prev.blocks if prev is not None else []) if b.ok and not b.growth}
+    # a built block of the last era whose design still covers this era's rate keeps that design (it stays built,
+    # nothing torn down): run 4f7178 reworked red and green science, both 15/min in either era, only because the
+    # kit had moved on to faster machines. A segment opened before this rule keeps the plan it opened with
+    cover = KEEP_COVER and (z.opened.get(n) or {}).get("keep_cover", n not in z.opened)
+    built_prev = ((z.opened.get(n - 1) or {}).get("built") or {}) if prev is not None else {}
+    prev_by_key = {b.key: b for b in (prev.blocks if prev is not None else []) if b.ok and not b.growth}
     plan = [(s, False) for s in specs]
     if growth:                             # copies for the spare slots the era's own blocks leave free
         plan += [(s, True) for s in growth_specs([s for s in specs if s.id not in skip],
@@ -1049,6 +1201,11 @@ def design_segment(z: Zones, n: int, kit, fp, growth: bool = False, skip: frozen
         own = [s for s in by_zone.get(spec.zone, []) if s.id not in used] if not (grow or extra) else []
         kept_slot = keep.get(key)
         held = {sl.id for k2, sl in keep.items() if k2 != key}        # slots the last era's blocks keep
+        old = prev_by_key.get(key)
+        if cover and not grow and old is not None and key in built_prev and old.product == spec.product                 and old.spec.kind == spec.kind and set(spec.bus_in) <= set(old.spec.bus_in)                 and float(old.spec.per_s) >= KEEP_COVER * float(spec.per_s) and old.slot.id not in used:
+            seg.blocks.append(SegBlock(key, old.spec, old.slot, old.wd, n=n))
+            used.add(old.slot.id)
+            continue
         if kept_slot is not None and kept_slot.id not in used:
             tries = [kept_slot]
         else:
@@ -1551,6 +1708,9 @@ def after_build(crew, site) -> str:
         era_next = z.era_of(z.current) + 1 if z.current else 0
         tried = z.__dict__.setdefault("tried_era", {})
         if z.reserved and z.current and era_next in SEGMENTS and now - tried.get(era_next, -1e9) >= RETRY_MIN:
+            grew = ensure_room(crew, z, era_next, now)
+            if grew:
+                note = (note + "; " if note else "") + grew
             z.__dict__.setdefault("plans", {})[nxt] = {"era": era_next, "extras": z.extras_of(z.current)}
             ok, why_not = z.ready(nxt, crew)
             if not ok:
@@ -1979,6 +2139,79 @@ def head_supply(crew, n: int) -> str:
     return "; ".join(notes)
 
 
+def era_recipes_in(crew, era: int) -> bool:
+    unlocked = set(getattr(getattr(crew, "kn", None), "unlocked", ()) or ())
+    return era in OPEN_RECIPES and OPEN_RECIPES[era] <= unlocked
+
+
+def ensure_room(crew, z, era: int, now: float) -> str:
+    """Before an era opens: when the floorplan holds fewer free spine slots than it needs, the spine grows past
+    its end (Zones.plan_more / apply_more). Tried once per RETRY_MIN per era, only once the era's recipes are in.
+    Returns a note, "" when nothing was needed or done."""
+    if not era_recipes_in(crew, era):
+        return ""
+    w = crew.w
+    kit = kit_for(w)
+    have, need = z.room(era, kit)
+    if have >= need:
+        return ""
+    tried = z.__dict__.setdefault("extend_tried", {})
+    if now - tried.get(era, -1e9) < RETRY_MIN:
+        return ""
+    tried[era] = now
+    try:
+        survey(w, crew.base)
+    except Exception:  # noqa: BLE001 - plan on what is seen
+        pass
+    snap = z.snapshot(w, crew.base)
+    snap["yard"] = z.yard or snap["yard"]
+    think = getattr(w, "think", None)
+    args = (snap, need - have)
+    spine, slots = think(f"growing the spine for era {era}", z.plan_more, *args) if think is not None \
+        else z.plan_more(*args)
+    n = z.apply_more(spine, slots, log=crew.log)
+    if not n:
+        crew.log(f"[zones] era {era} needs {need} spine slots, the floorplan has {have}, and the spine cannot grow "
+                 "past its end (land taken)")
+        z.warnings.append(f"era {era}: the spine cannot grow ({have}/{need} slots)")
+        return ""
+    return f"zones: the spine grew {n} slots for era {era}"
+
+
+def waits_for_zone(crew, item: str) -> str | None:
+    """Why a factory for `item` waits for a slot instead of going up free-form, or None (build it as asked): a
+    later era than the live one plans it, that era's recipes are in, and it has waited less than ERA_WAIT_MAX."""
+    z = getattr(crew, "zones", None)
+    if not ENABLED or z is None or not z.reserved or not z.opened or not item:
+        return None
+    if z.slot_block(item) is not None:
+        return None                                   # a slot is free for it now: Factory builds it there
+    cur = z.era_of(z.current) if z.current else 0
+    kit = kit_for(crew.w)
+    era = next((e for e in sorted(SEGMENTS) if e > cur and
+                any(sp.product == item for sp in segment_specs(e, kit))), None)
+    if era is None or not era_recipes_in(crew, era):
+        return None
+    now = crew._minute() if hasattr(crew, "_minute") else 0.0
+    since = z.__dict__.setdefault("era_wait_since", {}).setdefault(era, now)
+    if now - since > ERA_WAIT_MAX:
+        return None                                   # it cannot open: free-form rather than nothing
+    why = z.__dict__.get("era_wait") or "it opens after the next build"
+    return (f"{item} waits for its slot in era {era} of the floorplan (waiting {now - since:.0f} of "
+            f"{ERA_WAIT_MAX:.0f} min; {why})")
+
+
+HEAD_FROM_WORKSHOP = ("sulfur", "plastic-bar", "battery", "processing-unit", "electric-engine-unit", "rocket-fuel",
+                      "sulfuric-acid", "lubricant", "solid-fuel")
+
+
+def try_open_next(crew) -> str:
+    """Work the zones' after-build step now (the next era opens if it may): a factory goal that waits for its
+    era's slot asks for it at once instead of after the next build."""
+    from types import SimpleNamespace
+    return after_build(crew, SimpleNamespace(kind="", electric=False, params={}, id=None))
+
+
 def propose_inputs(crew, n: int, items) -> str:
     """Workshops (or factories) for head inputs of segment n that nothing makes yet, sized to what its blocks
     take, through the agenda."""
@@ -1990,12 +2223,16 @@ def propose_inputs(crew, n: int, items) -> str:
     out = []
     for item in items:
         per_min = max(10.0, round(float(want.get(item, 0.0)) * 60, 1))
-        module = "workshop" if item in ("sulfur", "plastic-bar") else ("smelter_column" if item == "steel-plate"
-                                                                         else "factory")
-        goal = {"do": "build", "module": module, "item": item, "per_minute": per_min,
-                "reflex": f"zones: segment {n}'s head takes {item} and nothing makes it yet"}
-        if module == "smelter_column":
-            goal = {"do": "build", "module": module, "resource": "iron-plate", "count": 4, "reflex": goal["reflex"]}
+        why = f"zones: segment {n}'s head takes {item} and nothing makes it yet"
+        if item in HEAD_FROM_WORKSHOP:             # fluids in: the brain's oil workshops
+            goal = {"do": "build", "module": "workshop", "item": item, "per_minute": per_min, "reflex": why}
+        elif item == "steel-plate":
+            goal = {"do": "build", "module": "smelter_column", "resource": "iron-plate", "count": 4, "reflex": why}
+        elif item in ("stone", "stone-brick"):     # a stone mine (into furnaces for bricks)
+            goal = {"do": "build", "module": "electric_mine", "resource": "stone", "count": 4,
+                    "into": "furnace" if item == "stone-brick" else "chest", "reflex": why}
+        else:
+            goal = {"do": "build", "module": "factory", "item": item, "per_minute": per_min, "reflex": why}
         try:
             from .agenda import agenda_of
             ok, _ = agenda_of(crew).propose(crew, goal, who="zones")

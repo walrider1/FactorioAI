@@ -1055,6 +1055,23 @@ class Silo(Module):
     def recipes(self, w, base, p):
         return {"rocket-part"}
 
+    @staticmethod
+    def _slot_spot(w):
+        """The top-left of a 15 x 13 area inside the floorplan's silo slot (its land given back for the silo),
+        or None: no floorplan, no silo slot, or it is taken."""
+        z = getattr(w, "zones", None)
+        if z is None or not getattr(z, "reserved", False):
+            return None
+        slot = next((s for s in getattr(z, "slots", []) if s.zone == "silo"), None)
+        if slot is None or (getattr(z, "claimed", None) or {}).get(slot.id):
+            return None
+        x0, y0, sw, sh = slot.rect
+        if sw < 17 or sh < 15:
+            return None
+        sx, sy = x0 + (sw - 15) // 2, y0 + (sh - 13) // 2
+        z.claim(slot, "rocket-part")              # its land is for buildings now
+        return (sx, sy)
+
     def build(self, w, base, p):
         if base.of("silo"):
             raise BuildError("a silo already stands; feed it (the courier does) instead of building another")
@@ -1065,7 +1082,9 @@ class Silo(Module):
         if d is not None:                       # right below the workshop floor, where the courier works
             x0, y0, x1, y1 = d.box()
             home = ((x0 + x1) / 2, y1 + 10)
-        spot = wsm._find_area(w, home, 15, 13) if wsm else None
+        spot = self._slot_spot(w)
+        if spot is None:
+            spot = wsm._find_area(w, home, 15, 13) if wsm else None
         if spot is None:
             raise BuildError("no free 15 x 13 area for the rocket silo near the base")
         sx, sy = spot[0] + 1, spot[1] + 1
