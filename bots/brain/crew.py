@@ -2394,6 +2394,24 @@ class Crew:
                "the labs may have no power or no packs reaching them")
         return f"research {cur} has not moved for {mins:.0f} min at {prog:.0%}: {why}"
 
+    # The overnight zones test (seed 737373): "feed 200 coal" into hand-fed furnace rows hand-mined 150+ coal, 4 to
+    # 5 game minutes a feed, over budget, again and again, while the electric coal mine that would end it waited
+    # behind them (feeds are the quick fixes that go first). A feed takes what storage and the coal mines hold, and
+    # hand-mines at most this much on top: it bridges until the next feed, it does not replace a coal mine.
+    FEED_HAND_MINE_MAX = 50
+
+    def _coal_for_feed(self, count: int) -> int:
+        """Coal on hand for a feed of `count`: storage and the coal mines first, then at most FEED_HAND_MINE_MAX
+        mined by hand. Returns how much the feed can put in."""
+        short = count - self.w.inventory.get("coal", 0)
+        short -= self.from_storage("coal", short)
+        if short > 0:
+            short -= self.from_mines("coal", short)
+        if short > 0:
+            have = self.w.inventory.get("coal", 0)
+            self.gather("coal", have + min(short, self.FEED_HAND_MINE_MAX))
+        return max(1, min(count, self.w.inventory.get("coal", 0)))
+
     def feed(self, site_id, item: str, count: int) -> str:
         """Put `count` of an item into a site: a power station's boiler chest, else its burners' fuel slots."""
         site = self.base.get(site_id)
@@ -2411,7 +2429,10 @@ class Crew:
             return (f"lab round done: packs taken to the labs ({self.foreman.hand_packs - before} crafted by hand)"
                     + (f"; still carrying {held}" if held else ""))
         count = max(1, min(400, int(count)))
-        self.gather(item, max(count, self.w.inventory.get(item, 0)))
+        if item == "coal" and self.w.inventory.get(item, 0) < count:
+            count = self._coal_for_feed(count)
+        else:
+            self.gather(item, max(count, self.w.inventory.get(item, 0)))
         targets = [(x, y) for x, y, what in site.chests if what == "coal-in"] or list(site.burners)
         if not targets:
             raise BuildError(f"site {site.id} has nothing that takes {item}")

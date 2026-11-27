@@ -152,3 +152,20 @@ def test_stalled_research_tops_up_a_handful_of_packs():
     assert crew.hand_allow == {"automation-science-pack": 3} and logs
     assert not top(crew, {"current": "big", "progress": 0.1})          # 181 packs: not a handful
     assert not top(crew, {"current": None})
+
+
+def test_a_coal_feed_hand_mines_only_a_bridge():
+    from types import SimpleNamespace
+    from brain.crew import Crew
+    inv = {"coal": 10}
+    mined = []
+
+    def gather(item, total):
+        mined.append(total - inv[item])
+        inv[item] = total
+
+    crew = SimpleNamespace(w=SimpleNamespace(inventory=inv), FEED_HAND_MINE_MAX=Crew.FEED_HAND_MINE_MAX,
+                           from_storage=lambda item, n: 0, from_mines=lambda item, n: 20, gather=gather)
+    inv["coal"] += 0
+    got = Crew._coal_for_feed(crew, 200)
+    assert mined == [Crew.FEED_HAND_MINE_MAX] and got == 10 + Crew.FEED_HAND_MINE_MAX   # (the stub's mines add 0)
