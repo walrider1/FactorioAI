@@ -1165,6 +1165,20 @@ function renderLoop() {
 // ---------------------------------------------------------------- brain: the floorplan and the factory designer (viz.py)
 const ZN = { rev: null, run: null, plan: null, img: null, bus: [], pos: null, D: null, key: null, flash: new Map(), t0: 0 };
 const ZTONE = { ".": "#24221f", "y": "#2f2b26", "=": "#3b2f1f", "o": "#262b38", "~": "#1b3546", "r": "#4a4036", "#": "#5c5750", "L": "#c9c1b4" };
+// The bus as viewers read it: how many belts run side by side and how long it is (P.bus_laid counts belt tiles).
+// Each laid bus pixel's thickness across the bus is its shorter straight run; the median is the bus's width.
+function busShape(P, bus) {
+  if (!bus.length || !P.bus_laid) return null;
+  const on = new Set(bus.map(([x, y]) => x + "," + y)), run = (x, y, dx, dy) => {
+    let n = 1;
+    for (let k = 1; on.has((x + dx * k) + "," + (y + dy * k)); k++) n++;
+    for (let k = 1; on.has((x - dx * k) + "," + (y - dy * k)); k++) n++;
+    return n;
+  };
+  const w = bus.map(([x, y]) => Math.min(run(x, y, 1, 0), run(x, y, 0, 1))).sort((a, b) => a - b);
+  const belts = Math.max(1, Math.round(w[Math.floor(w.length / 2)] * P.cell));
+  return { belts, long: Math.round(P.bus_laid / belts) };
+}
 async function zonesPlan(d) {
   const z = (d.live || {}).zones;
   document.body.classList.toggle("zoned", !!(z && z.plan_rev));
@@ -1178,7 +1192,7 @@ async function zonesPlan(d) {
     c.width = P.w; c.height = P.h;
     const g = c.getContext("2d"), bus = [];
     P.raster.forEach((row, y) => { for (let x = 0; x < row.length; x++) { const ch = row[x], t = ZTONE[ch]; if (t) { g.fillStyle = t; g.fillRect(x, y, 1, 1); } if (ch === "L") bus.push([x, y]); } });
-    ZN.plan = P; ZN.img = c; ZN.bus = bus;
+    ZN.plan = P; ZN.img = c; ZN.bus = bus; ZN.busShape = busShape(P, bus);
   } catch (e) { console.error(e); }
 }
 // every slot kind has its own colour, a short word inside and a full name in the key under the map
@@ -1201,14 +1215,15 @@ function drawZones(t) {
     const [bx, by] = ZN.bus[i];
     if ((i * 7 + Math.floor(t / 90)) % 9 === 0) { g.fillStyle = "#ff9a1f"; g.fillRect(ox + bx * k, oy + by * k, k + .5, k + .5); }
   }
-  let built = 0, planned = 0;
+  let built = 0, planned = 0, spare = false;
   const shown = [];
   g.textAlign = "center"; g.textBaseline = "middle";
   for (const s of P.slots || []) {
     const [x0, y0, w, h] = s.rect, px = X(x0), py = Y(y0), pw = w / P.cell * k, ph = h / P.cell * k;
     const sl = SLOT[s.item] || null, col = sl ? sl[0] : "#57514a";
-    if (s.item) planned++;
+    if (s.item && s.state !== "spare") planned++;
     if (sl && !shown.includes(s.item)) shown.push(s.item);
+    if (s.state === "spare") spare = true;
     g.font = `800 ${Math.max(8, Math.min(12, Math.floor(pw / 3)))}px 'Barlow Condensed', 'Arial Narrow', sans-serif`;
     if (s.state === "built") {
       built++; g.fillStyle = col; g.fillRect(px, py, pw, ph);
@@ -1220,6 +1235,10 @@ function drawZones(t) {
       g.fillStyle = "rgba(20,18,16,.55)"; g.fillRect(px, py, pw, ph);
       g.strokeStyle = col; g.lineWidth = 1.5; g.strokeRect(px + .75, py + .75, pw - 1.5, ph - 1.5);
       g.fillStyle = col; g.fillText(sl ? sl[1] : "", px + pw / 2, py + ph / 2);
+    } else if (s.state === "spare" && sl) {                         // a copy, built when its block runs flat out
+      g.globalAlpha = .6; g.strokeStyle = col; g.lineWidth = 1; g.setLineDash([3, 3]);
+      g.strokeRect(px + .5, py + .5, pw - 1, ph - 1); g.setLineDash([]);
+      g.fillStyle = col; g.fillText("+" + sl[1], px + pw / 2, py + ph / 2); g.globalAlpha = 1;
     } else {
       g.strokeStyle = "#57514a"; g.lineWidth = 1; g.setLineDash([3, 3]); g.strokeRect(px + .5, py + .5, pw - 1, ph - 1); g.setLineDash([]);
       g.fillStyle = "#6f6960"; g.fillText(ZONE_WORD[s.zone] || "", px + pw / 2, py + ph / 2);
@@ -1234,11 +1253,13 @@ function drawZones(t) {
     g.fillStyle = c; g.fillRect(kx, ky - 4, 8, 8); kx += 11;
     g.fillStyle = "#a8a197"; g.fillText(name, kx, ky); kx += g.measureText(name).width + 8;
   }
-  for (const txt of ["filled = built", "outline = planned"]) {
+  for (const txt of ["filled = built", "outline = planned", ...(spare ? ["+ = copy if needed"] : [])]) {
     if (kx + g.measureText(txt).width > cv.width) break;
     g.fillStyle = "#6f6960"; g.fillText(txt, kx, ky); kx += g.measureText(txt).width + 8;
   }
-  setText("zmapCount", planned ? `${built}/${planned} blocks · bus ${P.bus_laid || 0}` : `${(P.slots || []).length} slots reserved`);
+  const B = ZN.busShape;
+  const bus = B ? ` · bus ${B.belts} belt${B.belts > 1 ? "s" : ""} × ${B.long}` : (P.bus_laid ? " · bus started" : " · no bus yet");
+  setText("zmapCount", planned ? `${built}/${planned} blocks${bus}` : `${(P.slots || []).length} slots reserved`);
   if (ZN.pos) {                                                     // the character
     const x = X(ZN.pos[0]), y = Y(ZN.pos[1]), r = 3 + 3 * ((t / 600) % 1);
     g.strokeStyle = `rgba(244,239,230,${1 - (t / 600) % 1})`; g.lineWidth = 2; g.beginPath(); g.arc(x, y, r + 3, 0, 7); g.stroke();
