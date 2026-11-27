@@ -47,6 +47,14 @@ SITE_MARGIN = 2           # reserved land keeps this far from any building of ou
 HEAD = 26                 # spine tiles from its start kept for the head terminals (plates come in there by trunk)
 HEAD_GAP = 4              # head terminals are this far apart (two bus taps side by side need four)
 SPARE_SLOTS = 2           # make slots reserved beyond the era's blocks: a second copy, or a slot a design fits better
+# Growth: a segment's bus is laid out from the start as if a copy of its science blocks stood in the spare slots
+# (re-routing a laid bus for a copy added later moved 337 of 658 bus pieces in the fixture's segment 1). Nothing of
+# a copy is built until its block runs flat out: then the copy and its few bus taps go up, nothing re-routed.
+GROWTH = True
+GROWTH_FIRST = ("logistic-science-pack", "automation-science-pack", "chemical-science-pack")
+GROW_FLAT_MIN = 10.0      # a block flat out (machines working, output never backed up) this long gets its copy
+GROW_WORKING = 0.8        # share of its assemblers seen working
+GROW_FULL = 0.1           # at most this share seen with output backed up
 ANCHOR_SHIFTS = (0, -24, 24, -48, 48)    # where along a yard side the spine may start
 ANCHOR_GAPS = (1, 24, 48)                # how far out from the yard
 KEEP = 2                  # quick layouts finished with the oil corridor (the best by score)
@@ -180,6 +188,19 @@ def segment_specs(n: int, kit) -> list:
     return out
 
 
+def growth_specs(specs, k: int) -> list:
+    """Up to k planned copies for the spare slots: the science blocks first, then the busiest make blocks."""
+    make = [s for s in specs if s.zone == "make" and s.kind == "make"]
+    first = [s for item in GROWTH_FIRST for s in make if s.product == item]
+    rest = sorted((s for s in make if s not in first), key=lambda s: -float(getattr(s, "per_s", 0) or 0))
+    out, seen = [], set()
+    for s in first + rest:
+        if s.id not in seen:
+            out.append(s)
+            seen.add(s.id)
+    return out[:k]
+
+
 def slot_demand(n: int, kit) -> dict[str, int]:
     """Spine slots segment n needs, by zone (the silo spot is kept from segment 1 on)."""
     specs = segment_specs(n, kit)
@@ -295,6 +316,7 @@ class SegBlock:
     taps: list[dict] = field(default_factory=list)    # per input port: {"item", "line", "lat", "tile", "splitter"}
     problems: list[str] = field(default_factory=list)
     n: int = 1                       # the segment it belongs to
+    growth: bool = False             # a planned copy for when the block falls short (built only then)
 
     @property
     def product(self) -> str:
@@ -651,16 +673,25 @@ class Zones:
         computation on a snapshot; cached until the next reserve()."""
         if kit is None:
             kit = (self.opened.get(n) or {}).get("kit") or kit_for(world or self.__dict__.get("_world"))
-        key = (n, kit)
+        growth = self.growth_on(n)
+        key = (n, kit, growth)
         if key in self._seg:
             return self._seg[key]
-        seg = design_segment(self, n, kit, self.floorplan(world, scan))
+        seg = design_segment(self, n, kit, self.floorplan(world, scan), growth=growth)
         self._seg[key] = seg
         return seg
 
+    def growth_on(self, n: int) -> bool:
+        """Does segment n plan copies in its spare slots? An opened segment keeps what it opened with (a segment
+        opened by older code has a laid bus without them: never re-planned); one not open yet follows GROWTH."""
+        if n in self.opened:
+            return bool(self.opened[n].get("growth", False))
+        return GROWTH and n not in self.__dict__.get("no_growth", set())
+
     def open_segment(self, n: int, world=None, kit=None, minute: float = 0.0, log=None) -> Segment:
         seg = self.segment(n, world, kit)
-        self.opened.setdefault(n, {"built": {}, "minute": minute, "kit": seg.kit})
+        self.opened.setdefault(n, {"built": {}, "minute": minute, "kit": seg.kit,
+                                   "growth": any(b.growth for b in seg.blocks)})
         if seg.bus is not None:                  # the planned bus's land: no organic belt or pole crosses it now
             self.bus_tiles = set(self.__dict__.get("bus_tiles") or set()) | \
                 {t for e in seg.bus.entities for t in e.tiles}
@@ -755,7 +786,7 @@ def _head_terminals(fp, items: list[str], rates: dict[str, float]) -> list:
     return out
 
 
-def design_segment(z: Zones, n: int, kit, fp) -> Segment:
+def design_segment(z: Zones, n: int, kit, fp, growth: bool = False) -> Segment:
     from atlas.design.memory import Memory
     from atlas.layout.bus import Terminal, design_bus
     from atlas.sim.base import world_check, _reach
@@ -772,20 +803,26 @@ def design_segment(z: Zones, n: int, kit, fp) -> Segment:
     spare = list(by_zone["reserve"])
     used: set[str] = set()
     counts: dict[str, int] = {}
-    for spec in specs:
+    plan = [(s, False) for s in specs]
+    if growth:                             # copies for the spare slots the era's own blocks leave free
+        plan += [(s, True) for s in growth_specs(specs, len(spare))]
+    for spec, grow in plan:
         copy = counts.get(spec.id, 0)
         counts[spec.id] = copy + 1
         key = f"{spec.id}#{copy}"
-        own = [s for s in by_zone.get(spec.zone, []) if s.id not in used]
+        own = [s for s in by_zone.get(spec.zone, []) if s.id not in used] if not grow else []
         tries = own[:1] + [s for s in spare if s.id not in used]
         best = None
         for slot in tries:
             wd, errs = place(fp, spec, slot, mem, kit)
             if wd is not None and not errs:
-                best = SegBlock(key, spec, slot, wd, n=n)
+                best = SegBlock(key, spec, slot, wd, n=n, growth=grow)
                 break
             if best is None:
-                best = SegBlock(key, spec, slot, None, problems=errs or [f"{key}: no design in {slot.id}"], n=n)
+                best = SegBlock(key, spec, slot, None, problems=errs or [f"{key}: no design in {slot.id}"], n=n,
+                                growth=grow)
+        if grow and (best is None or not best.ok):
+            continue                       # a copy that fits nowhere is simply not planned
         if best is None:
             seg.problems.append(f"no slot for {key}")
             continue
@@ -974,6 +1011,15 @@ def after_build(crew, site) -> str:
                 think = getattr(w, "think", None)
                 seg = think("laying out segment 1 (slots, blocks and bus)", z.segment, 1, None, kit, scan) \
                     if think is not None else z.segment(1, None, kit, scan)
+                if seg.problems and any(b.growth for b in seg.blocks):
+                    # the planned copies must never keep a segment shut: plan it without them
+                    z.__dict__.setdefault("no_growth", set()).add(1)
+                    crew.log(f"[zones] segment 1 with copies in its spare slots does not check out "
+                             f"({seg.problems[0][:120]}): planned without them")
+                    if think is not None:
+                        seg = think("laying out segment 1 (slots, blocks and bus)", z.segment, 1, None, kit, scan)
+                    else:
+                        seg = z.segment(1, None, kit, scan)
                 if seg.problems:                         # never open a segment whose bus does not check out
                     crew.log(f"[zones] segment 1 not opened: {seg.problems[0][:160]}")
                     z.warnings.append(f"segment 1: {seg.problems[0][:160]}")
@@ -985,6 +1031,9 @@ def after_build(crew, site) -> str:
         if site.params.get("segment_block"):            # a slot factory: ports on laid lines are fed by their taps
             for n in sorted(z.opened):
                 feed_ports(crew, n)
+        grown = grow_check(crew, z, now)
+        if grown:
+            note = (note + "; " if note else "") + grown
         return note
     except Exception as exc:  # noqa: BLE001 - never let the planner break a build
         try:
@@ -992,6 +1041,71 @@ def after_build(crew, site) -> str:
         except Exception:  # noqa: BLE001
             pass
         return ""
+
+
+def _flat_out(site) -> bool | None:
+    """Is a slot factory running flat out on the last patrol's look (most assemblers working, almost none with
+    their output backed up)? None: not looked at yet."""
+    census = getattr(site, "census", None) or {}
+    st: dict[str, int] = {}
+    for name, c in census.items():
+        if "assembling-machine" in name:
+            for k, v in c.items():
+                st[k] = st.get(k, 0) + int(v)
+    total = sum(st.values())
+    if not total:
+        return None
+    full = st.get("full_output", 0) + st.get("waiting_for_space_in_destination", 0)
+    return st.get("working", 0) / total >= GROW_WORKING and full / total <= GROW_FULL
+
+
+def grow_check(crew, z, now: float) -> str:
+    """A built slot block that has run flat out for GROW_FLAT_MIN gets its planned copy: a factory goal for its
+    item (Factory._slot_design puts it in the copy's spare slot, the bus taps come with it). Returns a note."""
+    watch = z.__dict__.setdefault("grow_watch", {})       # block key -> minute first seen flat out
+    asked = z.__dict__.setdefault("grow_asked", {})       # copy key -> minute its goal was proposed
+    sites = {s.params.get("segment_block"): s for s in crew.base.sites if (s.params or {}).get("segment_block")}
+    notes = []
+    for n in sorted(z.opened):
+        if not z.growth_on(n):
+            continue
+        seg = z.segment(n)
+        for b in seg.blocks:
+            if b.growth or not b.ok or not z.is_built(b):
+                continue
+            copy = next((c for c in seg.blocks if c.growth and c.ok and c.spec.id == b.spec.id
+                         and not z.is_built(c)), None)
+            site = sites.get(b.key)
+            if copy is None or site is None:
+                continue
+            flat = _flat_out(site)
+            if flat is None:
+                continue
+            if not flat:
+                watch.pop(b.key, None)
+                continue
+            since = watch.setdefault(b.key, now)
+            if now - since < GROW_FLAT_MIN or copy.key in asked:
+                continue
+            rate = round(float(copy.spec.per_s) * 60, 1)
+            goal = {"do": "build", "module": "factory", "item": b.product, "per_minute": rate,
+                    "reflex": f"zones: {b.key} has run flat out for {now - since:.0f} min: its copy in "
+                              f"{copy.slot.id} goes up"}
+            try:
+                from .agenda import agenda_of
+                ok, _ = agenda_of(crew).propose(crew, goal, who="zones")
+            except Exception:  # noqa: BLE001
+                urgent = getattr(crew, "urgent", None)
+                ok = urgent is not None
+                if ok:
+                    urgent.append(goal)
+            if ok:
+                asked[copy.key] = now
+                notes.append(f"zones: {b.product} x2 (its block ran flat out {now - since:.0f} min; the copy goes "
+                             f"into {copy.slot.id})")
+                crew.log(f"[zones] growing {b.key}: flat out for {now - since:.0f} min, its copy {copy.key} "
+                         f"queued for {copy.slot.id}")
+    return "; ".join(notes)
 
 
 def survey(world, base, half: int = 160, step: int = 40) -> None:

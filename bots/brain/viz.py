@@ -121,7 +121,7 @@ def design_slot(block) -> None:
         w, h, ents = _slot_ents(block)
         with LOCK:
             DESIGN.clear()
-            DESIGN.update({"item": block.product, "rate": round(float(getattr(block.spec, "rate", 0) or 0) * 60, 1),
+            DESIGN.update({"item": block.product, "rate": round(float(getattr(block.spec, "per_s", 0) or 0) * 60, 1),   # (BlockSpec has per_s)
                            "at": None, "placer": "slot", "status": "kept", "why": f"slot {block.slot.id}",
                            "attempt": 1, "history": [{"ok": True, "why": f"designed for slot {block.slot.id}",
                                                       "placer": "slot"}],
@@ -172,7 +172,7 @@ def zones_key(crew) -> tuple | None:
 
 
 def _slot_state(z, crew, slot) -> tuple[str, str | None]:
-    """reserved | building | built, and the item its factory makes (if a segment has a block there)."""
+    """reserved | spare | planned | building | built, and the item its factory makes (if a segment has a block there)."""
     item = None
     state = "reserved"
     cur = ((getattr(crew, "current", None) or {}).get("goal") or {})
@@ -191,12 +191,15 @@ def _slot_state(z, crew, slot) -> tuple[str, str | None]:
             if b.slot.id != slot.id:
                 continue
             item = b.product
-            if b.key in (st.get("built") or {}):
+            done = st.get("built") or {}
+            first_built = not getattr(b, "growth", False) or any(
+                o.key in done for o in seg.blocks if not getattr(o, "growth", False) and o.spec.id == b.spec.id)
+            if b.key in done:
                 state = "built"
-            elif cur_item == b.product and cur.get("module", (cur.get("with") or {}).get("module")) == "factory":
+            elif cur_item == b.product and first_built and                     cur.get("module", (cur.get("with") or {}).get("module")) == "factory" and                     not (getattr(b, "growth", False) and not z.__dict__.get("grow_asked", {}).get(b.key)):
                 state = "building"
             elif state != "built":
-                state = "planned"
+                state = "spare" if getattr(b, "growth", False) else "planned"   # a copy, built only if needed
     return state, item
 
 
