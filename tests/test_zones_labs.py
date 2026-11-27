@@ -247,3 +247,55 @@ def test_once_the_slot_labs_stand_nobody_asks_for_stations_and_the_refusal_names
     assert f"site {green.id} (logistic-science-pack) make(s) nothing" in why
     green.health = {"working": 10}
     assert "make(s) nothing" not in ResearchStation.slot_labs_refusal(base)
+
+
+def test_a_take_up_cut_short_is_finished_later_and_a_pause_is_never_swallowed():
+    from brain import zones
+    from brain.modules import Base, Site
+    from brain.world import Preempted
+    scan, w, z, seg = fresh_zones()
+    labs, red, green = _blocks(seg)
+    base = Base()
+    crew = bus_crew(z, base)
+    fw = _labs_world(crew)
+    gsite, gsb = _green_with_chest(z, seg, base)
+    z.mark_built(labs, (0, 0))
+    base.add(Site("labs", {"segment_block": labs.key, "slot": labs.slot.id, "bus_fed": True, "ports": []}, (0, 0)))
+    # the live run: the pause landed in the inserter's take-up, the chest came up, green was marked switched
+    ins = next(e for e in gsite.entities if e[0] == "inserter")
+    gsite.entities[:] = [ins]
+    gsite.chests[:] = []
+    gsite.params["bus_out"] = [green.product]
+    zones.bus_site(crew, 1, create=True).params["laid"] = ["poles", "automation-science-pack", "logistic-science-pack"]
+    crew.urgent.clear()
+    note = zones.science_check(crew, z, 50.0)
+    assert ("inserter", math.floor(ins[1]), math.floor(ins[2])) in fw.picked and not gsite.entities
+    assert "leftover" in note and "line piece(s) laid there" in note
+    freed = (math.floor(ins[1]), math.floor(ins[2]))
+    assert any(p[0] == "transport-belt" and (math.floor(p[1]), math.floor(p[2])) == freed
+               for p in crew.w.run.placed)                               # the line's belt went down at once
+    assert not [g for g in crew.urgent if g.get("do") == "bus"]          # its lines are laid: no bus goal
+    # a pause inside a take-up goes up to the goal, never swallowed
+    gsite.entities[:] = [ins]
+
+    def paused(*a):
+        raise Preempted("overseer: something more urgent")
+    fw.pickup = paused
+    with pytest.raises(Preempted):
+        zones.switch_to_bus(crew, 1, {green.product}, leftovers_only=True)
+
+
+def test_pack_lines_missing_after_the_labs_stand_queue_a_bus_goal():
+    from brain import zones
+    from brain.modules import Base, Site
+    scan, w, z, seg = fresh_zones()
+    labs, _, green = _blocks(seg)
+    base = Base()
+    crew = _science_crew(z, base)
+    z.mark_built(green, (0, 0))
+    z.mark_built(labs, (0, 0))
+    base.add(Site("labs", {"segment_block": labs.key, "slot": labs.slot.id, "bus_fed": True, "ports": []}, (0, 0)))
+    zones.science_check(crew, z, 60.0)
+    assert [g["segment"] for g in crew.urgent if g.get("do") == "bus"] == [1]
+    zones.science_check(crew, z, 61.0)
+    assert len([g for g in crew.urgent if g.get("do") == "bus"]) == 1      # once per gap

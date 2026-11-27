@@ -1081,11 +1081,16 @@ def build_labs_slot(w, d: SlotBuild):
     return site
 
 
-def switch_to_bus(crew, n: int, items) -> list[str]:
+def switch_to_bus(crew, n: int, items, leftovers_only: bool = False) -> list[str]:
     """Built slot factories of segment n whose product is one of `items` and still goes into an output chest
     (built before the labs: Zones.onto_bus) put it on the bus from now on. Their output inserter and chest stand
     where the planned bus line's injection goes: both come up (with the packs in the chest), and so does every
-    belt link out of that chest (the stations elsewhere lose that colour; the slot's labs take it by bus)."""
+    belt link out of that chest (the stations elsewhere lose that colour; the slot's labs take it by bus).
+    leftovers_only: only sites switched before whose inserter or chest still stands (a take-up that failed):
+    taken up again, so the bus repair can place the line's belt there. The take-up is a "remove" step (never
+    paused): run 20261127-101219 had the overseer's pause land inside it, green's inserter stayed on its line's
+    first tile and the bus repair failed there with cannot_place."""
+    from .world import Preempted
     z = crew.zones
     seg = z.segment(n)
     items = set(items)
@@ -1094,35 +1099,77 @@ def switch_to_bus(crew, n: int, items) -> list[str]:
     for s in list(crew.base.sites):
         key = (s.params or {}).get("segment_block")
         b = by_key.get(key)
-        if b is None or b.spec.kind != "make" or b.product not in items or b.product in (s.params.get("bus_out") or []):
+        if b is None or b.spec.kind != "make" or b.product not in items:
             continue
-        if b.product not in seg.consumed() and not seg.feeds_line(b):
+        switched = b.product in (s.params.get("bus_out") or [])
+        if switched != leftovers_only:
+            continue
+        if not switched and b.product not in seg.consumed() and not seg.feeds_line(b):
             continue                          # no planned line starts at its output: its chest stays
         stub = slot_build(b, frozenset()).stub
         tiles = {tuple(t) for st in stub for t in st.tiles}
+        left = [e for e in s.entities if (math.floor(e[1]), math.floor(e[2])) in tiles
+                and e[0] in ("inserter", "iron-chest")]
+        if switched and not left:
+            continue
         chests = [(x, y, what) for x, y, what in s.chests if (math.floor(x), math.floor(y)) in tiles]
-        for x, y, _ in chests:
-            for ln in [q for q in getattr(crew, "links", []) if tuple(q.get("source") or ()) == (x, y)]:
-                try:
-                    crew._unlink(ln)
-                except Exception as exc:  # noqa: BLE001 - one stuck link never keeps the packs off the bus
-                    crew.log(f"[zones] taking up a link out of site {s.id}'s chest failed: {str(exc)[:100]}")
         gone = []
-        for e in list(s.entities):
-            if (math.floor(e[1]), math.floor(e[2])) in tiles and e[0] in ("inserter", "iron-chest"):
+        with crew.w.step("remove"):
+            for x, y, _ in chests:
+                for ln in [q for q in getattr(crew, "links", []) if tuple(q.get("source") or ()) == (x, y)]:
+                    try:
+                        crew._unlink(ln)
+                    except Preempted:
+                        raise
+                    except Exception as exc:  # noqa: BLE001 - one stuck link never keeps the packs off the bus
+                        crew.log(f"[zones] taking up a link out of site {s.id}'s chest failed: {str(exc)[:100]}")
+            for e in left:
                 try:
                     crew.w.pickup(*e)
-                except Exception as exc:  # noqa: BLE001 - the bus line's step there becomes a gap repairs retry
+                except Preempted:
+                    raise
+                except Exception as exc:  # noqa: BLE001 - taken up again from the next science check
                     crew.log(f"[zones] taking up {e[0]} at ({e[1]}, {e[2]}) failed: {str(exc)[:100]}")
                     continue
                 gone.append(e)
         s.entities[:] = [e for e in s.entities if e not in gone]
         s.chests[:] = [c for c in s.chests if c not in chests]
-        s.params.setdefault("bus_out", []).append(b.product)
-        notes.append(f"site {s.id} puts its {b.product} on the bus now ({len(gone)} buildings of its output "
-                     "chest taken up)")
-        crew.log(f"[zones] {notes[-1]}")
+        if not switched:
+            s.params.setdefault("bus_out", []).append(b.product)
+            notes.append(f"site {s.id} puts its {b.product} on the bus now ({len(gone)} buildings of its output "
+                         "chest taken up)")
+        elif gone:
+            notes.append(f"site {s.id}: {len(gone)} leftover building(s) of its old output chest taken up; "
+                         + _lay_freed(crew, n, b.product, {(math.floor(e[1]), math.floor(e[2])) for e in gone}))
+        if notes:
+            crew.log(f"[zones] {notes[-1]}")
     return notes
+
+
+def _lay_freed(crew, n: int, item: str, tiles: set) -> str:
+    """The item's bus line pieces on tiles just freed, placed now. Their gaps leave the bus site's repair list;
+    any the game still refuses get their repair tries back (a gap tried twice counts as blocked for good)."""
+    site = bus_site(crew, n)
+    steps = [st for st in (crew.zones.segment(n).jobs().get(f"bus:{item}") or [])
+             if {tuple(t) for t in st.tiles} & tiles]
+    if site is None or not steps:
+        return f"no {item} line piece there"
+    done = {tuple(k) for k in site.params.setdefault("placed", [])}
+
+    def rec(st) -> None:
+        site.params["placed"].append(list(step_key(st)))
+        site.entities.append((st.name, st.x, st.y, st.direction))
+    with crew.w.step("build"):
+        placed, failed, _ = place_steps(crew.w, steps, done, rec)
+    keys = {step_key(st) for st in steps}
+    gaps = site.params.get("gaps") or []
+    put = {tuple(k) for k in site.params["placed"]}
+    site.params["gaps"] = [g for g in gaps if (g.get("name"), round(float(g.get("x", 0)) * 2) / 2,
+                                               round(float(g.get("y", 0)) * 2) / 2) not in put]
+    for g in site.params["gaps"]:
+        if (g.get("name"), round(float(g.get("x", 0)) * 2) / 2, round(float(g.get("y", 0)) * 2) / 2) in keys:
+            g["tries"] = 0
+    return f"{placed} {item} line piece(s) laid there" + (f", {len(failed)} refused (repair retries)" if failed else "")
 
 
 def _propose(crew, goal: dict) -> bool:
@@ -1163,6 +1210,12 @@ def science_check(crew, z, now: float) -> str:
                 asked["labs"] = now
                 notes.append(f"zones: labs block {lb.key} queued for {lb.slot.id}")
         return "; ".join(notes)
+    # the labs stand: their pack lines must be laid, and no old output chest may stand on them (self-heal)
+    laid = laid_items(crew, lb.n)
+    if not packs <= laid and due("pack-lines") and propose_bus(crew, lb.n, "the labs' pack lines"):
+        asked["pack-lines"] = now
+        notes.append("zones: the labs' pack lines queued (not laid yet)")
+    notes += switch_to_bus(crew, lb.n, packs & laid, leftovers_only=True)
     for b in makers:
         if not z.is_built(b) and due(b.key):
             goal = {"do": "build", "module": "factory", "item": b.product,
