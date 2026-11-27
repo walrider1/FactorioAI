@@ -83,8 +83,13 @@ def _slot_ents(block) -> tuple[int, int, list]:
     return _relative(boxes)
 
 
-def design_attempt(item: str, rate: float, focus, placer: str, d, status: str, why: str = "") -> None:
-    """One design attempt: status "drawing" (just started), "kept" (it will be built) or "refused"."""
+DESIGN_ROSTER: dict[str, list] = {}       # item -> its last roster (kept across attempts)
+
+
+def design_attempt(item: str, rate: float, focus, placer: str, d, status: str, why: str = "",
+                   roster: list | None = None, room: int | None = None) -> None:
+    """One design attempt: status "drawing" (just started), "kept" (it will be built) or "refused". roster: the
+    machines and inputs the layout must fit ([name, count, "m"|"in"]), room: the area's margin in tiles."""
     try:
         w, h, ents = _fab_ents(d) if d is not None else (0, 0, [])
         with LOCK:
@@ -100,7 +105,11 @@ def design_attempt(item: str, rate: float, focus, placer: str, d, status: str, w
                            "placer": placer, "status": status, "why": str(why)[:140], "attempt": n,
                            "history": hist, "w": w, "h": h, "ents": ents, "t": time.time(),
                            "since": time.time() if not same else DESIGN.get("since", time.time()) or time.time(),
-                           "slot": None})
+                           "slot": None,
+                           "roster": roster if roster is not None else (DESIGN_ROSTER.get(item) or []),
+                           "room": room})
+            if roster:
+                DESIGN_ROSTER[item] = roster
     except Exception:  # noqa: BLE001 - never let the overlay feed disturb a design
         pass
 
@@ -135,8 +144,8 @@ def design_feed(crew) -> dict | None:
     if building and isinstance(rec, list) and d.get("status") == "kept":
         d["placed"] = min(len(rec), len(d.get("ents") or []))
         d["status"] = "building" if rec else "kept"
-    elif not building and time.time() - d.get("t", 0) > 240:
-        return None
+    elif not building and time.time() - d.get("t", 0) > (1200 if d.get("status") == "drawing" else 240):
+        return None                                   # (a model drawing a layout can take minutes per attempt)
     d["age"] = round(time.time() - d.get("t", time.time()), 1)
     d.pop("since", None)
     return d

@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 import automation_bot as ab
 from fab.build import build as fab_build
 from fab.design import design_factory
+from fab.recipes import ORE_FOR
 from fab.grid import Grid
 
 from . import design_memory
@@ -1485,7 +1486,14 @@ class Factory(Module):
             # chest inputs (replays of saved terrain: feeds designed 41 of 54 cases, chests 38, not the same ones)
             for fed in ((feeds, frozenset()) if feeds else (frozenset(),)):
                 from . import viz
-                viz.design_attempt(item, r, focus, placer, None, "drawing")
+                try:                                  # what it must fit in: shown while the layout is drawn
+                    from fab.recipes import plan as fab_plan
+                    fp = fab_plan(item, r, supplied=set(supplied), feeds=set(fed) & set(supplied))
+                    roster = [[k, int(n), "in" if (k in fp.supplied or k in ORE_FOR or k.endswith("-plate")) else "m"]
+                              for k, n in fp.machines.items()]
+                except Exception:  # noqa: BLE001 - the overlay feed never stops a design
+                    roster = []
+                viz.design_attempt(item, r, focus, placer, None, "drawing", roster=roster, room=margin)
                 d = w.think(f"designing a {item} factory ({who}): {r}/min at ({focus[0]:.0f}, {focus[1]:.0f})",
                             design_factory, grid, item, r, near=focus, placer=placer,
                             llm=self.designer if placer == "llm" else None, log=lambda *a: None,
