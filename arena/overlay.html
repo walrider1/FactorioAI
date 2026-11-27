@@ -1222,8 +1222,10 @@ function drawZones(t) {
     g.fillStyle = "#f4efe6"; g.beginPath(); g.arc(x, y, 3, 0, 7); g.fill();
   }
 }
-const PLACER = { llm: "AI designer", search: "layout search", slot: "bus slot", fallback: "layout search" };
+const PLACER = { llm: "AI designer", search: "layout search", slot: "bus slot", fallback: "layout search", saved: "saved design" };
+const REFUSED_SHOW_S = 120;           // a refused attempt with nothing after it fades out (the bot moved on)
 function renderDesign(D) {
+  if (D && D.status === "refused" && (+D.age || 0) > REFUSED_SHOW_S) D = null;
   // the panel shows a layout or nothing: while a first attempt is being drawn there is nothing to see yet; a
   // retry keeps the last attempt on screen, greyed, until the new one arrives
   if (D && D.ents && D.ents.length) ZN.prev = { item: D.item, w: D.w, h: D.h, ents: D.ents };
