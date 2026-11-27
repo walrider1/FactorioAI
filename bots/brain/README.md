@@ -223,44 +223,49 @@ belt.
   the centre) plus 10 tiles, between 36 and 90 tiles from the centre each way. It is never reserved.
 - **Reservations** (`Zones.reserve` = `plan` then `apply`):
   - the spine, starting at the yard's edge and heading away from it;
-  - the oil corridor;
   - the silo slot;
-  - the next era's slots (make, science, two spare).
+  - the next era's slots (make, science, two spare);
+  - the oil corridor, only once crude is known (`OIL_LAZY`, `Zones.reserve_oil`, retried every 20 game
+    minutes). It keeps off the head ports.
 
   Nothing is reserved on any ore tile, on or within 2 tiles of our buildings, lanes or keepouts, or on unseen
   land. `FreeWorld.free` refuses reserved tiles for buildings. `free_belt` and pole routing allow corridor
-  tiles but not slot tiles. fab's `Grid`, the workshop floor and the storage yard keep off all reserved land.
+  tiles, but not slot tiles and, once a segment is open, not its planned bus tiles (`bus_tiles`). fab's `Grid`,
+  the workshop floor and the storage yard keep off all reserved land.
 - **Segments.** `Zones.segment(n)` / `open_segment(n)` work from `SEGMENTS[n]`. Segment 1 is red and green at
-  30/min, sized by `atlas.plan.graph`, which adds the ×1.2 `SUPPLY_MARGIN` to every intermediate. Each copy of
-  each make block (gears, circuits, red, green) and the labs gets a slot. Each is designed with Atlas's strip
-  designer, with its ports on the spine edge. The bus (`atlas.layout.bus.design_bus`) is laid for these
-  terminals only, plus **head terminals** at the spine's start for the plates the brain's lines bring in.
-  - The result is a `Segment`. Each `SegBlock` holds its slot rect, `ports` (spine edge tiles), `taps`
-    (bus line, lane, splitter per input) and `problems`.
-  - `Segment.head_ports(spine)` gives the head terminals as feed ports for trunks.
-  - The whole segment passes Atlas's world check: no clashes, one item per lane, every input port gets its item.
-- **Factories.** When a segment is open, `Factory._design` first asks `slot_block(item)`. If it gets a block,
-  `zones.slot_build` turns the Atlas design into placement steps:
-  - inserters face their pickup side, and undergrounds carry their belt type;
-  - each in port becomes a feed port whose last link belt stands on the spine edge;
-  - each out port gets an inserter and a chest on the spine edge (the product's stand-in until the bus exists).
-
-  `supplied_for` returns the block's bus inputs at the block's rate (`SlotPlan`), so the crew's "intermediates
-  first" and "plates first" size the feeders to the slot. Free-form fab stays for everything else: start-yard
-  builds, items not in the segment, a block already built, `plates: "mine"`, and a slot whose design fails.
-- **Saved** with the crew (`crew.zones`, the same object as `world.zones`). Only the plain state and the Atlas
-  corridor and slot records are saved. The floorplan's ledger and the designs are rebuilt after a resume.
-- **Off switch:** `zones.ENABLED = False`. Nothing is reserved, `free` works as before, and factories are
-  free-form.
-- **Not wired yet (stubs):**
-  - the bus pieces and taps are planned and checked but not built (`Segment.bus`; `atlas.build.compile.bus_jobs`
-    turns them into jobs);
-  - no trunk goal targets the head ports yet;
-  - until both exist, a slot factory's inputs are point-to-point links into its feed ports, and its output
-    sits in the stand-in chest;
-  - segments 2+ (blue, the oil zone) are hybrid-plan step 6.
+  the road's rate (`roadmap.SCIENCE_RATE`: 15/min each), not the era's 30, sized by `atlas.plan.graph` (×1.2
+  `SUPPLY_MARGIN` on every intermediate). Each make block (gears, circuits, red, green) and the labs gets a slot,
+  designed with Atlas's strip designer, ports on the spine edge. The bus (`atlas.layout.bus.design_bus`) serves
+  these terminals plus **head terminals** at the spine's start for plates. A segment whose plan has any problem
+  (DRC, bus, lane check) does not open.
+- **The bus, built.** Opening a segment queues a `{"do": "bus", "segment": n}` goal (budget 30 min) through the
+  agenda. `zones.lay_bus` places the planned bus as steps (`Segment.jobs()`, one belt network per item:
+  lines, transfers, splitter taps, injections; plus the spine's poles):
+  - only the networks the built slots (and the one being built) draw on;
+  - recorded on a `bus` site: pieces placed (a paused or failed goal resumes there), networks laid, refused
+    pieces as gaps for `Crew.repair`; the site is connected to the grid.
+- **Factories.** When a segment is open, `Factory._design` first asks `slot_block(item)` and builds the Atlas
+  design (`zones.slot_build`, `Factory._build_slot`). In the crew's build:
+  - `_intermediates_first` builds the segment's own block for an input (into its slot) when not built yet, and
+    skips the input once it is;
+  - `_plates_first` is skipped for slots: plates come in at the head;
+  - `zones.bus_first` lays the block's lines before it is placed, then plates into the head.
+- **Taps.** A slot factory's input ports on laid lines are fed by their taps: `port["fed"] = ["bus", item]` (and
+  `bus_tap`), so the link step, relink, triage and the stale checks never belt into them.
+- **Head.** The bus site carries one feed port per laid plate line, sized to what the active slots take.
+  `zones.head_supply` covers short plates (spare under half the demand: `Crew._more_plates`, a dense field or
+  a mine row) and proposes a `trunk` goal per unfed head port. The link step also feeds head ports in reach.
+- **Outputs.** A product another make block takes off the bus (gears, circuits) runs straight into its
+  injection belt. Any other product (red, green: the labs slot is not built by the brain) goes into an
+  inserter and chest on the spine edge, as before.
+- **Saved** with the crew (`crew.zones`, the same object as `world.zones`). Only plain state and the Atlas
+  corridor and slot records are saved. The ledger and the designs are rebuilt after a resume.
+- **Off switch:** `zones.ENABLED` (False by default until the real-game test). Nothing is reserved, `free`
+  works as before, and factories are free-form.
+- **Not done:** the labs slot (the brain's own labs and research stations take the packs); taking back a
+  slot or bus line when its site is removed; segments 2+ (blue, the oil zone) are hybrid-plan step 6.
 - **Tests:** `tests/test_zones.py` runs on the Atlas fixture map. `ZONES_ALL_MAPS=1` also runs it on the 22
-  generated maps (all pass, 3 to 11 s each).
+  generated maps.
 
 ## How far it gets today
 

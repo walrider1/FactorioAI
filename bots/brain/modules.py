@@ -942,7 +942,8 @@ class Factory(Module):
             return None
         from . import zones as zmod
         try:
-            d = zmod.slot_build(block)
+            z = getattr(w, "zones", None) or self.zones
+            d = zmod.slot_build(block, z.segment(block.n).consumed())     # made items ride the bus to their users
         except Exception as exc:  # noqa: BLE001
             w.log(f"[zones] no slot build for {p.get('item')} ({type(exc).__name__}: {str(exc)[:120]}): free-form")
             return None
@@ -1683,39 +1684,13 @@ class Factory(Module):
     def _build_slot(self, w, base, p, d) -> Site:
         """Place a zone slot's Atlas design (zones.SlotBuild) step by step: every building the game refuses is a
         gap the site keeps (repairs place it later), as with fab designs. Its input ports are feed ports on the
-        spine edge: until the segment's bus taps exist (zones.py: not built yet), the link step belts them from
-        sources as it does for any factory. Its product collects in a chest past each out port."""
-        from fab.build import _gap, _retry
-        placed, failed, gaps = 0, [], []
-        for s in d.all_steps():
-            tiles = {tuple(t) for t in s.tiles}
-            try:
-                if s.belt_type:                  # an underground: the API takes its belt type
-                    w.clear(tiles)
-                    w.near(s.x, s.y)
-                    if any(abs(w.pos[0] - t[0] - 0.5) < 1.2 and abs(w.pos[1] - t[1] - 0.5) < 1.2 for t in tiles):
-                        w.step_out(tiles)
-                    r = _retry(w, tiles, lambda s=s: w.run.place(s.name, s.x, s.y, s.direction, s.belt_type))
-                    if not r.get("ok"):
-                        raise BuildError(f"place {s.name} at ({s.x}, {s.y}): {r.get('code')} {r.get('message', '')}")
-                    w.used.update(tiles)
-                    w.inventory[s.name] = max(0, w.inventory.get(s.name, 0) - 1)
-                else:
-                    w.place(s.name, s.x, s.y, s.direction, tiles)
-                placed += 1
-            except BuildError as exc:
-                failed.append(f"{s.name} at ({s.x}, {s.y}): {str(exc)[:120]}")
-                gaps.append(_gap(s.name, s.x, s.y, s.direction, str(exc), recipe=s.recipe, type=s.belt_type))
-                continue
-            if s.recipe and s.name.startswith("assembling-machine"):
-                r = w.run.set_recipe(s.x, s.y, s.recipe)
-                if not r.get("ok"):
-                    failed.append(f"recipe {s.recipe} at ({s.x}, {s.y}): {r.get('code')}")
-                    gaps.append(_gap(s.name, s.x, s.y, s.direction, f"recipe: {r.get('code')}", recipe=s.recipe,
-                                     placed=True))
+        spine edge, fed by the segment bus's taps (zones.bus_first lays them before this build; zones.feed_ports
+        marks them fed). A product another slot uses goes onto the bus; any other into a chest past its port."""
+        from . import zones as zmod
+        placed, failed, gaps = zmod.place_steps(w, d.all_steps())
         block = d.block
         site = Site(self.name, {"item": p["item"], "per_minute": float(d.per_minute), "slot": block.slot.id,
-                                "segment_block": block.key}, d.focus)
+                                "segment_block": block.key, "bus_out": list(d.bus_out)}, d.focus)
         site.chests = [(x, y, p["item"]) for x, y in d.chests]
         site.poles = [tuple(q) for q in d.poles]
         ports = [dict(pt) for pt in d.ports]
@@ -1760,6 +1735,7 @@ class SlotPlan:
                     mach = 1
         self.machines = {spec.product: mach}
         self.item = spec.product
+        self.block = block                   # the crew's firsts read it: inputs by bus, plates at the head
 
 
 # ----------------------------------------------------------- electric mine

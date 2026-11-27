@@ -47,8 +47,13 @@ ANCHOR_SHIFTS = (0, -24, 24, -48, 48)    # where along a yard side the spine may
 ANCHOR_GAPS = (1, 24, 48)                # how far out from the yard
 KEEP = 2                  # quick layouts finished with the oil corridor (the best by score)
 RETRY_MIN = 20.0          # nothing fitted (too little land seen yet): try again after this many game minutes
-# era segments: the targets each is sized for (items a second; each later segment keeps the earlier ones)
-SEGMENTS = {1: {"automation-science-pack": 30 / 60, "logistic-science-pack": 30 / 60}}
+OIL_LAZY = True           # the oil corridor is reserved only once crude is known (Zones.reserve_oil), not up front
+# era segments: the targets each is sized for (items a second; each later segment keeps the earlier ones). Segment 1
+# is what the brain's road asks of red and green (roadmap.SCIENCE_RATE: 15/min each), not the whole era's 30
+from .roadmap import SCIENCE_RATE as _ROAD  # noqa: E402
+
+SEGMENTS = {1: {"automation-science-pack": _ROAD["automation-science-pack"] / 60,
+                "logistic-science-pack": _ROAD["logistic-science-pack"] / 60}}
 SEGMENT_ZONES = ("make", "science")       # smelting stays with the brain's fields; the spine head gets their lines
 OPEN_RECIPES = {1: {"underground-belt"}}  # a segment opens only once these are unlocked (and see ready())
 
@@ -248,17 +253,22 @@ def _score(fp, want: dict[str, int], centre) -> float:
 
 def plan_floor(scan, yard, blocked: set[Tile], want: dict[str, int], centre, log=None):
     """The best floorplan whose spine starts at the start yard's edge: quick layouts (spine and slots) from every
-    anchor, then the best KEEP finished with the oil corridor. None when no spine fits anywhere."""
+    anchor; unless OIL_LAZY, the best KEEP are then finished with the oil corridor. None when no spine fits."""
     scan_p = planning_scan(scan, blocked | rect_tiles(yard))
     base_led = _base_ledger(scan_p)
     quick = []
     for anchor, heading in _anchors(yard):
         fp = _layout(scan_p, base_led, anchor, heading, want, oil=False)
         if fp is not None:
-            quick.append((_score(fp, want, centre), anchor, heading))
+            quick.append((_score(fp, want, centre), anchor, heading, fp))
     quick.sort(key=lambda q: -q[0])
     best = None
-    for _, anchor, heading in quick[:KEEP]:
+    if OIL_LAZY:                  # the oil corridor comes later, once crude is known (Zones.reserve_oil)
+        best = quick[0][3] if quick else None
+        if log and best is not None:
+            log(f"[zones] spine from {best.anchor} heading {best.heading}: {best.metrics['slots']}")
+        return best
+    for _, anchor, heading, _fp in quick[:KEEP]:
         fp = _layout(scan_p, base_led, anchor, heading, want, oil=True)
         if fp is not None and (best is None or _score(fp, want, centre) > _score(best, want, centre)):
             best = fp
@@ -305,6 +315,36 @@ class Segment:
     def items(self) -> set[str]:
         return {b.product for b in self.blocks if b.spec.kind == "make"}
 
+    def consumed(self) -> set[str]:
+        """Items a make block takes off the bus (the blocks the brain builds; labs are not one of them). A block
+        whose product is one of these puts it on the bus; any other product goes into its output chest."""
+        return {p["item"] for b in self.blocks if b.ok and b.spec.kind == "make" for p in b.ports if p["io"] == "in"}
+
+    def inputs_of(self, blocks) -> set[str]:
+        """The bus lines these blocks draw on (their input ports' items)."""
+        return {p["item"] for b in blocks if b.ok for p in b.ports if p["io"] == "in"}
+
+    def jobs(self) -> dict[str, list]:
+        """The planned bus as placement steps, one list per belt network ("bus:<item>": the item's lines, their
+        transfers, taps and injections; "bus:poles": the poles along the spine and across it)."""
+        if self.bus is None:
+            return {}
+        cache = self.__dict__.get("_jobs")
+        if cache is None:
+            from atlas.build.compile import bus_jobs
+            cache = self.__dict__["_jobs"] = {j.name: j.steps for j in bus_jobs(self.bus)}
+        return cache
+
+    def demand(self, blocks) -> dict[str, float]:
+        """What these blocks take a second of each item no block of the segment makes (the head's plates)."""
+        made = {b.product for b in self.blocks if b.ok}
+        out: dict[str, float] = {}
+        for b in blocks:
+            for item, rate in b.spec.bus_in.items():
+                if item not in made:
+                    out[item] = out.get(item, 0.0) + rate
+        return out
+
     def head_ports(self, spine) -> list[dict]:
         """The head terminals as brain feed ports: a trunk's last belt stands just outside the spine's edge and
         faces into it (the bus's injection belt starts on the edge tile)."""
@@ -343,6 +383,9 @@ class Zones:
         self.opened: dict[int, dict] = {}    # segment -> {"built": {block key: site centre}, "minute": ...}
         self.warnings: list[str] = []
         self.tried_minute: float | None = None
+        self.bus_tiles: set[Tile] = set()    # every tile of an open segment's planned bus: no organic belt either
+        self.tried_open: float | None = None  # the minute a segment was last worked out to open (once a minute)
+        self.oil_tried: float | None = None  # when the lazy oil corridor was last tried (OIL_LAZY)
         self._fp = None                      # transient: the rebuilt Floorplan
         self._seg: dict = {}                 # transient: computed Segments
 
@@ -358,6 +401,8 @@ class Zones:
         self.__dict__.update(st)
         self.__dict__.setdefault("_fp", None)
         self.__dict__.setdefault("_seg", {})
+        for k, v in (("bus_tiles", set()), ("oil_tried", None), ("tried_open", None)):
+            self.__dict__.setdefault(k, v)
 
     # ------------------------------------------------------------ queries (the hot path of world.free)
     @property
@@ -431,7 +476,7 @@ class Zones:
         slots = set().union(*(s.tiles for s in self.slots)) - ytiles if self.slots else set()
         self.block = corr | slots
         self.belt_ok = corr - slots
-        self.slot_only = self.block - self.belt_ok
+        self._refresh()
         self.warnings += list(fp.warnings)
         self._fp, self._seg = None, {}
         if log:
@@ -452,7 +497,83 @@ class Zones:
         tiles = set(tiles)
         self.block -= tiles
         self.belt_ok -= tiles
-        self.slot_only = self.block - self.belt_ok
+        self._refresh()
+
+    def _refresh(self) -> None:
+        """slot_only: where not even a belt or pole may go (the slots, and an open segment's planned bus)."""
+        self.slot_only = (self.block - self.belt_ok) | (self.__dict__.get("bus_tiles") or set())
+
+    # ------------------------------------------------------------ the oil corridor, once crude is known
+    def oil_snapshot(self, world, base) -> dict | None:
+        """What reserve_oil plans on (copied on the crew's thread), or None when no crude is known yet."""
+        crude = bool((getattr(world, "resources", None) or {}).get("crude-oil")) or any(p.get("name") == "crude-oil" for p in getattr(world, "patches", None) or [])
+        if not crude or "spine" not in self.corridors:
+            return None
+        snap = self.snapshot(world, base)
+        snap["yard"] = self.yard or snap["yard"]
+        return snap
+
+    def plan_oil(self, snap: dict):
+        """The oil corridor from the nearest crude field to the spine (atlas floorplan.place_oil) on today's
+        ground, around everything reserved and built: (corridors, slots) to add, both empty when none fits."""
+        from atlas.layout.floorplan import Floorplan, place_oil
+        scan_p = planning_scan(snap["scan"], snap["blocked"] | rect_tiles(snap["yard"]) | self._head_keep())
+        led = _base_ledger(scan_p)
+        for cid, c in self.corridors.items():
+            claim = _claim("corridor", cid, c.kind)
+            led._claims[cid], led._tiles[cid] = claim, set(c.tiles)
+            for t in c.tiles:
+                led._owner[t] = claim
+        for s in self.slots:
+            claim = _claim("slot", s.id, s.zone)
+            led._claims[s.id], led._tiles[s.id] = claim, set(s.tiles)
+            for t in s.tiles:
+                led._owner[t] = claim
+        fp = Floorplan(scan_p, led, self.anchor or (0, 0), self.heading or (1, 0), dict(self.corridors),
+                       list(self.slots), demand={"oil": 0})
+        place_oil(fp)
+        corr = {cid: c for cid, c in fp.corridors.items() if c.kind == "oil" and cid not in self.corridors}
+        slots = [s for s in fp.slots if s.zone == "oil" and s not in self.slots]
+        return corr, slots
+
+    def apply_oil(self, corr: dict, slots: list, log=None) -> int:
+        if not corr:
+            self.warnings.append("no oil corridor fits yet")
+            return 0
+        self.corridors.update(corr)
+        self.slots += slots
+        ctiles = set().union(*(c.tiles for c in corr.values()))
+        stiles = set().union(*(s.tiles for s in slots)) if slots else set()
+        self.block |= ctiles | stiles
+        self.belt_ok |= ctiles - stiles
+        self._refresh()
+        self._fp = None
+        if log:
+            log(f"[zones] oil corridor reserved: {len(ctiles)} tiles, {len(slots)} oil slot(s)")
+        return len(ctiles | stiles)
+
+    def reserve_oil(self, world, base, log=None) -> int:
+        snap = self.oil_snapshot(world, base)
+        if snap is None:
+            return 0
+        return self.apply_oil(*self.plan_oil(snap), log=log)
+
+    def _head_keep(self) -> set[Tile]:
+        """The head terminals' trunk ends and the land just outside them: the oil corridor keeps off."""
+        out: set[Tile] = set()
+        for (n, _k), seg in self._seg.items():
+            if "spine" in self.corridors:
+                for hp in seg.head_ports(self.corridors["spine"]):
+                    out |= _dilate({tuple(hp["end"]), tuple(hp["approach"])}, 2)
+        if not out and "spine" in self.corridors:       # no segment worked out yet: the head's first stretch
+            from atlas.layout.bus import runs_of
+            sp = self.corridors["spine"]
+            r = runs_of(sp)[0]
+            lo = r.span()[0]
+            for pos in range(lo, lo + HEAD):
+                for lat in (-3, -2, -1, sp.width, sp.width + 1, sp.width + 2):
+                    out.add(r.tile(pos, lat))
+        return out
 
     # ------------------------------------------------------------ the floorplan, rebuilt from the world
     def floorplan(self, world=None, scan=None):
@@ -524,6 +645,10 @@ class Zones:
     def open_segment(self, n: int, world=None, kit=None, minute: float = 0.0, log=None) -> Segment:
         seg = self.segment(n, world, kit)
         self.opened.setdefault(n, {"built": {}, "minute": minute, "kit": seg.kit})
+        if seg.bus is not None:                  # the planned bus's land: no organic belt or pole crosses it now
+            self.bus_tiles = set(self.__dict__.get("bus_tiles") or set()) | \
+                {t for e in seg.bus.entities for t in e.tiles}
+            self._refresh()
         if log:
             log(f"[zones] segment {n} open: {len(seg.blocks)} blocks "
                 f"({', '.join(b.key for b in seg.blocks)}), {len(seg.problems)} problem(s)"
@@ -547,6 +672,26 @@ class Zones:
         st = self.opened.get(block.n)
         if st is not None:
             st.setdefault("built", {})[block.key] = tuple(where) if where else True
+
+    def block_by_key(self, key: str) -> SegBlock | None:
+        for n in sorted(self.opened):
+            for b in self.segment(n).blocks:
+                if b.key == key:
+                    return b
+        return None
+
+    def active_blocks(self, n: int, extra=()) -> list[SegBlock]:
+        """The segment's blocks that are built, plus `extra` (the one being built now): the bus serves these."""
+        built = (self.opened.get(n) or {}).get("built", {})
+        keys = set(built) | {b.key for b in extra}
+        return [b for b in self.segment(n).blocks if b.key in keys and b.ok]
+
+    def made_by(self, n: int, item: str) -> SegBlock | None:
+        """The segment block that makes this item (None: the head brings it in, or nothing does)."""
+        return next((b for b in self.segment(n).blocks if b.ok and b.product == item), None)
+
+    def is_built(self, block: SegBlock) -> bool:
+        return block.key in (self.opened.get(block.n) or {}).get("built", {})
 
     def summary(self) -> dict:
         return {"reserved_tiles": len(self.block), "yard": self.yard,
@@ -670,8 +815,8 @@ def design_segment(z: Zones, n: int, kit, fp) -> Segment:
 # ==================================================================== a slot block as what Factory.build places
 @dataclass
 class SlotBuild:
-    """An Atlas block design in its slot, ready for Factory.build: steps in walking order, the output's stand-in
-    chest on the spine edge (until the bus takes the product, phase B's stub), and the brain's input ports."""
+    """An Atlas block design in its slot, ready for Factory.build: steps in walking order, an output chest on the
+    spine edge for a product no other slot takes off the bus, and the brain's input ports (fed by bus taps)."""
     item: str
     per_minute: float
     block: SegBlock
@@ -683,6 +828,7 @@ class SlotBuild:
     focus: tuple = (0.0, 0.0)
     placer: str = "atlas-strip"
     notes: list = field(default_factory=list)
+    bus_out: list = field(default_factory=list)      # products that go onto the bus (no output chest)
 
     def all_steps(self) -> list:
         return list(self.steps) + list(self.stub)
@@ -700,11 +846,13 @@ class SlotBuild:
         return {tuple(t) for s in self.all_steps() for t in s.tiles}
 
 
-def slot_build(block: SegBlock) -> SlotBuild:
+def slot_build(block: SegBlock, onto_bus=frozenset()) -> SlotBuild:
     """Convert a placed Atlas block into a SlotBuild: compile its entities to API steps (inserters face their
-    pickup side, undergrounds carry their belt type), add an inserter and a chest past each out port (the
-    product collects there until the bus carries it), and turn each in port into a brain feed port whose last
-    link belt stands on the spine edge tile and faces into the block."""
+    pickup side, undergrounds carry their belt type) and turn each in port into a brain feed port on the spine
+    edge tile (a bus tap's branch ends there). An out port whose item is in `onto_bus` (another make block of the
+    segment takes it off the bus: Segment.consumed) runs straight into the bus's injection belt; any other gets an
+    inserter and an output chest on the spine edge, where links and the courier take the product as from any
+    factory."""
     from atlas.build.compile import from_world, step_of, walking_order
     wd = block.wd
     steps = walking_order(from_world(wd, "make"))
@@ -715,7 +863,9 @@ def slot_build(block: SegBlock) -> SlotBuild:
     for p in wd.design.ports:
         item = next(iter(p.items))
         rate = round(sum(p.rate.values()) * 60, 2)
-        if p.io == "out":
+        if p.io == "out" and item in onto_bus:
+            sb.bus_out.append(item)
+        elif p.io == "out":
             ins_t, chest_t = wd.tile((p.x, -1)), wd.tile((p.x, -2))
             sb.stub.append(step_of("inserter", "inserter", [ins_t], wd.direction("north"), group="make"))
             sb.stub.append(step_of("iron-chest", "chest", [chest_t], "north", group="make"))
@@ -769,16 +919,35 @@ def after_build(crew, site) -> str:
                 if think is not None else z.plan(snap=snap)
             n = z.apply(*res, log=crew.log)
             note = f"zones: {n} tiles reserved out of the start yard"
-        if z.reserved and not z.is_open(1):
+        if z.reserved and OIL_LAZY and "oil" not in z.corridors and \
+                (z.oil_tried is None or now - z.oil_tried >= RETRY_MIN):
+            snap = z.oil_snapshot(w, crew.base)          # crude known: keep its corridor free from now on
+            if snap is not None:
+                z.oil_tried = now
+                think = getattr(w, "think", None)
+                res = think("planning the oil corridor", z.plan_oil, snap) if think is not None else z.plan_oil(snap)
+                if z.apply_oil(*res, log=crew.log):
+                    note = (note + "; " if note else "") + "zones: oil corridor reserved"
+        if z.reserved and not z.is_open(1) and z.tried_open != now:
             ok, _ = z.ready(1, crew)
             if ok:
+                z.tried_open = now
                 kit = kit_for(w)
                 scan = scan_from_world(w, z.centre)
                 think = getattr(w, "think", None)
-                if think is not None:
-                    think("laying out segment 1 (slots, blocks and bus)", z.segment, 1, None, kit, scan)
-                z.open_segment(1, w, kit, minute=crew._minute() if hasattr(crew, "_minute") else 0.0, log=crew.log)
-                note = (note + "; " if note else "") + "zones: segment 1 open"
+                seg = think("laying out segment 1 (slots, blocks and bus)", z.segment, 1, None, kit, scan) \
+                    if think is not None else z.segment(1, None, kit, scan)
+                if seg.problems:                         # never open a segment whose bus does not check out
+                    crew.log(f"[zones] segment 1 not opened: {seg.problems[0][:160]}")
+                    z.warnings.append(f"segment 1: {seg.problems[0][:160]}")
+                else:
+                    z.open_segment(1, w, kit, minute=now, log=crew.log)
+                    queued = propose_bus(crew, 1, "segment 1 opened")
+                    note = (note + "; " if note else "") + "zones: segment 1 open" + (
+                        ", its bus queued" if queued else "")
+        if site.params.get("segment_block"):            # a slot factory: ports on laid lines are fed by their taps
+            for n in sorted(z.opened):
+                feed_ports(crew, n)
         return note
     except Exception as exc:  # noqa: BLE001 - never let the planner break a build
         try:
@@ -809,3 +978,267 @@ def survey(world, base, half: int = 160, step: int = 64) -> None:
                 look(32, x=x, y=y, include=["entities", "resources", "obstacles", "water"])
             except Exception:  # noqa: BLE001 - a refused look: plan on what is known
                 continue
+
+
+# ==================================================================== the segment bus, built
+BUS_BUDGET_MIN = 30.0     # game minutes a bus goal may take (crew.GOAL_BUDGET_MIN["bus"])
+HEAD_SHORT = 0.5          # a head port's sources give less than this share of its demand: plates first
+
+
+def step_key(s) -> tuple:
+    return (s.name, round(s.x * 2) / 2, round(s.y * 2) / 2)
+
+
+def place_steps(w, steps, done: set | None = None, on_placed=None) -> tuple[int, list[str], list[dict]]:
+    """Place atlas build steps one by one: (placed, failures, gaps). Steps whose key is in `done` are skipped
+    (a resumed job) and every step placed is added to it. A building the game refuses is a gap (fab.build's
+    format, so Crew.repair places it later); an assembler gets its recipe once it stands."""
+    import automation_bot as ab
+    from fab.build import _gap, _retry
+    placed, failed, gaps = 0, [], []
+    for s in steps:
+        k = step_key(s)
+        if done is not None and k in done:
+            continue
+        tiles = {tuple(t) for t in s.tiles}
+        try:
+            if s.belt_type:                      # an underground: the API takes its belt type
+                w.clear(tiles)
+                w.near(s.x, s.y)
+                if any(abs(w.pos[0] - t[0] - 0.5) < 1.2 and abs(w.pos[1] - t[1] - 0.5) < 1.2 for t in tiles):
+                    w.step_out(tiles)
+                r = _retry(w, tiles, lambda s=s: w.run.place(s.name, s.x, s.y, s.direction, s.belt_type))
+                if not r.get("ok"):
+                    raise ab.BuildError(f"place {s.name} at ({s.x}, {s.y}): {r.get('code')} {r.get('message', '')}")
+                w.used.update(tiles)
+                w.inventory[s.name] = max(0, w.inventory.get(s.name, 0) - 1)
+            else:
+                w.place(s.name, s.x, s.y, s.direction, tiles)
+        except ab.BuildError as exc:
+            failed.append(f"{s.name} at ({s.x}, {s.y}): {str(exc)[:120]}")
+            gaps.append(_gap(s.name, s.x, s.y, s.direction, str(exc), recipe=s.recipe, type=s.belt_type))
+            continue
+        placed += 1
+        if done is not None:
+            done.add(k)
+        if on_placed is not None:
+            on_placed(s)
+        if s.recipe and s.name.startswith("assembling-machine"):
+            r = w.run.set_recipe(s.x, s.y, s.recipe)
+            if not r.get("ok"):
+                failed.append(f"recipe {s.recipe} at ({s.x}, {s.y}): {r.get('code')}")
+                gaps.append(_gap(s.name, s.x, s.y, s.direction, f"recipe: {r.get('code')}", recipe=s.recipe,
+                                 placed=True))
+    return placed, failed, gaps
+
+
+def bus_site(crew, n: int, create: bool = False):
+    """The site that records segment n's bus: what was placed (so a paused or failed bus goal resumes where it
+    stopped), which item networks are laid, its gaps (Crew.repair), and the head ports trunks feed."""
+    site = next((s for s in crew.base.of("bus") if s.params.get("segment") == n), None)
+    if site is None and create:
+        from .modules import Site
+        sp = crew.zones.corridors["spine"]
+        cx = sum(c[0] for c in sp.cells) / len(sp.cells) + sp.width / 2
+        cy = sum(c[1] for c in sp.cells) / len(sp.cells) + sp.width / 2
+        site = crew.base.add(Site("bus", {"segment": n, "laid": [], "placed": [], "ports": []}, (cx, cy)))
+        try:
+            site.built_minute = crew._minute()
+        except Exception:  # noqa: BLE001
+            pass
+        site.note = f"segment {n} bus along the spine"
+    return site
+
+
+def laid_items(crew, n: int) -> set[str]:
+    site = bus_site(crew, n)
+    return set(site.params.get("laid") or ()) if site is not None else set()
+
+
+def lay_bus(crew, n: int, items, extra=()) -> str:
+    """Place the poles and the belt networks of `items` from segment n's planned bus (each item: its lines,
+    transfers, taps and injections), skipping what already stands. Only the lines the open slots use: the caller
+    passes their input items. Then the ports those lines tap are fed, and the head ports updated."""
+    from collections import Counter
+    z = crew.zones
+    seg = z.segment(n)
+    jobs = seg.jobs()
+    if not jobs:
+        return "segment has no bus"
+    site = bus_site(crew, n, create=True)
+    laid = set(site.params.setdefault("laid", []))
+    names = ["bus:poles"] + [f"bus:{i}" for i in sorted(items) if f"bus:{i}" in jobs]
+    todo = [nm for nm in names if nm.split(":", 1)[1] not in laid]
+    msg = ""
+    if todo:
+        done = {tuple(k) for k in site.params.setdefault("placed", [])}
+        steps = [s for nm in todo for s in jobs[nm] if step_key(s) not in done]
+        kit = dict(Counter(s.name for s in steps))
+        if kit:
+            with crew.w.step("unlock"):
+                crew.unlock_items(list(kit))
+            with crew.w.step("make"):
+                crew.make(kit)
+
+        def rec(s) -> None:
+            site.params["placed"].append(list(step_key(s)))
+            site.entities.append((s.name, s.x, s.y, s.direction))
+            if s.kind == "pole":
+                site.poles.append(tuple(s.tiles[0]))
+
+        crew.w.doing(f"laying segment {n}'s bus: {', '.join(nm[4:] for nm in todo)}")
+        with crew.w.step("build"):
+            placed, failed, gaps = place_steps(crew.w, steps, done, rec)
+        if gaps:
+            from .gaps import record
+            record(site, gaps)
+        for nm in todo:                          # a network is laid once all of it stands or is a gap to repair
+            site.params["laid"].append(nm.split(":", 1)[1])
+        msg = f"laid {placed} bus pieces ({', '.join(nm[4:] for nm in todo)})" + (
+            f", {len(failed)} refused (gaps for repair; first: {failed[0][:100]})" if failed else "")
+        if site.poles:
+            try:
+                msg += "; " + crew.connect(site)
+            except Exception as exc:  # noqa: BLE001 - the poles stand; connecting is retried by the crew
+                msg += f"; not connected yet ({str(exc)[:80]})"
+    fed = feed_ports(crew, n)
+    head = update_head(crew, n, extra)
+    if fed:
+        msg += f"; {fed} slot port(s) fed by bus taps"
+    if head:
+        msg += f"; head ports for {', '.join(head)}"
+    return msg or "bus already laid"
+
+
+def feed_ports(crew, n: int) -> int:
+    """Every slot factory's input port on a laid line is fed by its tap: marked like a link's (port["fed"]), so
+    the link step, relink, triage and the stale checks never belt into it. Returns how many were marked now."""
+    laid = laid_items(crew, n)
+    count = 0
+    for s in crew.base.sites:
+        if not s.params.get("segment_block"):
+            continue
+        for pt in s.params.get("ports", []):
+            if pt.get("item") in laid and not pt.get("fed"):
+                pt["fed"] = ["bus", pt["item"]]
+                pt["bus_tap"] = True
+                count += 1
+    return count
+
+
+def update_head(crew, n: int, extra=()) -> list[str]:
+    """The bus site's head ports: one per plate line that is laid, sized to what the active slots (built, and the
+    one being built) take. Existing port dicts are kept (a link that feeds one keeps its port)."""
+    z = crew.zones
+    seg = z.segment(n)
+    site = bus_site(crew, n)
+    if site is None:
+        return []
+    laid = set(site.params.get("laid") or ())
+    want = seg.demand(z.active_blocks(n, extra))
+    ports = site.params.setdefault("ports", [])
+    have = {pt["item"]: pt for pt in ports}
+    out = []
+    for hp in seg.head_ports(z.corridors["spine"]):
+        item = hp["item"]
+        if item not in laid or item not in want:
+            continue
+        rate = round(want[item] * 60, 1)
+        if item in have:
+            have[item]["per_minute"] = rate
+        else:
+            hp["per_minute"] = rate
+            ports.append(hp)
+        out.append(item)
+    return out
+
+
+def head_supply(crew, n: int) -> str:
+    """Plates into the head: for each unfed head port, the plates first (mines or a dense field, when the spare
+    sources give less than HEAD_SHORT of its demand), then a trunk goal (crew.trunk: a long belt from the nearest
+    spare source, or a link when one is in reach) proposed through the agenda."""
+    site = bus_site(crew, n)
+    if site is None:
+        return ""
+    notes = []
+    for pt in site.params.get("ports", []):
+        if pt.get("fed") or not pt.get("item"):
+            continue
+        item, want = pt["item"], float(pt.get("per_minute") or 0)
+        more = getattr(crew, "_more_plates", None)
+        try:
+            spare = crew.spare_rate(item)
+        except Exception:  # noqa: BLE001 - a stub crew
+            spare = want
+        if more is not None and item in getattr(crew, "PLATE_ORE", {}) and spare < HEAD_SHORT * want:
+            try:
+                got = more(item, want - spare)
+                if got:
+                    notes.append(got)
+            except Exception as exc:  # noqa: BLE001 - the trunk still takes whatever plates there are
+                notes.append(f"plates for the head failed: {str(exc)[:100]}")
+        if propose_trunk(crew, site, item):
+            notes.append(f"trunk of {item} into the bus head queued")
+    return "; ".join(notes)
+
+
+def propose_trunk(crew, site, item: str) -> bool:
+    goal = {"do": "trunk", "site": site.id, "item": item, "reflex": "zones: the bus head takes plates"}
+    try:
+        from .agenda import agenda_of
+        ok, _ = agenda_of(crew).propose(crew, goal, who="zones")
+        return ok
+    except Exception:  # noqa: BLE001 - a crew without an agenda: queue it plainly
+        urgent = getattr(crew, "urgent", None)
+        if urgent is not None and not any(g.get("do") == "trunk" and g.get("site") == site.id
+                                          and g.get("item") == item for g in urgent):
+            urgent.append(goal)
+            return True
+        return False
+
+
+def propose_bus(crew, n: int, why: str) -> bool:
+    goal = {"do": "bus", "segment": n, "reflex": f"zones: {why}"}
+    try:
+        from .agenda import agenda_of
+        ok, _ = agenda_of(crew).propose(crew, goal, who="zones")
+        return ok
+    except Exception:  # noqa: BLE001
+        urgent = getattr(crew, "urgent", None)
+        if urgent is not None and not any(g.get("do") == "bus" and g.get("segment") == n for g in urgent):
+            urgent.append(goal)
+            return True
+        return False
+
+
+def run_bus_goal(crew, goal: dict) -> str:
+    """The "bus" goal: segment n's poles, the lines its built slots use, their taps, and trunks into the head."""
+    z = getattr(crew, "zones", None)
+    n = int(goal.get("segment") or 1)
+    if z is None or not z.is_open(n):
+        import automation_bot as ab
+        raise ab.BuildError(f"segment {n} is not open (zones off, or not ready yet)")
+    seg = z.segment(n)
+    msg = lay_bus(crew, n, seg.inputs_of(z.active_blocks(n)))
+    h = head_supply(crew, n)
+    return msg + (f"; {h}" if h else "")
+
+
+def bus_first(crew, module: str, params: dict) -> str:
+    """Before a slot factory is built: the bus lines it and the other built slots draw on (with their taps), and
+    plates into the head. Returns a note ("" for anything that is not a slot factory)."""
+    if module != "factory" or not ENABLED or getattr(crew, "zones", None) is None:
+        return ""
+    try:
+        from .modules import MODULES
+        block = MODULES["factory"].slot_block(params, crew.w)
+    except Exception:  # noqa: BLE001
+        return ""
+    if block is None:
+        return ""
+    z = crew.zones
+    seg = z.segment(block.n)
+    active = z.active_blocks(block.n, extra=[block])
+    note = lay_bus(crew, block.n, seg.inputs_of(active), extra=[block])
+    h = head_supply(crew, block.n)
+    return f"bus first: {note}" + (f"; {h}" if h else "") + "; "

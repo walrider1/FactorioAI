@@ -71,7 +71,8 @@ GOAL_BUDGET_MIN = {"build": 25.0, "replace": 30.0, "remove": 8.0, "link": 10.0, 
                    "act": 15.0,
                    "modules": 15.0,
                    "feed": 4.0, "connect": 6.0, "upgrade": 20.0, "repair": 8.0, "repipe": 8.0, "scout": 20.0, "design": 4.0,
-                   "priority": 1.0, "purge": 10.0, "relink": 12.0, "trunk": 40.0}
+                   "priority": 1.0, "purge": 10.0, "relink": 12.0, "trunk": 40.0,
+                   "bus": 30.0}                 # a zone segment's bus (zones.BUS_BUDGET_MIN)
 RESEARCH_BUDGET_MIN = 25.0
 ELECTRIC_SWAP_EXTRA_MIN = 15.0   # an electric furnace swap's budget on top: crafting its furnaces (advanced circuits)
 # (scout: 20 minutes, so one oil search ring ~700 tiles out is walked whole; a ring cut short is walked again)
@@ -395,6 +396,9 @@ class Crew:
             return self.triaged_relink(goal)
         if do == "trunk":
             return self.trunk(goal.get("site"), goal.get("item"))
+        if do == "bus":                   # a zone segment's bus: its poles, the lines its slots use, head trunks
+            from . import zones
+            return zones.run_bus_goal(self, goal)
         if do == "purge":
             from .purity import purge
             return purge(self, goal.get("site"), goal.get("item"))
@@ -1382,6 +1386,8 @@ class Crew:
         first += self._fuel_first(mod.name, params)
         first += self._intermediates_first(mod.name, params)     # feeders first: their plate mines count below
         first += self._plates_first(mod.name, params)
+        from . import zones as _zones          # a slot factory: the bus lines it draws on and plates into the head
+        first += _zones.bus_first(self, mod.name, params)
         if mod.name == "factory" and not params.get("supply_at"):
             spots = self.supply_spots(params)              # after plates first: its new rows count too
             if spots:
@@ -1541,12 +1547,19 @@ class Crew:
             return ""
         item = params.get("item")
         todo = []
+        slot = getattr(pl, "block", None)     # a zone slot's block (modules.SlotPlan): its inputs come by bus
         for it in sorted(supplied):
             if it == item or it in self.PLATE_ORE or it not in fr.RECIPES or it not in makeable:
                 continue                      # plates: _plates_first; steel, plastic...: columns and workshops
             want = float((getattr(pl, "supplied", None) or {}).get(it, 0))
             if want <= 0:
                 continue
+            if slot is not None and getattr(self, "zones", None) is not None:
+                maker = self.zones.made_by(slot.n, it)
+                if maker is not None:         # the segment's own block of it feeds the bus: build that one
+                    if not self.zones.is_built(maker):
+                        todo.append((it, round(maker.spec.per_s * 60, 1) / self.FEEDER_HEADROOM, 0.0))
+                    continue
             spare = self.spare_rate(it)
             if want - spare > 0.5:
                 todo.append((it, want, spare))
@@ -1581,35 +1594,49 @@ class Crew:
             raise
         except Exception:  # noqa: BLE001 - an estimate only: the design itself will say what is wrong
             return ""
+        if getattr(pl, "block", None) is not None:
+            return ""                         # a zone slot: its plates come in at the bus head (zones.head_supply)
         notes = []
+        for plate in self.PLATE_ORE:
+            want = float(getattr(pl, "supplied", {}).get(plate, 0)) if plate in supplied else 0.0
+            if want <= 0:
+                continue
+            spare = self.spare_rate(plate)
+            if want - spare <= 0:
+                continue
+            self.log(f"[crew] plates first: {want:.0f} {plate}/min wanted, {spare:.0f}/min to spare")
+            got = Crew._more_plates(self, plate, want - spare)    # (also on the tests' stub crews)
+            if got:
+                notes.append(got)
+        return "".join(f"first {n}; " for n in notes)
+
+    def _more_plates(self, plate: str, short: float) -> str:
+        """`short` more plates a minute: a dense field near the base smelted beside it, else an electric mine row
+        into furnaces. Returns what was built ("" when nothing was needed or it failed: noted for the planner)."""
+        if getattr(self, "_in_plates_first", False):
+            return ""
+        ore = self.PLATE_ORE[plate]
+        rows = math.ceil(short / MODULES["electric_mine"].PLATE_RATE)
+        if rows <= 0:
+            return ""
         self._in_plates_first = True
         try:
-            for plate, ore in self.PLATE_ORE.items():
-                want = float(getattr(pl, "supplied", {}).get(plate, 0)) if plate in supplied else 0.0
-                if want <= 0:
-                    continue
-                spare = self.spare_rate(plate)
-                short = math.ceil((want - spare) / MODULES["electric_mine"].PLATE_RATE)
-                if short <= 0:
-                    continue
-                self.log(f"[crew] plates first: {want:.0f} {plate}/min wanted, {spare:.0f}/min to spare")
-                from .supply import near_field
-                full = getattr(self, "patch_full", lambda r: False)
-                field = near_field(self, ore, want - spare, "furnace") if not full(ore) else None
-                if field is not None:         # a dense field near the base, smelted beside it; a row if none fits
-                    try:
-                        notes.append(self.build(field))
-                        continue
-                    except BuildError as exc:
-                        self.log(f"[crew] plates first: no dense {ore} field ({str(exc)[:100]}): a mine row")
+            from .supply import near_field
+            full = getattr(self, "patch_full", lambda r: False)
+            field = near_field(self, ore, short, "furnace") if not full(ore) else None
+            if field is not None:             # a dense field near the base, smelted beside it; a row if none fits
                 try:
-                    notes.append(self.build({"do": "build", "module": "electric_mine", "resource": ore,
-                                             "count": max(2, min(12, short)), "into": "furnace"}))
-                except BuildError as exc:     # the courier can still carry plates from wherever they are
-                    self.foreman.note(f"plates first ({plate}) failed: {str(exc)[:100]}")
+                    return self.build(field)
+                except BuildError as exc:
+                    self.log(f"[crew] plates first: no dense {ore} field ({str(exc)[:100]}): a mine row")
+            try:
+                return self.build({"do": "build", "module": "electric_mine", "resource": ore,
+                                   "count": max(2, min(12, rows)), "into": "furnace"})
+            except BuildError as exc:         # the courier can still carry plates from wherever they are
+                self.foreman.note(f"plates first ({plate}) failed: {str(exc)[:100]}")
+                return ""
         finally:
             self._in_plates_first = False
-        return "".join(f"first {n}; " for n in notes)
 
     def supply_spots(self, params: dict) -> list[tuple[float, float]]:
         """Where a plate-fed factory's plates can come from (docs/logistics-plan.md, phase 3): the start tiles of

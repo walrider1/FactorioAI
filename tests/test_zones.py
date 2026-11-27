@@ -131,7 +131,8 @@ def test_reservations_stay_out_of_the_start_yard_and_off_our_buildings(path):
     assert not z.block & set(scan.ore)                           # never on ore: the brain mines where it likes
     assert all(scan.buildable(t) for t in z.block)               # never on water, cliffs or unseen land
     assert "spine" in z.corridors and z.zone_counts()["silo"] == 1
-    assert z.belt_ok <= z.block and z.slot_only == z.block - z.belt_ok
+    assert z.belt_ok <= z.block and z.slot_only == (z.block - z.belt_ok) | z.bus_tiles
+    assert z.bus_tiles <= z.corridors["spine"].tiles                # the planned bus stays inside the spine
     # the floorplan passes Atlas's independent check (overlaps, terrain, slots on their corridor)
     from atlas.sim.check import check
     errs, _ = check(z.floorplan(w))
@@ -141,7 +142,8 @@ def test_reservations_stay_out_of_the_start_yard_and_off_our_buildings(path):
 def test_world_free_refuses_reserved_tiles_for_buildings_and_slots_for_belts():
     from brain import zones
     scan, w, base, z, _ = planned(FIXTURE)
-    corridor = sorted(z.belt_ok)[len(z.belt_ok) // 2]
+    free_corr = sorted(z.belt_ok - z.bus_tiles)
+    corridor = free_corr[len(free_corr) // 2]
     slot = sorted(z.slot_only)[len(z.slot_only) // 2]
     assert not w.free({corridor}) and not w.free([slot])
     assert not w.free(t for t in (corridor,))                     # a generator is read once, still refused
@@ -390,6 +392,290 @@ def test_segment_opens_only_when_its_conditions_hold():
     assert z.ready(1, crew) == (True, "")
     assert not z.ready(1, SimpleNamespace(kn=SimpleNamespace(unlocked=set()), base=b))[0]   # no undergrounds
     assert not z.ready(2, crew)[0]                                 # segment 2 is hybrid-plan step 6
+
+
+# ------------------------------------------------------------------ the segment bus, built
+@pytest.mark.parametrize("path", _map_paths(), ids=lambda p: p.stem)
+def test_the_bus_jobs_feed_every_slot_port_and_take_the_head_plates(path):
+    """The planned bus as placement steps: every input port of every block ends a tap branch (a belt on its spine
+    edge tile running into the slot), every out port another make block uses starts an injection, the head
+    terminals start the plate lines, and the steps are exactly the planned (and lane-checked) bus."""
+    from atlas.design.model import VEC
+    from brain import zones
+    scan, w, base, z, seg = planned(path)
+    jobs = seg.jobs()
+    steps = [s for st in jobs.values() for s in st]
+    assert len(steps) == len(seg.bus.entities) and "bus:poles" in jobs
+    by_tile = {tuple(t): s for s in steps for t in s.tiles}
+    sp = z.corridors["spine"]
+    assert set(by_tile) <= sp.tiles and set(by_tile) == z.bus_tiles
+    assert not set(by_tile) & set().union(*(s.tiles for s in z.slots)) and not set(by_tile) & zones.rect_tiles(z.yard)
+    for b in seg.blocks:
+        slot = b.slot.tiles
+        for p in b.ports:
+            s = by_tile.get(tuple(p["tile"]))
+            if p["io"] == "in":                        # the tap branch's last belt points into the port
+                assert s is not None and s.kind == "belt", (b.key, p)
+                dx, dy = VEC[s.direction]
+                assert (p["tile"][0] + dx, p["tile"][1] + dy) in slot
+                assert jobs.get(f"bus:{p['item']}") and s in jobs[f"bus:{p['item']}"]
+            elif p["item"] in seg.consumed():          # made for another slot: the injection starts on the edge
+                assert s is not None and s.kind == "belt"
+    for t in seg.head:
+        s = by_tile.get(tuple(t.tile))
+        assert s is not None and s in jobs[f"bus:{t.item}"]
+    # every network a make block draws on is one job: laying it lays its taps too
+    assert seg.inputs_of([b for b in seg.blocks if b.spec.kind == "make"]) <= {k[4:] for k in jobs}
+
+
+class FakeGame:
+    def __init__(self, refuse=()):
+        self.placed, self.recipes, self.refuse = [], [], set(refuse)
+
+    def place(self, name, x, y, direction="north", belt_type=None, **kw):
+        if (name, x, y) in self.refuse:
+            return {"ok": False, "code": "cannot_place"}
+        self.placed.append((name, x, y, direction, belt_type))
+        return {"ok": True, "data": {"entity": {"name": name, "x": x, "y": y}}}
+
+    def set_recipe(self, x, y, recipe):
+        self.recipes.append(recipe)
+        return {"ok": True}
+
+
+class FakeWorld:
+    """Just enough of FreeWorld for placing: every place goes to the fake game."""
+
+    def __init__(self, zones=None, refuse=()):
+        self.run = FakeGame(refuse)
+        self.pos, self.movable, self.inventory = (0.0, 0.0), set(), {}
+        self.used, self.keepout, self.zones, self.steps = set(), set(), zones, []
+        self.kn = KN
+
+    def clear(self, tiles):
+        pass
+
+    def near(self, x, y, dist=8):
+        pass
+
+    def step_out(self, tiles):
+        pass
+
+    def retry_blocked(self, tiles, act):
+        return act()
+
+    def doing(self, text):
+        pass
+
+    def step(self, name):
+        from contextlib import nullcontext
+        return nullcontext()
+
+    def place(self, name, x, y, direction="north", tiles=()):
+        from brain.world import BuildError
+        r = self.run.place(name, x, y, direction)
+        if not r["ok"]:
+            raise BuildError(f"place {name}: cannot_place")
+        self.used |= set(tiles)
+        return {"name": name, "x": x, "y": y}
+
+    def log(self, *a):
+        pass
+
+
+def bus_crew(z, base, refuse=()):
+    made, plates, connected = [], [], []
+    crew = SimpleNamespace(
+        base=base, zones=z, w=FakeWorld(z, refuse), kn=KN, log=lambda *a: None, _minute=lambda: 30.0,
+        urgent=[], plan_queue=[], closeout_queue=[], current=None, links=[],
+        make=lambda kit: made.append(dict(kit)), unlock_items=lambda items: None,
+        connect=lambda site: connected.append(site.id) or "connected",
+        spare_rate=lambda item: 0.0, PLATE_ORE={"iron-plate": "iron-ore", "copper-plate": "copper-ore"},
+        _more_plates=lambda plate, short: plates.append((plate, round(short))) or f"a {plate} mine")
+    crew.made, crew.plates, crew.connected = made, plates, connected
+    return crew
+
+
+def fresh_zones(path=FIXTURE):
+    """A copy of the planned zones (bus state is per test)."""
+    scan, w, base, z, seg = planned(path)
+    z2 = pickle.loads(pickle.dumps(z))
+    z2._world = w
+    z2._seg = dict(z._seg)
+    for st in z2.opened.values():
+        st["built"] = {}
+    return scan, w, z2, z2.segment(1)
+
+
+def test_a_segment_opening_queues_its_bus_goal():
+    from atlas.world.scan import MapScan
+    from brain import zones
+    from brain.modules import MODULES
+    scan = MapScan.load(FIXTURE)
+    w, base = brain_world(scan)
+    crew = SimpleNamespace(w=w, base=base, kn=KN, log=lambda *a: None, zones=None, _minute=lambda: 12.0,
+                           urgent=[], plan_queue=[], closeout_queue=[], current=None)
+    old = MODULES["factory"].zones
+    try:
+        zones.after_build(crew, base.sites[0])
+        assert crew.zones.is_open(1)
+        assert {"do": "bus", "segment": 1} in [{k: v for k, v in g.items() if k != "reflex"} for g in crew.urgent]
+        zones.after_build(crew, base.sites[0])                     # opened once: not queued twice
+        assert sum(1 for g in crew.urgent if g.get("do") == "bus") == 1
+    finally:
+        MODULES["factory"].zones = old
+
+
+def test_the_bus_goal_lays_only_what_built_slots_use_and_resumes():
+    from brain import zones
+    from brain.modules import Base, Site
+    scan, w, z, seg = fresh_zones()
+    base = Base()
+    crew = bus_crew(z, base)
+    msg = zones.run_bus_goal(crew, {"do": "bus", "segment": 1})   # nothing built yet: the poles only
+    site = zones.bus_site(crew, 1)
+    jobs = seg.jobs()
+    assert site is not None and site.kind == "bus" and site.params["laid"] == ["poles"]
+    assert len(crew.w.run.placed) == len(jobs["bus:poles"]) and crew.connected == [site.id]
+    assert not site.params["ports"] and "poles" in msg
+    # the gear block is built: iron's network (with every iron tap) and the head's iron port, a trunk queued
+    gear = next(b for b in seg.blocks if b.product == "iron-gear-wheel")
+    z.mark_built(gear, (0, 0))
+    gsite = base.add(Site("factory", {"item": "iron-gear-wheel", "segment_block": gear.key,
+                                      "ports": [dict(p) for p in zones.slot_build(gear).ports]}, (0, 0)))
+    zones.run_bus_goal(crew, {"do": "bus", "segment": 1})
+    assert set(site.params["laid"]) == {"poles", "iron-plate"}
+    assert len(crew.w.run.placed) == len(jobs["bus:poles"]) + len(jobs["bus:iron-plate"])
+    assert all(pt["fed"] == ["bus", "iron-plate"] for pt in gsite.params["ports"])      # fed by its tap
+    head = {pt["item"]: pt for pt in site.params["ports"]}
+    assert set(head) == {"iron-plate"} and head["iron-plate"]["per_minute"] == round(gear.spec.bus_in["iron-plate"] * 60, 1)
+    assert crew.plates == [("iron-plate", round(head["iron-plate"]["per_minute"]))]       # short: plates first
+    trunks = [g for g in crew.urgent if g.get("do") == "trunk"]
+    assert [(g["site"], g["item"]) for g in trunks] == [(site.id, "iron-plate")]
+    # run again: nothing new is placed, the trunk is not queued twice
+    n = len(crew.w.run.placed)
+    zones.run_bus_goal(crew, {"do": "bus", "segment": 1})
+    assert len(crew.w.run.placed) == n and len([g for g in crew.urgent if g.get("do") == "trunk"]) == 1
+
+
+def test_a_refused_bus_piece_is_a_gap_and_a_paused_lay_resumes_where_it_stopped():
+    from brain import zones
+    from brain.modules import Base
+    scan, w, z, seg = fresh_zones()
+    jobs = seg.jobs()
+    first = jobs["bus:poles"][0]
+    crew = bus_crew(z, Base(), refuse={(first.name, first.x, first.y)})
+    zones.lay_bus(crew, 1, set())
+    site = zones.bus_site(crew, 1)
+    assert len(site.params["gaps"]) == 1 and site.params["gaps"][0]["name"] == first.name   # Crew.repair's list
+    assert len(site.params["placed"]) == len(jobs["bus:poles"]) - 1
+    # a lay that stopped half way (say a pause): the next one places only the rest
+    site.params["laid"].remove("poles")
+    keep = site.params["placed"][:10]
+    site.params["placed"] = keep
+    crew.w.run.placed.clear()
+    crew.w.run.refuse.clear()
+    zones.lay_bus(crew, 1, set())
+    assert len(crew.w.run.placed) == len(jobs["bus:poles"]) - 10
+
+
+def test_ports_a_bus_tap_feeds_are_not_linked():
+    from brain import zones
+    from brain.crew import Crew
+    from brain.modules import Base, Site
+    scan, w, z, seg = fresh_zones()
+    base = Base()
+    crew = bus_crew(z, base)
+    green = next(b for b in seg.blocks if b.product == "logistic-science-pack")
+    z.mark_built(green, (0, 0))
+    gsite = base.add(Site("factory", {"item": green.product, "segment_block": green.key,
+                                      "ports": [dict(p) for p in zones.slot_build(green, seg.consumed()).ports]},
+                          (0, 0)))
+    zones.run_bus_goal(crew, {"do": "bus", "segment": 1})
+    assert all(pt.get("fed") and pt.get("bus_tap") for pt in gsite.params["ports"])
+    real = Crew.__new__(Crew)                                    # the link step's own view of the ports
+    real.base, real._link_fails = base, {}
+    unfed = [(s.kind, pt["item"]) for s, pt in real.unfed_ports()]
+    assert not [u for u in unfed if u[0] == "factory"]           # the taps feed the green block's ports
+    assert sorted(i for k, i in unfed if k == "bus") == ["iron-plate"]   # only the head waits (green: no copper)
+
+
+def test_a_slot_factory_lays_its_bus_first_and_builds_its_segment_feeders_first():
+    from brain import zones
+    from brain.crew import Crew
+    from brain.modules import MODULES, Base
+    scan, w, z, seg = fresh_zones()
+    fac = MODULES["factory"]
+    old = fac.zones
+    try:
+        fac.zones = z
+        crew = bus_crew(z, Base())
+        note = zones.bus_first(crew, "factory", {"item": "automation-science-pack", "per_minute": 15})
+        laid = set(zones.bus_site(crew, 1).params["laid"])
+        assert {"iron-gear-wheel", "copper-plate"} <= laid and "bus first" in note   # red's own lines
+        assert zones.bus_first(crew, "electric_mine", {"resource": "iron-ore"}) == ""
+        # red's gears come from the segment's gear block: that is built first, into its slot (no free-form feeder)
+        import json
+        from arena import catalog
+        from brain.knowledge import Knowledge
+        if catalog.get().empty:
+            pytest.skip("needs config/catalog.json (arena catalog)")
+        real = Crew.__new__(Crew)
+        real.zones, real.log, real.current = z, lambda *a: None, None
+        real.kn = Knowledge(json.loads(json.dumps(catalog.get().data)))
+        built: list = []
+        real.build = lambda goal: built.append(goal) or "built"
+        real.spare_rate = lambda item: 0.0
+        real._intermediate_depth = 0
+        real._intermediates_first("factory", {"item": "automation-science-pack", "per_minute": 15})
+        assert [(g["module"], g["item"]) for g in built] == [("factory", "iron-gear-wheel")]
+        assert fac.slot_block({"item": "iron-gear-wheel"}, w) is not None      # ... which lands in its slot
+        gear = z.made_by(1, "iron-gear-wheel")
+        z.mark_built(gear, (0, 0))
+        built.clear()
+        real._intermediates_first("factory", {"item": "automation-science-pack", "per_minute": 15})
+        assert built == []                                       # built: the bus brings its gears, nothing more
+        assert real._plates_first("factory", {"item": "automation-science-pack"}) == ""  # plates: at the head
+    finally:
+        fac.zones = old
+
+
+def test_made_items_ride_the_bus_and_only_unused_products_get_a_chest():
+    from brain import zones
+    scan, w, z, seg = fresh_zones()
+    used = seg.consumed()
+    assert used == {"iron-plate", "copper-plate", "iron-gear-wheel", "electronic-circuit"}
+    for b in seg.blocks:
+        if b.spec.kind != "make":
+            continue
+        sb = zones.slot_build(b, used)
+        if b.product in used:                                    # gears, circuits: onto the bus, no chest
+            assert sb.bus_out == [b.product] and not sb.chests and not sb.stub
+        else:                                                    # red, green: the labs are the brain's own
+            assert not sb.bus_out and len(sb.chests) == 1 and len(sb.stub) == 2
+
+
+@pytest.mark.parametrize("path", _map_paths(), ids=lambda p: p.stem)
+def test_the_oil_corridor_waits_until_crude_is_known_and_keeps_off_the_head(path):
+    from brain import zones
+    scan, w, z, seg = fresh_zones(path)
+    assert "oil" not in z.corridors                              # lazy: nothing reserved toward oil up front
+    crude = any(n == "crude-oil" for n in scan.ore.values())
+    before = set(z.block)
+    added = z.reserve_oil(w, None)
+    if not crude:
+        assert added == 0 and "oil" not in z.corridors
+        return
+    if not added:                                                # no route on this map: said, nothing reserved
+        assert "no oil corridor fits yet" in z.warnings and z.block == before
+        return
+    oil = z.corridors["oil"]
+    head = set()
+    for hp in seg.head_ports(z.corridors["spine"]):
+        head |= {tuple(hp["end"]), tuple(hp["approach"])}
+    assert not oil.tiles & head and not oil.tiles & before and not oil.tiles & zones.rect_tiles(z.yard)
+    assert not oil.tiles & set(t for t, n in scan.ore.items() if n != "crude-oil")
+    assert oil.tiles <= z.block and oil.tiles <= z.belt_ok
 
 
 if __name__ == "__main__":
