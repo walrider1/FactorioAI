@@ -581,9 +581,32 @@ class SteamPower(Module):
                 w.bad_shore.add(land)
             raise PumpRejected(f"the shore tile {land} did not take a pump: {r['code']} {msg}")
         w.used.add(land)
-        self._pipes_for(w, lay)
-        ab.lay(w, "pipe", lay["path"])
-        pole = self._place_parts(w, lay, coal)
+        mark = len(w.recorder) if w.recorder is not None else None
+        try:
+            self._pipes_for(w, lay)
+            ab.lay(w, "pipe", lay["path"])
+            pole = self._place_parts(w, lay, coal)
+        except BuildError as exc:
+            if "cannot_place" not in str(exc) or mark is None:
+                raise
+            # the game refused a part where the map showed room (the zones test, seed 737373: "place boiler at
+            # (1.0, 49.5) west: cannot_place" with the pump and 11 pipes down, then the same layout again after
+            # each teardown, four times): take it back up and skip this pump spot, like a refused pump
+            for ent in list(w.recorder[mark:]):
+                try:
+                    w.pickup(*ent)
+                except BuildError:
+                    pass
+            del w.recorder[mark:]
+            pump = (*ab.centre(land), d)
+            try:
+                w.pickup("offshore-pump", *pump)
+            except BuildError:
+                pass
+            if w.recorder and w.recorder[-1][0] == "offshore-pump":
+                w.recorder.pop()
+            w.bad_pumps.add((land, d))
+            raise PumpRejected(f"a station part did not fit at the pump on {land}: {str(exc)[:120]}") from None
         w.log(f"[power] pump at {land} facing {d}, {lay['engines']} engine(s), {len(lay['path'])} pipes")
         return pole
 

@@ -186,3 +186,33 @@ def test_a_steam_station_crafts_the_pipes_its_water_line_needs():
     assert crafted == [("pipe", 4)]
     SteamPower._pipes_for(w, {"path": [(0, 0)], "parts": []})
     assert crafted == [("pipe", 4)]                                 # enough held: nothing crafted
+
+
+def test_a_refused_station_part_skips_that_pump_spot(monkeypatch):
+    from types import SimpleNamespace
+    import pytest
+    from brain import modules
+    from brain.modules import PumpRejected, SteamPower
+    from brain.world import BuildError
+    picked = []
+    rec = [("stone-furnace", 0, 0, "north")]                       # something the build placed before
+
+    def place_pump(name, x, y, d):
+        rec.append((name, x, y, d))
+        return {"ok": True}
+
+    w = SimpleNamespace(run=SimpleNamespace(place=place_pump), near=lambda *a: None, used=set(), bad_pumps=set(),
+                        pump_fits={}, bad_shore=set(), recorder=rec, inventory={"pipe": 20},
+                        pickup=lambda *e: picked.append(e[0]) or True, log=lambda *a: None)
+    monkeypatch.setattr(modules.ab, "lay", lambda w, name, path: rec.extend(("pipe", x, y, "north") for x, y in path))
+
+    def refuse(self, w, lay, coal):
+        raise BuildError("place boiler at (1.0, 49.5) west: cannot_place cannot_place")
+
+    monkeypatch.setattr(SteamPower, "_place_parts", refuse)
+    lay = {"land": (5, 5), "dir": "west", "path": [(4, 5), (3, 5)], "parts": [], "engines": 2}
+    with pytest.raises(PumpRejected):
+        SteamPower().place_layout(w, lay, 0)
+    assert ((5, 5), "west") in w.bad_pumps
+    assert picked.count("pipe") == 2 and "offshore-pump" in picked
+    assert rec == [("stone-furnace", 0, 0, "north")]                # the earlier building stays recorded
