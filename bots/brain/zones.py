@@ -32,7 +32,11 @@ from dataclasses import dataclass, field
 # Off until the segment bus and its taps are placed (README "Zones (hybrid)"): without the bus, a segment's
 # factories are era-sized blocks fed by point-to-point links across the spine, on 18-23k reserved tiles taken
 # from organic builds, a cost with none of the benefit yet. Tests switch it on (tests/test_zones.py).
-ENABLED = __import__("os").environ.get("BRAIN_ZONES", "") == "1"   # on for a run with BRAIN_ZONES=1
+# BRAIN_ZONES=1 forces it on, BRAIN_ZONES=0 off; unset: DEFAULT_ON. Either way zones only ever start in a fresh
+# world: a world whose first zones build comes after START_BY_MIN (a resumed old base) never gets them.
+DEFAULT_ON = False
+ENABLED = {"1": True, "0": False}.get(__import__("os").environ.get("BRAIN_ZONES", ""), DEFAULT_ON)
+START_BY_MIN = 90.0
 
 Tile = tuple[int, int]
 YARD_MIN_HALF = 36        # the start yard reaches at least this far from the base centre each way
@@ -911,6 +915,11 @@ def after_build(crew, site) -> str:
         w = crew.w
         z = getattr(crew, "zones", None)
         if z is None:
+            now0 = crew._minute() if hasattr(crew, "_minute") else 0.0
+            if now0 > START_BY_MIN:
+                # an old base (resumed past the opening): the floorplan would be drawn round a finished base and
+                # its slots would only copy what stands; it stays organic
+                return ""
             z = Zones()
             attach(crew, z)
         elif getattr(w, "zones", None) is not z:

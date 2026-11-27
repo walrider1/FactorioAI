@@ -690,3 +690,17 @@ def test_a_floorplan_with_no_slot_reserves_nothing_and_is_tried_again():
                          slots=[], anchor=(0, 0), heading="east", warnings=[])
     assert z.apply((0, 0), (-5, -5, 5, 5), fp) == 0
     assert not z.reserved                                        # so after_build plans again after RETRY_MIN
+
+
+
+def test_zones_never_start_in_an_old_world():
+    from types import SimpleNamespace
+    from brain import zones
+    old = zones.ENABLED
+    zones.ENABLED = True
+    try:
+        crew = SimpleNamespace(zones=None, w=SimpleNamespace(), _minute=lambda: 635.0)
+        site = SimpleNamespace(electric=True, kind="factory", params={})
+        assert zones.after_build(crew, site) == "" and crew.zones is None
+    finally:
+        zones.ENABLED = old
