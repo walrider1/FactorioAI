@@ -299,3 +299,26 @@ def test_pack_lines_missing_after_the_labs_stand_queue_a_bus_goal():
     assert [g["segment"] for g in crew.urgent if g.get("do") == "bus"] == [1]
     zones.science_check(crew, z, 61.0)
     assert len([g for g in crew.urgent if g.get("do") == "bus"]) == 1      # once per gap
+
+
+def test_research_picks_techs_whose_packs_ride_the_bus():
+    """After the switch the slot factories have no output chest: auto_research must still count their packs
+    (it saw only chests, so green-needing techs looked unreachable and the labs would idle)."""
+    from brain.crew import Crew
+    from brain.modules import Base, Site
+    base = Base()
+    base.add(Site("labs", {"segment_block": "labs#0", "bus_fed": True, "count": 8}, (0, 0)))
+    base.add(Site("factory", {"item": "automation-science-pack", "bus_out": ["automation-science-pack"]}, (5, 0)))
+    base.add(Site("factory", {"item": "logistic-science-pack", "bus_out": ["logistic-science-pack"]}, (9, 0)))
+    techs = {"red-only": {"unit_ingredients": [{"name": "automation-science-pack"}], "unit_count": 10,
+                          "prerequisites": []},
+             "needs-green": {"unit_ingredients": [{"name": "automation-science-pack"},
+                                                  {"name": "logistic-science-pack"}], "unit_count": 50,
+                             "prerequisites": []}}
+    asked = []
+    crew = Crew.__new__(Crew)
+    crew.base, crew.target_techs = base, ["needs-green"]
+    crew.kn = SimpleNamespace(techs=techs, researched=set(), tech_path=lambda goal: [goal])
+    crew.w = SimpleNamespace(act=lambda a: asked.append(a) or {"ok": True, "data": {"current": a["technologies"][0]}},
+                             research={})
+    assert crew.auto_research() == "needs-green" and asked[0]["technologies"] == ["needs-green"]

@@ -2301,8 +2301,13 @@ class Crew:
         can supply allow, else the cheapest one they allow (`exclude`: already queued)."""
         if not self.base.of("labs"):
             return None
-        # packs our own factories put in chests: the foreman carries those to the labs without being asked
+        # packs our own factories make: in chests (the foreman carries those to the labs without being asked), or
+        # onto the bus (a slot factory's packs ride it to the floorplan's labs: it has no output chest, run
+        # 20261127-101219 after the labs slot went up)
         made = {what for s in self.base.sites for *_, what in s.chests if what.endswith("science-pack")}
+        made |= {p for s in self.base.sites if s.kind in ("factory", "workshop")
+                 for p in [(s.params or {}).get("item")] + list((s.params or {}).get("bus_out") or ())
+                 if str(p or "").endswith("science-pack") and self.makes(p)}
         def ready(t: str) -> bool:
             tech = self.kn.techs.get(t) or {}
             return (t not in self.kn.researched and t not in exclude and not tech.get("trigger")
