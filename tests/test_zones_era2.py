@@ -111,14 +111,16 @@ def test_an_old_world_with_a_segment_one_floorplan_stays_in_segment_one():
     assert not ok
 
 
-def test_segment_two_waits_for_blue_recipes_and_its_head_inputs():
+def test_segment_two_waits_for_blue_recipes_but_not_for_its_head_inputs():
+    """Run 4f7178: blue was researched at minute 560 and the era stayed shut, silently, because the sulfur
+    workshop kept failing. It opens on its recipes now; what nothing makes yet is queued when it opens."""
     w, z, base = _segment1_built(FIXTURE)
     crew = _crew_for(z, base, unlocked=set())
     assert not z.ready(2, crew)[0] and "unlocked" in z.ready(2, crew)[1]
     crew = _crew_for(z, base)
     crew.makes = lambda item: item != "sulfur"
-    ok, why = z.ready(2, crew)
-    assert not ok and "sulfur" in why
+    assert z.ready(2, crew)[0]
+    assert z.head_short(2, crew) == ["sulfur"]
 
 
 def test_a_factory_no_era_plans_takes_a_general_slot_and_later_eras_plan_around_it():

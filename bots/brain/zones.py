@@ -755,11 +755,10 @@ class Zones:
             left = [b.key for b in prev.blocks if b.ok and not b.growth and b.spec.kind == "make" and not self.is_built(b)]
             if left:
                 return False, f"segment {n - 1}'s blocks first ({', '.join(left[:3])})"
-            makes = getattr(crew, "makes", None)
-            short = [i for i in SEGMENT_INPUTS.get(era, ())
-                     if not ((makes(i) if makes is not None else False) or _spare(crew, i) > 0)]
-            if short:
-                return False, f"its head takes {', '.join(short)}: nothing makes them yet"
+            # its head inputs (plastic, sulfur, steel) need not be made yet: the era opens on its recipes, its
+            # slots show and its blocks go in, and what nothing makes is queued (head_short, after_build). Run
+            # 4f7178: blue was researched at minute 560, the sulfur workshop kept failing on a crowded oil floor,
+            # and the era stayed shut without a word while blue parts went up round the start yard
             try:
                 fp = self.floorplan()
                 need = slot_demand(era, kit_for(self.__dict__.get("_world")))
@@ -769,6 +768,12 @@ class Zones:
             except Exception:  # noqa: BLE001 - no floorplan at hand: design_segment says why
                 pass
         return True, ""
+
+    def head_short(self, n: int, crew) -> list[str]:
+        """The head inputs of plan n's era that nothing makes yet."""
+        makes = getattr(crew, "makes", None)
+        return [i for i in SEGMENT_INPUTS.get(self.era_of(n), ())
+                if not ((makes(i) if makes is not None else False) or _spare(crew, i) > 0)]
 
     def segment(self, n: int, world=None, kit=None, scan=None) -> Segment:
         """Segment n laid out: every block copy in a slot (make blocks in make slots, labs in science slots, the
@@ -1550,6 +1555,10 @@ def after_build(crew, site) -> str:
             ok, why_not = z.ready(nxt, crew)
             if not ok:
                 z.plans.pop(nxt, None)
+                if z.__dict__.get("era_wait") != why_not:      # said once, whenever the reason changes
+                    z.era_wait = why_not
+                    crew.log(f"[zones] era {era_next} waits: {why_not}")
+                    z.warnings.append(f"era {era_next} waits: {why_not}")
             if ok:
                 tried[era_next] = now
                 kit = kit_for(w)
@@ -1575,6 +1584,9 @@ def after_build(crew, site) -> str:
                     queued = propose_bus(crew, nxt, f"segment {nxt} opened")
                     note = (note + "; " if note else "") + f"zones: segment {nxt} open" + (
                         ", its bus and reworks queued" if queued else "")
+                    short = z.head_short(nxt, crew)
+                    if short:
+                        note += "; " + propose_inputs(crew, nxt, short)
         if site.params.get("segment_block"):            # a slot factory: ports on laid lines are fed by their taps
             for n in z.live():
                 feed_ports(crew, n)
@@ -1965,6 +1977,32 @@ def head_supply(crew, n: int) -> str:
         if propose_trunk(crew, site, item):
             notes.append(f"trunk of {item} into the bus head queued")
     return "; ".join(notes)
+
+
+def propose_inputs(crew, n: int, items) -> str:
+    """Workshops (or factories) for head inputs of segment n that nothing makes yet, sized to what its blocks
+    take, through the agenda."""
+    z = crew.zones
+    try:
+        want = z.segment(n).demand(z.segment(n).blocks)
+    except Exception:  # noqa: BLE001
+        want = {}
+    out = []
+    for item in items:
+        per_min = max(10.0, round(float(want.get(item, 0.0)) * 60, 1))
+        module = "workshop" if item in ("sulfur", "plastic-bar") else ("smelter_column" if item == "steel-plate"
+                                                                         else "factory")
+        goal = {"do": "build", "module": module, "item": item, "per_minute": per_min,
+                "reflex": f"zones: segment {n}'s head takes {item} and nothing makes it yet"}
+        if module == "smelter_column":
+            goal = {"do": "build", "module": module, "resource": "iron-plate", "count": 4, "reflex": goal["reflex"]}
+        try:
+            from .agenda import agenda_of
+            ok, _ = agenda_of(crew).propose(crew, goal, who="zones")
+        except Exception:  # noqa: BLE001
+            ok = False
+        out.append(f"{item} {'queued' if ok else 'not queued'}")
+    return "head inputs: " + ", ".join(out)
 
 
 def propose_trunk(crew, site, item: str) -> bool:
