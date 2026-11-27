@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 # from organic builds, a cost with none of the benefit yet. Tests switch it on (tests/test_zones.py).
 # BRAIN_ZONES=1 forces it on, BRAIN_ZONES=0 off; unset: DEFAULT_ON. Either way zones only ever start in a fresh
 # world: a world whose first zones build comes after START_BY_MIN (a resumed old base) never gets them.
-DEFAULT_ON = False
+DEFAULT_ON = True                 # on for new worlds since the overnight tests (test 5: green science automated at 199)
 ENABLED = {"1": True, "0": False}.get(__import__("os").environ.get("BRAIN_ZONES", ""), DEFAULT_ON)
 START_BY_MIN = 90.0
 
