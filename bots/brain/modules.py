@@ -1165,9 +1165,9 @@ class Factory(Module):
             self.designs[key] = got
             return got
         ug = 10 if "underground-belt" in w.kn.unlocked else 0
-        got = self._general_slot_design(w, base, item, rate, supplied, key, ug)
-        if got is not None:                      # a free general slot of the floorplan: no open ground elsewhere
-            return got
+        # no free-form factory inside the floorplan: zones take their inputs from the bus only. A factory no era
+        # plans joins the zones as an extra block of the live plan first (Crew.build: zones.add_extra), and then
+        # _slot_design above builds it; it comes here, free-form outside the zones, only when it could not join
         # plates come in by belt: open ground near the base, off the ore (ore is for the mine modules). No
         # fallback to drills and furnaces inside the factory: mines are modules of their own
         got = self._ladder(w, base, item, rate, supplied, self._fed_places(w, base, p), ug, key, off_ore=True)
@@ -1536,12 +1536,14 @@ class Factory(Module):
         if z is None or not getattr(z, "reserved", False) or not hasattr(z, "general_slots"):
             return None
         try:
-            slots = z.general_slots()
+            slots = z.general_slots(item)
         except Exception:  # noqa: BLE001 - the floorplan never stops a factory
             return None
         for slot in slots[:2]:
             x0, y0, sw, sh = slot.rect
             focus = (x0 + sw / 2, y0 + sh / 2)
+            if self.reach is not None and self.reach(focus):
+                continue                         # an input beyond a link's reach of this slot
             self._survey(w, focus)
             grid = Grid.from_world(w)
             grid.keepout -= set(slot.tiles)

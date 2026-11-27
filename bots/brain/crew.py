@@ -1260,6 +1260,21 @@ class Crew:
 
     SPLIT_MAX = 2                   # feeder factories split off one factory that does not fit as one block
 
+    def _join_zones(self, goal: dict) -> None:
+        """A factory for an item no floorplan era plans joins the zones bus-fed (zones.add_extra: the live plan
+        gains an extra block for it, the bus is patched for its inputs); the build then goes into that block's
+        slot. Feeders for a free-form factory stay beside it. Nothing changes when it cannot join."""
+        z = getattr(self, "zones", None)
+        item = goal.get("item")
+        if z is None or not item or goal.get("free_form") or not getattr(z, "opened", None)                 or getattr(self, "_intermediate_depth", 0):
+            return
+        try:
+            from . import zones as zmod
+            if z.slot_block(item) is None:
+                zmod.add_extra(self, z, item, MODULES["factory"].rate(goal))
+        except Exception as exc:  # noqa: BLE001 - the zones never stop a factory
+            self.log(f"[zones] {item} could not join the zones: {type(exc).__name__}: {str(exc)[:100]}")
+
     def _grow_slot_instead(self, goal: dict) -> str | None:
         """A factory goal for a science pack the open floorplan already makes in a slot, with no slot left for it:
         the slot factory grows instead of a free-form copy going up elsewhere (zones.grow_slot: faster machines in
@@ -1301,6 +1316,7 @@ class Crew:
         grown = self._grow_slot_instead(goal)
         if grown is not None:
             return grown
+        self._join_zones(goal)
         split: list[str] = []
         fac = MODULES["factory"]
         planned = self._split_memory(goal)
