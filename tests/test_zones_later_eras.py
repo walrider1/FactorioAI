@@ -88,3 +88,14 @@ def test_a_built_block_that_still_covers_the_next_eras_rate_is_kept_not_torn_dow
     assert {"make-automation-science-pack#0", "make-logistic-science-pack#0"} <= kept
     assert "labs#0" in reworked                                    # the labs take blue too: a new design
     assert z.opened[2]["keep_cover"]
+
+
+def test_a_workshop_goal_for_a_slot_item_becomes_a_factory_goal_fluid_items_stay_workshops():
+    from brain.crew import Crew
+    w, z, base = _segment1_built(FIXTURE)
+    crew = Crew.__new__(Crew)
+    crew.zones, crew.log = z, (lambda *a: None)
+    goal = {"do": "build", "module": "workshop", "item": "chemical-science-pack", "per_minute": 10}
+    assert crew._slot_not_workshop(goal)["module"] == "factory"
+    assert crew._slot_not_workshop({**goal, "item": "sulfur"})["module"] == "workshop"
+    assert crew._slot_not_workshop({**goal, "item": "processing-unit"})["module"] == "workshop"

@@ -1307,6 +1307,24 @@ class Crew:
         except Exception as exc:  # noqa: BLE001 - the zones never stop a factory
             self.log(f"[zones] {item} could not join the zones: {type(exc).__name__}: {str(exc)[:100]}")
 
+    def _slot_not_workshop(self, goal: dict) -> dict:
+        """A workshop goal for an item the floorplan makes in a slot (an assembler part from bus items: blue
+        science, advanced circuits...) is a factory goal: it goes into its slot, not onto the workshop floor.
+        Run 4f7178: "build workshop chemical-science-pack" queued while blue's slot stood empty. Fluid-made
+        items (sulfur, plastic, batteries...) stay workshops."""
+        item = goal.get("item")
+        z = getattr(self, "zones", None)
+        if goal.get("module") != "workshop" or not item or z is None or not getattr(z, "reserved", False)                 or goal.get("free_form"):
+            return goal
+        try:
+            from . import zones as zmod
+            if item in zmod.HEAD_FROM_WORKSHOP or item not in z.planned_items():
+                return goal
+        except Exception:  # noqa: BLE001 - the zones never stop a build
+            return goal
+        self.log(f"[zones] workshop for {item} asked: the floorplan makes it in a slot, built as a factory there")
+        return {k: v for k, v in goal.items() if k not in ("module", "cells")} | {"module": "factory"}
+
     def _wait_for_zone(self, goal: dict) -> str | None:
         """A factory for an item a later floorplan era plans, once that era's recipes are in: the era is opened
         now if it may (then the factory goes into its slot as usual); else the goal fails with why it waits
@@ -1366,6 +1384,7 @@ class Crew:
             # the near patches first while they have room: a far trip, a pole line and a trunk only once they
             # are full (run 20261124-120854: an iron outpost 360 tiles out while the iron patch at home had room)
             goal = {**goal, "near_first": True}
+        goal = self._slot_not_workshop(goal)
         if goal.get("module") != "factory":
             return self._build(goal)
         waiting = self._wait_for_zone(goal)
