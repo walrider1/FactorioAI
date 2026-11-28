@@ -1618,6 +1618,88 @@ def science_check(crew, z, now: float) -> str:
     return "; ".join(notes)
 
 
+# ==================================================================== one set of factories, not two
+# Run 4f7178: segment 1's slot factories for red and green science, gears and circuits went up at minutes 290-356,
+# and the start yard's own red (site 16) and green (site 19) factories kept running beside them on the same scarce
+# iron until the end. Once a slot factory runs, the start-yard factory for the same item comes down as soon as
+# nothing standing takes from it any more (its links go first: the slot's labs retire the old labs, so the old
+# packs factory loses its last consumer; then its gear and circuit feeders lose theirs), and its inputs go back
+# to the pool (spare for the bus head).
+RETIRE_SLOT_MIN = 10.0     # a slot factory runs this long (every port fed, machines working) before its twin goes
+
+
+def _slot_running(site) -> bool:
+    if not all(pt.get("fed") for pt in site.params.get("ports", []) if pt.get("item")):
+        return False
+    census = getattr(site, "census", None) or {}
+    working = sum(int(c.get("working", 0)) for name, c in census.items() if "assembling-machine" in name)
+    return working > 0 or (getattr(site, "health", None) or {}).get("working", 0) > 0
+
+
+def _takers(crew, site, item: str) -> list:
+    """Standing sites that take `item` from this site by belt (links out of its chests or line, taps of them)."""
+    srcs = {(x, y) for x, y, s in crew.outputs(item) if s is site}
+    if not srcs:
+        return []
+    root = getattr(crew, "_coal_root", lambda ln: tuple(ln.get("source") or ()))
+    out = []
+    for ln in getattr(crew, "links", []):
+        if ln.get("item") != item:
+            continue
+        r = root(ln)
+        if tuple(ln.get("source") or ()) in srcs or (r is not None and tuple(r) in srcs):
+            to = crew.base.get(ln.get("to_site"))
+            if to is not None and to is not site:
+                out.append(to)
+    for key in (getattr(crew, "science_links", None) or {}):
+        if tuple(key) in srcs:
+            out.append(site)                          # packs to a research station
+    return out
+
+
+def retire_twins(crew, z, now: float) -> str:
+    """The start-yard factories whose item a running slot factory of the live segment makes, with nothing standing
+    taking from them, proposed for removal (once per LABS_ASK_GAP_MIN). A science pack's twin waits until the
+    slot's labs run (the old labs take its packs by hand until then)."""
+    if not z.opened:
+        return ""
+    watch = z.__dict__.setdefault("retire_watch", {})
+    asked = z.__dict__.setdefault("labs_asked", {})
+    running: set[str] = set()
+    for s in crew.base.sites:
+        key = (s.params or {}).get("segment_block")
+        if not key or s.kind != "factory":
+            continue
+        item = s.params.get("item")
+        if not item:
+            continue
+        if not _slot_running(s):
+            watch.pop(key, None)
+            continue
+        if now - watch.setdefault(key, now) >= RETIRE_SLOT_MIN:
+            running.add(item)
+    if not running:
+        return ""
+    labs_run = "slot" in (z.__dict__.get("labs_running") or {})
+    notes = []
+    for s in list(crew.base.sites):
+        item = (s.params or {}).get("item")
+        if s.kind != "factory" or (s.params or {}).get("segment_block") or item not in running:
+            continue
+        if item.endswith("science-pack") and not labs_run:
+            continue
+        if _takers(crew, s, item) or not (now - asked.get(f"twin-{s.id}", -1e9) >= LABS_ASK_GAP_MIN):
+            continue
+        goal = {"do": "remove", "site": s.id,
+                "reflex": f"zones: the slot factory makes {item} now and nothing takes from site {s.id}: one set "
+                          "of factories, its inputs go back to the pool"}
+        if _propose(crew, goal):
+            asked[f"twin-{s.id}"] = now
+            notes.append(f"zones: start-yard {item} factory site {s.id} retired (its slot factory runs)")
+            crew.log(f"[zones] {notes[-1]}")
+    return "; ".join(notes)
+
+
 # ==================================================================== the crew's hooks
 def attach(crew, zones: Zones | None) -> None:
     """One Zones object for the crew, its world (world.free asks it) and the factory module."""
@@ -1753,6 +1835,9 @@ def after_build(crew, site) -> str:
         head = head_check(crew, z, now)
         if head:
             note = (note + "; " if note else "") + head
+        twins = retire_twins(crew, z, now)
+        if twins:
+            note = (note + "; " if note else "") + twins
         grown = grow_check(crew, z, now)
         if grown:
             note = (note + "; " if note else "") + grown
