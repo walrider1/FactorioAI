@@ -1836,6 +1836,27 @@ def attach(crew, zones: Zones | None) -> None:
         pass
 
 
+def _safe(crew, what: str, fn, *args) -> str:
+    """One step of the build hook on its own: a failure is logged and skips only that step."""
+    try:
+        return fn(*args) or ""
+    except Exception as exc:  # noqa: BLE001 - the zones are an aid
+        try:
+            crew.log(f"[zones] {what} skipped: {type(exc).__name__}: {str(exc)[:140]}")
+        except Exception:  # noqa: BLE001
+            pass
+        return ""
+
+
+def _plan_power_now(crew, z) -> str:
+    w = crew.w
+    snap = z.snapshot(w, crew.base)
+    snap["yard"] = z.yard or snap["yard"]
+    think = getattr(w, "think", None)
+    res = think("planning the power slots", z.plan_power, snap) if think is not None else z.plan_power(snap)
+    return "zones: power slots reserved" if z.apply_power(*res, log=crew.log) else ""
+
+
 def after_build(crew, site) -> str:
     """Called by the crew after every build. The first electric build reserves the floorplan; once segment 1's
     conditions hold, the segment opens. Never raises: zones are an aid, never a reason for a build to fail."""
@@ -1870,12 +1891,9 @@ def after_build(crew, site) -> str:
         if z.reserved and not any(s.zone == "power" for s in z.slots) and (
                 now - z.__dict__.get("power_tried", -1e9) >= RETRY_MIN):
             z.power_tried = now
-            snap = z.snapshot(w, crew.base)
-            snap["yard"] = z.yard or snap["yard"]
-            think = getattr(w, "think", None)
-            res = think("planning the power slots", z.plan_power, snap) if think is not None else z.plan_power(snap)
-            if z.apply_power(*res, log=crew.log):
-                note = (note + "; " if note else "") + "zones: power slots reserved"
+            got = _safe(crew, "power slots", _plan_power_now, crew, z)
+            if got:
+                note = (note + "; " if note else "") + got
         if z.reserved and OIL_LAZY and "oil" not in z.corridors and \
                 (z.oil_tried is None or now - z.oil_tried >= RETRY_MIN):
             snap = z.oil_snapshot(w, crew.base)          # crude known: keep its corridor free from now on
@@ -1963,15 +1981,11 @@ def after_build(crew, site) -> str:
         if site.params.get("segment_block"):            # a slot factory: ports on laid lines are fed by their taps
             for n in z.live():
                 feed_ports(crew, n)
-        head = head_check(crew, z, now)
-        if head:
-            note = (note + "; " if note else "") + head
-        gate = gate_research(crew, z, now)
-        if gate:
-            note = (note + "; " if note else "") + gate
-        twins = retire_twins(crew, z, now)
-        if twins:
-            note = (note + "; " if note else "") + twins
+        for what, fn in (("head check", head_check), ("research for segment 1", gate_research),
+                         ("retiring twins", retire_twins)):
+            got = _safe(crew, what, fn, crew, z, now)
+            if got:
+                note = (note + "; " if note else "") + got
         grown = grow_check(crew, z, now)
         if grown:
             note = (note + "; " if note else "") + grown
