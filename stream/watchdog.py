@@ -21,7 +21,8 @@ Phone API (for the Android app; bearer token from secrets/phone_token), on 0.0.0
   GET /api/stream · POST /api/stream/start {"countdown_min": 2} · POST /api/stream/stop ·
   POST /api/stream/schedule {"enabled": bool, "start": "HH:MM", "end": "HH:MM"} (daily, local time; may cross midnight)
   POST /api/stream/start {"reset": true} starts over (run #1, 0 upgrades, new game); POST /api/stream/reset
-  {"armed": true|false} makes the next start do that (GET /api/stream shows "reset_next")
+  {"armed": true|false} makes the next start do that (GET /api/stream shows "reset_next");
+  POST /api/stream/fresh {"armed": true|false}: the next start begins a new game on a new map, counters kept
 
 Stream: start = Starting Soon scene, relay up, OBS streaming, Live after the countdown. Stop = Ending scene, then OBS
 stops and the relay closes. With the schedule on, that happens when the daily window opens and closes. Reviews only
@@ -1170,6 +1171,10 @@ class Watchdog:
             stream_cfg(since=now_iso())
         game = ""
         reset = reset or bool(stream_cfg().get("reset_next"))
+        fresh = reset or bool(stream_cfg().get("fresh_next"))
+        if stream_cfg().get("fresh_next"):
+            stream_cfg(fresh_next=False)
+            log("fresh_next: this start begins a new game on a new map (counters kept)")
         if reset:                                   # the show starts over: run #1, 0 upgrades, a new map
             stats(since=datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S"), upgrades=0, upgrading=False, first_run=1)
             stream_cfg(reset_next=False)
@@ -1177,12 +1182,12 @@ class Watchdog:
         if stream_cfg().get("game_with_stream", True) and not self.a.no_game:
             try:
                 d = self.runs.latest()
-                if reset and d is not None and _running(d):
+                if fresh and d is not None and _running(d):
                     request_control(d, "stop")      # the old game saves and ends; the new one waits for its slot
                     threading.Thread(target=self._fresh_after_stop, args=(d,), daemon=True).start()
                     game = "the old game saves and stops, then a new game starts"
                 else:
-                    game = self.start_game(fresh=reset)
+                    game = self.start_game(fresh=fresh)
             except Exception as exc:  # noqa: BLE001 - the stream goes on even if the game won't start
                 game = f"could not start the game: {exc!r}"[:200]
             log("game: " + game)
@@ -1225,6 +1230,7 @@ class Watchdog:
         live = obs_streaming()
         return {"streaming": bool(live), "obs": live is not None, "since": c.get("since") if live else None,
                 "scene": obs_scene() or "unknown", "schedule": c["schedule"], "reset_next": bool(c.get("reset_next")),
+                "fresh_next": bool(c.get("fresh_next")),
                 "note": note}
 
     def follow_schedule(self) -> None:
@@ -1352,6 +1358,10 @@ def make_handler(runs: Runs, tok: str, wd: "Watchdog | None" = None):
                 stream_cfg(reset_next=bool(body.get("armed", True)))
                 return self._send(200, wd.stream_state(note="the next start resets the counters and starts a new game"
                                                        if body.get("armed", True) else "reset cancelled"))
+            if what == "fresh":                     # the next start begins a new game on a new map, counters kept
+                stream_cfg(fresh_next=bool(body.get("armed", True)))
+                return self._send(200, wd.stream_state(note="the next start begins a new game on a new map"
+                                                       if body.get("armed", True) else "fresh map cancelled"))
             if what == "stop":
                 return self._send(200, wd.stop_stream())
             if what == "schedule":
@@ -1432,6 +1442,9 @@ def main() -> None:
     p.add_argument("--reset-next", action="store_true",
                    help="the next stream start resets the counters and starts a new game (new random map)")
     p.add_argument("--cancel-reset", action="store_true", help="undo --reset-next")
+    p.add_argument("--fresh-next", action="store_true",
+                   help="the next stream start begins a new game on a new map, keeping the counters (run # goes up)")
+    p.add_argument("--cancel-fresh", action="store_true", help="undo --fresh-next")
     p.add_argument("--vet-seeds", type=int, metavar="N",
                    help="off-stream: boot random maps until N good ones are in the seed pool (about a minute each)")
     a = p.parse_args()
@@ -1439,6 +1452,11 @@ def main() -> None:
         stream_cfg(reset_next=bool(a.reset_next))
         print("the next stream start resets the counters (run #1, 0 upgrades) and starts a new game"
               if a.reset_next else "reset cancelled: the next start carries on the current game")
+        return
+    if a.fresh_next or a.cancel_fresh:
+        stream_cfg(fresh_next=bool(a.fresh_next))
+        print("the next stream start begins a new game on a new map (counters kept)"
+              if a.fresh_next else "fresh map cancelled: the next start carries on the current game")
         return
     if a.vet_seeds:
         if Runs(RUNS).latest() is not None and _running(Runs(RUNS).latest()):
