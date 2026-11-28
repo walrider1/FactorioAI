@@ -27,6 +27,7 @@ sys.path.insert(0, os.path.join(HERE, "..", "..", "sdk"))
 from arena_sdk import ArenaClient, ArenaError, RealtimeRun, Run  # noqa: E402
 
 from .brain import ScriptedStrategist, report  # noqa: E402
+from .agenda import agenda_of  # noqa: E402
 from .assess import Supervisor  # noqa: E402
 from .crew import DEAD_RUN, Crew  # noqa: E402
 from .fixer import RuleFixer, apply as apply_fixes, situation as fix_situation  # noqa: E402
@@ -391,6 +392,13 @@ def play(run: Run, client: ArenaClient, task: dict, strategist=None, log=print, 
                 results.append({"goal": goal, "ok": False, "game_minutes": 0,
                                 "result": f"forbidden by the overseer: {banned.get('why', '')}"[:200]})
                 continue
+            try:                                        # it failed the same way FAIL_HOLD_N times: held (said once,
+                stuck = agenda_of(crew).stuck_hold(crew, goal)    # when the hold began)
+            except Exception as exc:  # noqa: BLE001 - a bug in the check never stops the run
+                stuck, _ = None, log(f"[bot] failure-hold check failed: {str(exc)[:120]}")
+            if stuck is not None:
+                results.append({"goal": goal, "ok": False, "game_minutes": 0, "result": f"held: {stuck}"[:400]})
+                continue
             try:
                 held = consumer_block(crew, goal)
             except Exception as exc:  # noqa: BLE001 - a bug in the gate never stops the run
@@ -470,9 +478,14 @@ def play(run: Run, client: ArenaClient, task: dict, strategist=None, log=print, 
                             + [(repr(same_target(goal)), round(world.now_tick() / 3600, 1), bool(ok and not paused))])[-80:]
             if not ok:                                  # structural failures are held whoever asks (futile_block)
                 note_failure(crew, goal, msg)
+                try:                                    # the same reason FAIL_HOLD_N times: held until near changes
+                    hold = agenda_of(crew).note_failed(crew, goal, msg)
+                except Exception as exc:  # noqa: BLE001 - bookkeeping never stops the run
+                    hold, _ = None, log(f"[bot] failure count failed: {str(exc)[:120]}")
+                if hold is not None:                    # once per hold, for the stream and the review
+                    tel.event("gate", goal=_short(goal), why=hold[:200])
             elif not paused:                            # done: its copies waiting in the queues go (one job)
                 try:
-                    from .agenda import agenda_of
                     agenda_of(crew).note_done(world.now_tick() / 3600, goal)
                 except Exception:  # noqa: BLE001 - bookkeeping never stops the run
                     pass
