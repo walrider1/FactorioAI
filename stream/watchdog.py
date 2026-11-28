@@ -221,9 +221,22 @@ def pick_seed() -> tuple[int, bool]:
     return seed, vetted
 
 
+# Hard-map limits for new pool seeds (docs/run-4f7178-review.md 5.6 and 6). Run 4f7178's map had one 89-tile coal
+# patch near home, crude oil 369 tiles out and its near iron patches full by minute ~390, and nothing rejected it.
+# Seeds already in seed_pool are not re-checked: pick_seed only draws from the pool.
+VET_MAX_WATER = 60               # nearest water at most this far
+VET_NEAR = 64                    # the coal patch must be within this many tiles (the report's largest_patch_within_64)
+VET_MIN_COAL_TILES = 200         # the biggest coal patch within VET_NEAR tiles has at least this many tiles ...
+VET_MIN_COAL_ORE = 100_000       # ... and at least this much coal (checked when the survey reports amounts)
+VET_MAX_CRUDE = 250              # nearest crude oil at most this far (none in the survey radius: reject)
+VET_MIN_IRON_ORE = 1_000_000     # iron ore within the survey's ore radius (150 tiles)
+VET_ORE_PER_TILE = 600           # typical ore per tile near spawn, for a report with tile counts but no amounts
+
+
 def vet_seed(seed: int, task: str = "freeplay-open") -> tuple[bool, str]:
     """Boot the map once (about a minute) and keep it only if iron, copper, coal and stone are near spawn
-    (within 64 tiles) and water within 60."""
+    (within 64 tiles), water within VET_MAX_WATER, and the map is not too hard (_hard_map: near coal patch big
+    enough, crude oil within VET_MAX_CRUDE, enough iron within 150 tiles; the report's "survey" block)."""
     out = _run([sys.executable, "-c", "import sys; from arena.cli import main; main(sys.argv[1:])",
                 "vet-seed", "--task", task, "--seed", str(seed)], timeout=300)
     try:
@@ -236,9 +249,39 @@ def vet_seed(seed: int, task: str = "freeplay-open") -> tuple[bool, str]:
     wd = water.get("distance") if isinstance(water, dict) else None
     if missing:
         return False, "no " + ", ".join(missing) + " near spawn"
-    if wd is None or wd > 60:
+    if wd is None or wd > VET_MAX_WATER:
         return False, f"water too far ({wd})"
-    return True, ", ".join(f"{k} {v.get('distance')}" for k, v in near.items()) + f", water {wd}"
+    hard, facts = _hard_map(rep.get("survey"))
+    if hard:
+        return False, hard
+    return True, ", ".join(f"{k} {v.get('distance')}" for k, v in near.items()) + f", water {wd}, {facts}"
+
+
+def _ore(block: dict | None) -> int:
+    """Ore in a patch or total block: its amount, else tiles x a typical amount."""
+    block = block or {}
+    return int(block.get("amount") or 0) or int(block.get("tiles") or 0) * VET_ORE_PER_TILE
+
+
+def _hard_map(survey: dict | None) -> tuple[str, str]:
+    """(why the map is too hard, or "" when it is fine; the facts for the log line)."""
+    if not isinstance(survey, dict):
+        return "no map survey in the vet report (patch sizes and crude distance unknown)", ""
+    coal = (survey.get(f"largest_patch_within_{VET_NEAR}") or {}).get("coal") or {}
+    coal_tiles = int(coal.get("tiles") or 0)
+    if coal_tiles < VET_MIN_COAL_TILES:
+        return f"coal patch near spawn too small ({coal_tiles} tiles)", ""
+    if coal.get("amount") and _ore(coal) < VET_MIN_COAL_ORE:
+        return f"coal patch near spawn too poor ({_ore(coal)} ore)", ""
+    crude = (survey.get("crude") or {}).get("distance")
+    if crude is None:
+        return f"no crude oil within {survey.get('crude_radius')} tiles", ""
+    if crude > VET_MAX_CRUDE:
+        return f"crude oil too far ({crude})", ""
+    iron = _ore((survey.get("totals") or {}).get("iron-ore"))
+    if iron < VET_MIN_IRON_ORE:
+        return f"too little iron within {survey.get('ore_radius')} tiles ({iron} ore)", ""
+    return "", f"coal patch {coal_tiles} tiles, crude {crude}, iron {iron / 1e6:.1f}M"
 
 
 def vet_seeds(want: int, max_tries: int = 60) -> None:
