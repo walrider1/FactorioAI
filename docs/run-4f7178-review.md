@@ -15,7 +15,7 @@ Seed 681265899, 2026-11-27, 690 game minutes (clock x2), brain bot on main 1c35d
 | 251 | **Segment 1 opens** (it waited for green, logistics, electric mining and steam). Bus laid by 259 |
 | 290 → 356 | Slot factories built: circuits, gears, labs, red. The organic red (16) and green (19) sites stay up too, so both sets share the same iron |
 | 254 | Green science automated (just past the 4-hour bonus window at 240) |
-| 292 → 640 | **The bus's iron input is fed by one 37.5→60/min source and takes 130/min.** Green science runs at 2.7/min for ~350 min. 96/min of spare iron sat 15 tiles away |
+| 292 → 640 | **The bus's iron input (130/min) comes through one inserter lifting plates off red science's belt (~45/min at best)**, booked as fully fed; from ~546 a 37.5/min source. Green science runs at 2.7/min for ~350 min. 96/min of spare iron sat 15 tiles away |
 | 409 | Pumpjacks; plastics 443, plastic automated 500 |
 | 500 → 650 | Sulfur and solid-fuel workshops fail 6 times: the oil floor is too crowded for a crude pipe (≈35 min) |
 | 562 | Blue science researched. **Segment 2 stays shut** (it waited for sulfur); blue parts start going up outside the zones (advanced circuits at site 87, a blue science workshop) |
@@ -103,3 +103,22 @@ Targets (game minutes): red automated by 45, **green automated by 150** (inside 
 - 2f55947: small factories until undergrounds (the 65-minute red science loop); low coal is urgent.
 
 Order of work: steps 1 and 2 first (they decide whether the bus is "good"), then 7 (cheap), then 3, 4, 5 and 6, then 8.
+
+## 7. Done (2026-11-28, upgrade-18)
+
+A replay of the saves corrected one finding: until minute ~546 the bus head's iron was not short at its source.
+Column 33 stood backed up while the gear slot waited for iron, because the head's only iron link started with one
+basic inserter off red science's belt (about 45 a minute), and the crew booked it as 130 a minute.
+
+| Step | Commit | What changed |
+|---|---|---|
+| 1 | 9fe3e5f | `Crew.port_gets` caps a fed port at the inserters on its way; outpost-fed columns are booked at what their live drills mine; `zones.head_check` every 15 min gives a short head port its own field (column beside the head) and a second trunk; bus-head links avoid inserter starts. Replayed on the saves: at 341 and 454 it orders a field and a second trunk, at 546 a trunk from the spare iron |
+| 2 | 1404766 | `zones.retire_twins`: a start-yard factory whose slot twin has run 10 min, with nothing standing taking from it, is removed |
+| 3 | 6e2c17f | Segment 1 no longer waits for green's recipe; while it waits, the zones queue automation, logistics and electric mining themselves (the planner dropped logistics at minute 23 and it came only by ~240) |
+| 4 | 7d2ef6e | Power slots on the shore nearest the spine (Atlas `place_power`); a steam station takes a free slot first. Coal by belt still comes from the crew's existing fuel retrofit |
+| 5 | 33da1bc | Every workshop floor keeps four rows of reserved room for its own growth. The oil corridor itself still does not fit on this map (crude 273 tiles out; the route is walled before the field) |
+| 6 | 8500016 | `era_research`: while the focus era's packs are not automated, research holds to that era's and the next one's techs plus essentials |
+| 7 | 0a630c9 | A goal failing 3x with the same reason is held until a site changes within 40 tiles (or 60 min); a third cause-less relink of a port becomes a second trunk |
+| 8 | b0d0e82 | `vet_seed` rejects small near coal, crude past 250 tiles, little iron. Its in-game survey command has not run against a real game yet |
+
+None of this has run in a game yet.
