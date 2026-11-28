@@ -408,6 +408,11 @@ class Crew:
             tech = goal["tech"]
             if tech not in self.kn.techs:
                 raise BuildError(f"unknown technology {tech}")
+            # a pick off the floorplan era's road is dropped by rule, not left for the overseer (run 4f7178)
+            from .era_research import drop_off_era
+            dropped = drop_off_era(self, tech)
+            if dropped:
+                return dropped
             # research() decides: automate the packs it lacks, or (only when that is cheap or impossible) hand-feed
             return self.research(tech, wait=False)
         if do == "act":
@@ -2407,9 +2412,15 @@ class Crew:
         made |= {p for s in self.base.sites if s.kind in ("factory", "workshop")
                  for p in [(s.params or {}).get("item")] + list((s.params or {}).get("bus_out") or ())
                  if str(p or "").endswith("science-pack") and self.makes(p)}
+        # only the floorplan era's road while its science is not automated (era_research; run 4f7178 spent the
+        # packs on modules, battery and concrete while blue waited)
+        from .era_research import hold
+        held = hold(self)
+
         def ready(t: str) -> bool:
             tech = self.kn.techs.get(t) or {}
             return (t not in self.kn.researched and t not in exclude and not tech.get("trigger")
+                    and not (held is not None and held(t))
                     and all(p in self.kn.researched for p in tech.get("prerequisites", []))
                     and {i["name"] for i in tech.get("unit_ingredients", [])} <= made)
         order = [t for goal in self.target_techs for t in self.kn.tech_path(goal)]
