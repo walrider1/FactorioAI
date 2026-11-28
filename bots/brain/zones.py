@@ -69,6 +69,7 @@ ANCHOR_SHIFTS = (0, -24, 24, -48, 48)    # where along a yard side the spine may
 ANCHOR_GAPS = (1, 24, 48)                # how far out from the yard
 KEEP = 2                  # quick layouts finished with the oil corridor (the best by score)
 RETRY_MIN = 20.0          # nothing fitted (too little land seen yet): try again after this many game minutes
+POWER_SLOTS = 4           # steam station slots reserved on the shore nearest the spine (plan_power)
 OIL_LAZY = True           # the oil corridor is reserved only once crude is known (Zones.reserve_oil), not up front
 # era segments: the targets each is sized for (items a second; each later segment keeps the earlier ones). Segment 1
 # is what the brain's road asks of red and green (roadmap.SCIENCE_RATE: 15/min each), not the whole era's 30
@@ -644,6 +645,65 @@ class Zones:
         snap = self.snapshot(world, base)
         snap["yard"] = self.yard or snap["yard"]
         return snap
+
+    def _ledger_now(self, snap: dict):
+        """A ledger of today's ground with every corridor and slot of the floorplan claimed (plan_oil, plan_power)."""
+        scan_p = planning_scan(snap["scan"], snap["blocked"] | rect_tiles(snap["yard"]) | self._head_keep())
+        led = _base_ledger(scan_p)
+        for cid, c in self.corridors.items():
+            claim = _claim("corridor", cid, c.kind)
+            led._claims[cid], led._tiles[cid] = claim, set(c.tiles)
+            for t in c.tiles:
+                led._owner[t] = claim
+        for s in self.slots:
+            claim = _claim("slot", s.id, s.zone)
+            led._claims[s.id], led._tiles[s.id] = claim, set(s.tiles)
+            for t in s.tiles:
+                led._owner[t] = claim
+        return scan_p, led
+
+    def plan_power(self, snap: dict, want: int = POWER_SLOTS):
+        """Steam station slots on the shore nearest the spine, with a corridor to it (atlas floorplan.place_power)
+        on today's ground: (corridors, slots) to add, both empty when no shore fits. Run 4f7178: stations went up
+        at whatever water was nearest the base, two of them hand-fed all game, one whose coal belt failed 12
+        times; the zones dropped Atlas's power slots."""
+        from atlas.layout.floorplan import Floorplan, place_power
+        scan_p, led = self._ledger_now(snap)
+        fp = Floorplan(scan_p, led, self.anchor or (0, 0), self.heading or (1, 0), dict(self.corridors),
+                       list(self.slots), demand={"power": int(want)})
+        place_power(fp)
+        corr = {cid: c for cid, c in fp.corridors.items() if c.kind == "power" and cid not in self.corridors}
+        have = {s.id for s in self.slots}
+        slots = [s for s in fp.slots if s.zone == "power" and s.id not in have]
+        return corr, slots
+
+    def apply_power(self, corr: dict, slots: list, log=None) -> int:
+        if not slots:
+            self.warnings.append("no power slot fits on a shore near the spine")
+            return 0
+        self.corridors.update(corr)
+        self.slots += slots
+        ctiles = set().union(*(c.tiles for c in corr.values())) if corr else set()
+        stiles = set().union(*(s.tiles for s in slots))
+        self.block |= ctiles | stiles
+        self.belt_ok |= ctiles - stiles
+        self._refresh()
+        self._fp = None
+        if log:
+            log(f"[zones] {len(slots)} power slot(s) reserved on the shore ({', '.join(s.id for s in slots)})")
+        return len(slots)
+
+    def power_spot(self):
+        """A free power slot for a steam station: (the slot, its centre), its land given back for the station
+        (claimed), or None. The slot starts on the land tile next to the water (atlas _shore_rect)."""
+        claimed = self.__dict__.get("claimed") or {}
+        for s in self.slots:
+            if s.zone != "power" or s.id in claimed:
+                continue
+            x0, y0, sw, sh = s.rect
+            self.claim(s, "steam")
+            return s, (x0 + sw / 2, y0 + sh / 2)
+        return None
 
     def plan_oil(self, snap: dict):
         """The oil corridor from the nearest crude field to the spine (atlas floorplan.place_oil) on today's
@@ -1780,6 +1840,15 @@ def after_build(crew, site) -> str:
                 if think is not None else z.plan(snap=snap)
             n = z.apply(*res, log=crew.log)
             note = f"zones: {n} tiles reserved out of the start yard"
+        if z.reserved and not any(s.zone == "power" for s in z.slots) and (
+                now - z.__dict__.get("power_tried", -1e9) >= RETRY_MIN):
+            z.power_tried = now
+            snap = z.snapshot(w, crew.base)
+            snap["yard"] = z.yard or snap["yard"]
+            think = getattr(w, "think", None)
+            res = think("planning the power slots", z.plan_power, snap) if think is not None else z.plan_power(snap)
+            if z.apply_power(*res, log=crew.log):
+                note = (note + "; " if note else "") + "zones: power slots reserved"
         if z.reserved and OIL_LAZY and "oil" not in z.corridors and \
                 (z.oil_tried is None or now - z.oil_tried >= RETRY_MIN):
             snap = z.oil_snapshot(w, crew.base)          # crude known: keep its corridor free from now on

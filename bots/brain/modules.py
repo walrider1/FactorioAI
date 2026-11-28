@@ -367,6 +367,17 @@ class SteamPower(Module):
         kit["small-electric-pole"] = kit.get("small-electric-pole", 0) + 1     # one spare, for wiring it in
         return kit
 
+    @staticmethod
+    def _power_slot(w):
+        """A free power slot of the floorplan (zones.Zones.power_spot), or None. Never once the zones are off."""
+        z = getattr(w, "zones", None)
+        if z is None or not getattr(z, "reserved", False) or not hasattr(z, "power_spot"):
+            return None
+        try:
+            return z.power_spot()
+        except Exception:  # noqa: BLE001 - the zones are an aid: the nearest water as before
+            return None
+
     def library_template(self, engines: int) -> dict:
         """The hand-made station: parts, the water inlet and the open ports a pipe must stay off."""
         return {"parts": self.station_parts(engines), "inlet": self.INLET,
@@ -394,6 +405,14 @@ class SteamPower(Module):
             if all(math.dist(q, o) > 45 for o in waters):
                 waters.append(q)
         waters = waters[:3 if w.blocking else 2]
+        slot = self._power_slot(w)
+        if slot is not None:                            # the floorplan's power slot first: its shore, its land
+            x0, y0, sw, sh = slot[0].rect
+            toward = slot[1]
+            shore = [t for t in (getattr(w, "water", None) or ()) if x0 - 2 <= t[0] <= x0 + sw + 1
+                     and y0 - 2 <= t[1] <= y0 + sh + 1]
+            near = min(shore, key=lambda q: math.dist(q, toward)) if shore else toward
+            waters = [tuple(near)] + [q for q in waters if math.dist(q, near) > 45]
         coal = max(0, min(150, w.inventory.get("coal", 0) - 30))
         pole, layout, refused, last, tapped, tap_failed = None, None, 0, "", None, ""
         # One offshore pump gives 1200 water/s, enough for 20 boilers: a new station taps the water line of one

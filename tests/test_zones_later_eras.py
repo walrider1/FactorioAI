@@ -99,3 +99,22 @@ def test_a_workshop_goal_for_a_slot_item_becomes_a_factory_goal_fluid_items_stay
     assert crew._slot_not_workshop(goal)["module"] == "factory"
     assert crew._slot_not_workshop({**goal, "item": "sulfur"})["module"] == "workshop"
     assert crew._slot_not_workshop({**goal, "item": "processing-unit"})["module"] == "workshop"
+
+
+def test_power_slots_go_on_the_shore_near_the_spine_and_a_steam_station_takes_one():
+    """Run 4f7178 review, step 4: steam stations went up at whatever water was nearest the base (two hand-fed all
+    game, one whose coal belt failed 12 times); the zones dropped Atlas's power slots."""
+    from brain.modules import MODULES
+    w, z, base = _segment1_built(FIXTURE)
+    snap = z.snapshot(w, base)
+    snap["yard"] = z.yard
+    corr, slots = z.plan_power(snap)
+    if not slots:
+        pytest.skip("no shore near this fixture's spine")
+    assert {s.zone for s in slots} == {"power"} and all(c.kind == "power" for c in corr.values())
+    assert not set().union(*(s.tiles for s in slots)) & set().union(*(s.tiles for s in z.slots))
+    assert z.apply_power(corr, slots) == len(slots)
+    assert all(t in z.block for s in slots for t in s.tiles)
+    got = MODULES["steam_power"]._power_slot(SimpleNamespace(zones=z))
+    assert got is not None and got[0].zone == "power"
+    assert got[0].id in z.claimed and not set(got[0].tiles) & z.block     # its land is for the station now
