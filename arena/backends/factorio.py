@@ -349,6 +349,24 @@ class FactorioBackend(Backend):
         self.stop_clock()
         return {"resumed_from": Path(save_file).name, "tick": self.tick()}
 
+    def survey_map(self) -> dict:
+        """Organizer tool (`arena vet-seed` only, before a game): ore patch sizes near spawn and the nearest
+        crude oil. Read-only queries plus chunk generation out to the crude radius; see arena/seed_survey.py."""
+        from .. import seed_survey
+        if self._rcon is None:
+            raise BackendError("not connected")
+        try:
+            out = self._rcon.command(seed_survey.lua_command())
+        except (RconError, OSError) as exc:
+            raise BackendError(f"rcon failure while surveying: {exc}") from exc
+        try:
+            raw = json.loads(out)
+        except json.JSONDecodeError as exc:
+            raise BackendError(f"bad survey reply: {out[:300]!r}") from exc
+        if isinstance(raw, dict) and "lua_error" in raw:
+            raise BackendError(f"lua error in survey: {raw['lua_error']}")
+        return seed_survey.summarize(raw)
+
     def dump_catalog(self, out: Path) -> dict:
         """Organizer tool: ask the scenario for every prototype and copy catalog.json out of the container."""
         self.caller.call("catalog")

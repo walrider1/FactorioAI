@@ -382,10 +382,13 @@ def cmd_vet_seed(args) -> None:
         obs = b.act(TypeAdapter(Action).validate_python({"type": "observe", "radius": 20}), 0).data
         report = {k: {"distance": v["distance"], "tiles": v["tiles"], "amount": v["amount"]}
                   for k, v in obs["resource_summary"].items()}
-        print(json.dumps({"seed": args.seed, "resources_within_64": report,
-                          "obstacles_within_20": len(obs.get("obstacles", [])),
-                          "water_tiles_within_20": len(obs.get("water", [])),
-                          "nearest_water": obs.get("water_summary")}, indent=2))
+        out = {"seed": args.seed, "resources_within_64": report,
+               "obstacles_within_20": len(obs.get("obstacles", [])),
+               "water_tiles_within_20": len(obs.get("water", [])),
+               "nearest_water": obs.get("water_summary")}
+        if hasattr(b, "survey_map"):       # real game only: patch sizes and crude distance (arena/seed_survey.py)
+            out["survey"] = b.survey_map()
+        print(json.dumps(out, indent=2))
     finally:
         b.close()
 
