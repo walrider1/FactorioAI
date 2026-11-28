@@ -4720,6 +4720,10 @@ class Crew:
             # failure, not a shortage" came back from triage four times): the relink it asked for runs instead
             note = f"{note}; its fix ({triage._short(fix)}) is {why[len('not queued: '):]}: relinking as asked"
             return f"{note}. " + self.relink(goal.get("site"), goal.get("item"), avoid=avoid)
+        from .agenda import agenda_of               # nothing wrong found, again: a second trunk, not a third relink
+        instead = agenda_of(self).unknown_relink(self, goal, note)
+        if instead is not None:
+            return instead
         return f"{note}. " + self.relink(goal.get("site"), goal.get("item"), avoid=avoid)
 
     def relink(self, site_id, item: str | None = None, avoid=()) -> str:

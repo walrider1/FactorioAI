@@ -198,3 +198,85 @@ def test_a_slot_factorys_own_slot_is_open_to_its_poles_other_slots_are_not():
     ok = crew._pole_freer(crew._own_slot(site))
     assert ok((1, 1)) and ok((1, 2)) and not ok((5, 5))
     assert not crew._pole_freer()((1, 1))                         # any other site: no pole in a slot
+
+
+# ------------------------------------------------------------------ fewer wasted goals (run 4f7178 review, step 7)
+def test_a_failure_reason_reads_the_same_whatever_its_numbers():
+    from brain.agenda import reason_key
+    a = reason_key("no coal trunk into site 21: from site 20: no route inside a corridor (12, -40), 366 tiles")
+    b = reason_key("no coal trunk into site 21: from site 20: no route inside a corridor (13.5, -41), 490 tiles")
+    assert a == b and "#" in a
+    assert reason_key("no route") != reason_key("no power")
+
+
+def test_the_coal_trunk_that_failed_twelve_times_is_held_after_three_until_a_site_goes_up_near_it():
+    """Run 4f7178: the coal trunk into steam site 21 failed 10-12 times with one reason."""
+    from brain.agenda import FAIL_NEAR
+    crew, w, minute = _crew()
+    logs = []
+    crew.log = logs.append
+    steam = crew.base.add(Site("steam_power", {"engines": 2}, (300, 300)))
+    trunk = {"do": "trunk", "site": steam.id, "item": "coal", "reflex": "assessor: hand-fed"}
+    ag = agenda_of(crew)
+    for k in range(2):
+        assert ag.note_failed(crew, trunk, f"no coal trunk into site {steam.id}: no route ({k}, {k + 7})") is None
+    assert ag.stuck_hold(crew, trunk) is None
+    why = ag.note_failed(crew, trunk, f"no coal trunk into site {steam.id}: no route (5, 9)")
+    assert "failed 3x" in why and f"{FAIL_NEAR:.0f} tiles of site {steam.id}" in why
+    assert [x for x in logs if x.startswith("[agenda]")] == [f"[agenda] {logs[-1].split('] ', 1)[1]}"]
+    for who in ("assessor", "overseer", "rules"):                 # a fact about the goal: whoever asks
+        ok, said = ag.propose(crew, {**trunk, "reflex": f"{who}: x"}, who)
+        assert not ok and "failed 3x" in said
+    assert crew.urgent == [] and ag.summary(crew)["held_after_failing"]
+    crew.base.add(Site("electric_mine", {"resource": "coal"}, (300 + 3 * FAIL_NEAR, 300)))   # far: no change
+    assert ag.stuck_hold(crew, trunk) is not None
+    crew.base.add(Site("electric_mine", {"resource": "coal"}, (320, 290)))                   # near: it may try
+    assert ag.stuck_hold(crew, trunk) is None and "may run again" in logs[-1]
+    assert ag.note_failed(crew, trunk, f"no coal trunk into site {steam.id}: no route (1, 2)") is not None
+    assert ag.stuck_hold(crew, trunk) is not None                 # one more try, failed the same way: held again
+
+
+def test_a_hold_runs_out_by_the_clock_and_other_reasons_or_a_success_reset_the_count():
+    from brain.agenda import FAIL_HOLD_MIN
+    crew, w, minute = _crew()
+    crew.log = lambda *a: None
+    mine = {"do": "build", "module": "electric_mine", "resource": "iron-ore", "count": 4}
+    ag = agenda_of(crew)
+    for msg in ("no room on the patch", "no room on the patch", "no power pole reaches it"):
+        assert ag.note_failed(crew, mine, msg) is None            # two reasons: neither came three times
+    assert ag.note_failed(crew, mine, "no room on the patch") is not None
+    assert ag.stuck_hold(crew, mine) is not None                  # no site: held until anything changes...
+    minute["now"] += FAIL_HOLD_MIN
+    assert ag.stuck_hold(crew, mine) is None                      # ...or the hour is up
+    ag.note_done(minute["now"], mine)
+    for _ in range(2):
+        assert ag.note_failed(crew, mine, "no room on the patch") is None   # it worked in between: counted afresh
+    feed = {"do": "feed", "site": 3, "item": "coal"}
+    assert all(ag.note_failed(crew, feed, "no coal on hand") is None for _ in range(5))   # fuel is never held
+
+
+def test_a_port_relinked_twice_with_no_cause_gets_a_second_trunk_instead_of_a_third_relink(monkeypatch):
+    """Run 4f7178: 43 relinks, many "diagnosed: unknown cause, relinked once", on the same ports."""
+    from brain import triage
+    from brain.crew import Crew
+    crew, w, minute = _crew()
+    crew.log = lambda *a: None
+    relinks = []
+    crew.relink = lambda site, item=None, avoid=(): relinks.append((site, item)) or "relinked"
+    cause = {"note": "diagnosed (unknown): no measurable cause (belt there, source running): relinked once"}
+    monkeypatch.setattr(triage, "route", lambda c, g: (None, cause["note"], []))
+    goal = {"do": "relink", "site": 29, "item": "iron-plate"}
+    Crew.triaged_relink(crew, goal)
+    Crew.triaged_relink(crew, goal)
+    assert len(relinks) == 2 and crew.urgent == []
+    msg = Crew.triaged_relink(crew, goal)
+    assert len(relinks) == 2 and "no more relinks" in msg
+    assert [{k: v for k, v in g.items() if k != "reflex"} for g in crew.urgent] == \
+        [{"do": "trunk", "site": 29, "item": "iron-plate"}]
+    ok, why = agenda_of(crew).propose(crew, {**goal, "reflex": "assessor: starving"}, "assessor")
+    assert not ok and "second trunk" in why                       # nobody queues that relink again
+    cause["note"] = "diagnosed (no-link): its iron-plate port has no belt: the link step lays one"
+    Crew.triaged_relink(crew, goal)
+    assert len(relinks) == 3                                      # a belt really missing: that relink still runs
+    Crew.triaged_relink(crew, {"do": "relink", "site": 30, "item": "iron-plate"})
+    assert len(relinks) == 4                                      # another port counts on its own
