@@ -54,3 +54,19 @@ def test_a_science_twin_waits_for_the_slots_labs():
     assert zones.retire_twins(crew, z, 50.0) == ""
     z.labs_running = {"slot": 10.0}
     assert zones.retire_twins(crew, z, 51.0) and removals(crew) == [old.id]
+
+
+def test_segment_one_asks_for_the_research_it_waits_on_and_no_longer_waits_for_green():
+    """Run 4f7178: logistics came only at minute ~240 (the planner dropped it at 23); segment 1 opened at 251."""
+    from types import SimpleNamespace
+    scan, w, z, seg = fresh_zones()
+    z.opened = {}
+    crew = bus_crew(z, Base())
+    crew.kn = SimpleNamespace(unlocked={"assembling-machine-1", "long-handed-inserter"},
+                              researched={"automation", "electric-mining-drill"})
+    assert "logistics" in zones.gate_research(crew, z, 30.0)
+    assert [g["tech"] for g in crew.urgent if g.get("do") == "research"] == ["logistics"]
+    assert zones.gate_research(crew, z, 35.0) == ""                        # once a GATE_ASK_MIN
+    crew.kn.unlocked |= {"underground-belt"}
+    assert zones.gate_research(crew, z, 100.0) == ""                       # all in: nothing to ask
+    assert "logistic-science-pack" not in zones.OPEN_RECIPES[1]

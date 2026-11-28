@@ -103,10 +103,13 @@ SEGMENT_ZONES = ("make", "science")       # smelting stays with the brain's fiel
 # a segment opens only once these are unlocked (and see ready()). The strip designer needs assemblers and
 # long-handed inserters (automation): the zones test, seed 737373, researched logistics first, and segment 1
 # failed "no layout candidate" until automation was in
-# Segment 1 also waits for green science: the opening (red science included) stays the brain's own, organic, in the
-# start yard; zoning starts with green (run 20261127-145615: its first red factory went 150 tiles out along the
-# spine before any bus, the copper belt to it failed twice, and red was automated only at game minute 66)
-OPEN_RECIPES = {1: {"underground-belt", "assembling-machine-1", "long-handed-inserter", "logistic-science-pack"},
+# Segment 1 no longer waits for green science. It did (run 20261127-145615: its first red factory went 150 tiles out
+# along the spine before any bus), but logistics needs red science, so the opening's red factory always stands
+# before segment 1 can open, and a slot factory lays its bus first now (bus_first). Run 4f7178: green was in at
+# minute ~111 and built round the start yard, logistics only by ~240 (the planner dropped it at minute 23), and
+# segment 1 opened at 251, after the whole opening stood. The floorplan now asks for the research it waits on
+# (gate_research) and opens once logistics and electric mining are in; green goes straight into its slot.
+OPEN_RECIPES = {1: {"underground-belt", "assembling-machine-1", "long-handed-inserter"},
                 2: {"chemical-science-pack", "advanced-circuit", "engine-unit"},
                 3: {"production-science-pack", "rail", "electric-furnace", "productivity-module"},
                 4: {"utility-science-pack", "low-density-structure", "flying-robot-frame", "processing-unit"},
@@ -1585,7 +1588,10 @@ def science_check(crew, z, now: float) -> str:
         asked["pack-lines"] = now
         notes.append("zones: the labs' pack lines queued (not laid yet)")
     notes += switch_to_bus(crew, lb.n, packs & laid, leftovers_only=True)
+    unlocked = getattr(getattr(crew, "kn", None), "unlocked", None)
     for b in makers:
+        if unlocked is not None and b.product not in unlocked:
+            continue                          # (segment 1 opens before green's recipe: its slot waits for it)
         if not z.is_built(b) and due(b.key):
             goal = {"do": "build", "module": "factory", "item": b.product,
                     "per_minute": round(float(b.spec.per_s) * 60, 1),
@@ -1625,6 +1631,9 @@ def science_check(crew, z, now: float) -> str:
 # nothing standing takes from it any more (its links go first: the slot's labs retire the old labs, so the old
 # packs factory loses its last consumer; then its gear and circuit feeders lose theirs), and its inputs go back
 # to the pool (spare for the bus head).
+GATE_ASK_MIN = 20.0        # the research segment 1 waits on is asked again at most this often
+GATE_TECHS = (("assembling-machine-1", "automation"), ("long-handed-inserter", "automation"),
+              ("underground-belt", "logistics"))
 RETIRE_SLOT_MIN = 10.0     # a slot factory runs this long (every port fed, machines working) before its twin goes
 
 
@@ -1655,6 +1664,32 @@ def _takers(crew, site, item: str) -> list:
         if tuple(key) in srcs:
             out.append(site)                          # packs to a research station
     return out
+
+
+def gate_research(crew, z, now: float) -> str:
+    """While the floorplan is reserved and segment 1 is shut for want of research, that research is asked for
+    (front of the queue, once a GATE_ASK_MIN): automation, then logistics (underground belts: the bus and every
+    slot design cross belts), and electric mining. Returns a note."""
+    if not z.reserved or z.is_open(1):
+        return ""
+    kn = getattr(crew, "kn", None)
+    unlocked = set(getattr(kn, "unlocked", ()) or ())
+    done = set(getattr(kn, "researched", ()) or ())
+    want = [t for r, t in GATE_TECHS if r not in unlocked]
+    if "electric-mining-drill" not in done and "electric-mining-drill" not in unlocked:
+        want.append("electric-mining-drill")
+    if not want:
+        return ""
+    tech = want[0]
+    asked = z.__dict__.setdefault("gate_asked", {})
+    if now - asked.get(tech, -1e9) < GATE_ASK_MIN:
+        return ""
+    goal = {"do": "research", "tech": tech,
+            "reflex": f"zones: segment 1 (the bus and its slots) opens once {tech} is in"}
+    if _propose_front(crew, goal):
+        asked[tech] = now
+        return f"zones: {tech} research queued (segment 1 waits for it)"
+    return ""
 
 
 def retire_twins(crew, z, now: float) -> str:
@@ -1835,6 +1870,9 @@ def after_build(crew, site) -> str:
         head = head_check(crew, z, now)
         if head:
             note = (note + "; " if note else "") + head
+        gate = gate_research(crew, z, now)
+        if gate:
+            note = (note + "; " if note else "") + gate
         twins = retire_twins(crew, z, now)
         if twins:
             note = (note + "; " if note else "") + twins
@@ -2315,7 +2353,10 @@ def _propose_front(crew, goal: dict) -> bool:
         return bool(ok)
     except Exception:  # noqa: BLE001 - a crew without an agenda: queue it plainly
         urgent = getattr(crew, "urgent", None)
-        if urgent is None or any(g.get("for_head") == goal.get("for_head") for g in urgent):
+        same = lambda g: {k: v for k, v in g.items() if k != "reflex"} == \
+            {k: v for k, v in goal.items() if k != "reflex"} or \
+            (goal.get("for_head") is not None and g.get("for_head") == goal.get("for_head"))
+        if urgent is None or any(same(g) for g in urgent):
             return False
         urgent.append(goal)
         return True
