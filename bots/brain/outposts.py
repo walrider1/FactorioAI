@@ -429,6 +429,9 @@ class Outpost(Module):
 
     def build(self, w, base, p):
         site = self._build(w, base, p)
+        for k in ("column_near", "for_head"):          # the bus head's own field: its column stands by the head
+            if p.get(k) is not None:
+                site.params[k] = p[k]
         unlocked = getattr(getattr(w, "kn", None), "unlocked", None)
         cap = belt_drills(unlocked, p.get("dense", True)) if unlocked is not None else None
         wanted = int(p.get("count") or 0)

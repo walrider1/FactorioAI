@@ -555,13 +555,18 @@ def test_the_bus_goal_lays_only_what_built_slots_use_and_resumes():
     assert all(pt["fed"] == ["bus", "iron-plate"] for pt in gsite.params["ports"])      # fed by its tap
     head = {pt["item"]: pt for pt in site.params["ports"]}
     assert set(head) == {"iron-plate"} and head["iron-plate"]["per_minute"] == round(gear.spec.bus_in["iron-plate"] * 60, 1)
-    assert crew.plates == [("iron-plate", round(head["iron-plate"]["per_minute"]))]       # short: plates first
+    # short: the head's own field, its smelting column beside the head port, sized to what the era takes
+    own = [g for g in crew.urgent if g.get("for_head") == "iron-plate"]
+    assert len(own) == 1 and own[0]["module"] == "outpost" and own[0]["resource"] == "iron-ore"
+    assert own[0]["column_near"] == head["iron-plate"]["approach"]
+    assert head["iron-plate"]["planned_per_minute"] >= head["iron-plate"]["per_minute"]
     trunks = [g for g in crew.urgent if g.get("do") == "trunk"]
     assert [(g["site"], g["item"]) for g in trunks] == [(site.id, "iron-plate")]
-    # run again: nothing new is placed, the trunk is not queued twice
+    # run again: nothing new is placed, the trunk and the field are not queued twice
     n = len(crew.w.run.placed)
     zones.run_bus_goal(crew, {"do": "bus", "segment": 1})
     assert len(crew.w.run.placed) == n and len([g for g in crew.urgent if g.get("do") == "trunk"]) == 1
+    assert len([g for g in crew.urgent if g.get("for_head")]) == 1
 
 
 def test_a_refused_bus_piece_is_a_gap_and_a_paused_lay_resumes_where_it_stopped():

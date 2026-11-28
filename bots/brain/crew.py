@@ -985,6 +985,10 @@ class Crew:
             if site.params.get("near_base") or (beside and into == "furnace"):
                 # near the base its column (depot chests too) stands beside the field: no trunk across the base
                 col_goal["near"] = list(site.params["head"])
+            if site.params.get("column_near") and into == "furnace":
+                # the bus head's own field (zones.head_plates_goal): the column beside the head, its plate line a
+                # short belt into the head port; the ore rides the trunk
+                col_goal["near"] = col_goal["toward"] = list(site.params["column_near"])
             if site.params.get("column_at"):           # the spot its trunk route was checked into (outpost_probe)
                 col_goal["at"] = list(site.params["column_at"])
             try:
@@ -1061,6 +1065,8 @@ class Crew:
         if p.get("near_base") or ((p.get("field") or math.dist(head, home) <= outposts.FIELD_SMELT_MAX)
                                   and into == "furnace"):
             cp["near"] = list(head)
+        if p.get("column_near") and into == "furnace":    # the bus head's own field: its column by the head
+            cp["near"] = cp["toward"] = list(p["column_near"])
         skip: list = []
         for _ in range(3):
             found = col.find_spot(self.w, self.base, cp, skip=skip)
@@ -4149,7 +4155,27 @@ class Crew:
         if not furnaces:
             return float(ln.get("rate") or 0.0)
         cap = self.DRILL_PER_MIN if site.kind == "electric_mine" else 1e9
-        return round(sum(min(cap, self.LINE_FURNACE[f]) for f in furnaces), 2)
+        rate = round(sum(min(cap, self.LINE_FURNACE[f]) for f in furnaces), 2)
+        ore = self._column_ore(site)
+        return rate if ore is None else round(min(rate, ore), 2)
+
+    def _column_ore(self, site: Site) -> float | None:
+        """What an outpost-fed column can make a minute from the ore its outposts' trunks bring: their drills that
+        still find ore, 30 a minute each (two stone a brick). None: not such a column. Run 4f7178: column 33's
+        seven furnaces were booked at 131 iron a minute, the bus head's whole feed, while its outpost had four
+        drills, two of them mined out: 60 at most came in, and green science ran at 2.7 a minute."""
+        if site.kind != "smelter_column" or site.params.get("resource") not in self.PLATE_ORE.values() and \
+                site.params.get("resource") != "stone":
+            return None
+        outs = [s for s in self.base.of("outpost") if s.params.get("trunk_to") == site.id]
+        if not outs:
+            return None
+        ore = 0.0
+        for o in outs:
+            drills = sum(1 for e in o.entities if e[0] == "electric-mining-drill") or int(o.params.get("count") or 0)
+            gone = int((getattr(o, "health", None) or {}).get("no_minable_resources", 0))
+            ore += self.DRILL_PER_MIN * max(0, drills - gone)
+        return ore / 2 if site.params.get("resource") == "stone" else ore
 
     def item_ports(self) -> list[tuple[Site, dict]]:
         """Input ports that want one item (factory input cells, workshop cells, the silo's chests)."""
@@ -4871,6 +4897,51 @@ class Crew:
             out.append((start, ins, next(k for k, v in belts.VEC.items() if v == (-dx, -dy))))
         return out
 
+    # what one inserter lifting off a belt or out of a chest moves a minute onto a link's belt (belt pick-up is
+    # slower than the chest-to-chest figure): a link that starts with one carries no more, whatever its source gets
+    INSERTER_LINK_PER_MIN = {"inserter": 45.0, "long-handed-inserter": 60.0, "fast-inserter": 130.0,
+                             "bulk-inserter": 130.0, "stack-inserter": 130.0}
+
+    def _port_link(self, pt: dict) -> dict | None:
+        end = tuple(pt.get("end") or ())
+        return next((q for q in self.links if (q.get("port") is pt or tuple((q.get("port") or {}).get("end") or ())
+                                               == end) and q.get("boost_into") is None
+                     and q.get("kind") not in ("science", "trunk")), None)
+
+    def port_gets(self, pt: dict) -> float | None:
+        """What a fed port's belt really brings a minute: its chain's share of what the source gets (_budget), at
+        most what the inserters lifting it onto the belts on the way move (INSERTER_LINK_PER_MIN), plus what is
+        fed into its own belt from the side. None: no link feeds it. Run 4f7178: the bus head's whole iron, 130
+        a minute, came through one inserter off red science's belt (45 at best) and was booked as fully fed."""
+        ln = self._port_link(pt)
+        if ln is None:
+            return None
+        item = pt.get("item") or ln.get("item")
+        want = float(pt.get("per_minute") or 0)
+        root = self._coal_root(ln)
+        budget = self._budget(item)
+        load, supply = budget.get(tuple(root)) if root is not None and tuple(root) in budget else (want, want)
+        got = supply if load <= 0.5 else want * min(1.0, supply / load)
+        cap, q = None, ln
+        for _ in range(50):                            # the port's link, then the belts it taps
+            ins = q.get("ins")
+            if ins and ins[0] is not None:
+                c = self.INSERTER_LINK_PER_MIN.get(ins[2] if len(ins) > 2 else "inserter", 45.0)
+                cap = c if cap is None else min(cap, c)
+            q = q.get("tap_of") if isinstance(q.get("tap_of"), dict) else None
+            if q is None:
+                break
+        if cap is not None:
+            side = 0.0
+            for b in self.links:
+                if b.get("boost_into") is ln:
+                    try:
+                        side += self._source_rate(tuple(b["source"]), item)
+                    except Exception:  # noqa: BLE001
+                        pass
+            got = min(got, cap + side)
+        return got
+
     def _second_trunk(self, site: Site, item: str | None) -> str | None:
         """A fed port whose belt brings less than it takes gets a second long belt from another source, joined into
         its belt from the side near the port: two belts home, not one belt split among more than it carries (the
@@ -4888,6 +4959,13 @@ class Crew:
             root = self._coal_root(chain[0])
             load, supply = budget.get(tuple(root)) if root is not None and tuple(root) in budget else (0.0, 0.0)
             short = load - supply
+            # the port's own view too: an inserter on the way caps its belt below what the source gets, and a bus
+            # head port wants what the whole era takes (planned_per_minute)
+            want = max(float(pt.get("per_minute") or 0), float(pt.get("planned_per_minute") or 0))
+            gets = self.port_gets(pt)
+            if gets is not None:
+                short = max(short, want - gets)
+                supply, load = min(supply, gets), max(load, want)
             if root is None or short <= 0.5:
                 continue
             targets = sorted(self._sideload_ports(chain, it), key=lambda q: math.dist(q[0]["end"], pt["end"]))[:4]
@@ -5478,6 +5556,9 @@ class Crew:
         resting = self._resting_starts()               # starts whose links kept rolling back (_note_rollback)
         heads = {tuple(l["start"]) for _, l in self.lines()}   # a tap's inserter never takes a line's head-on start
         starts: dict = {}
+        # a port that takes more than one inserter moves (the bus head): a line's tail or a splitter well first
+        big = float(port.get("per_minute") or 0) > self.INSERTER_LINK_PER_MIN["inserter"] and port.get("bus_head")
+        ins_extra = 30.0 if big else 0.0
         for c, key, label, cost, owner in cands:
             ln = self.line_at(key) if owner is None else None
             if ln is not None:                         # a line's tail: its belt runs on into the link, no inserter
@@ -5491,8 +5572,8 @@ class Crew:
                         or {ins, start} & (others | mine | bad | set(block) | heads) or ins in resting:
                     continue
                 facing = next(k for k, v in belts.VEC.items() if v == (-dx, -dy))   # it picks up from the source
-                if start not in starts or cost < starts[start][0]:
-                    starts[start] = (cost, ins, facing, key, label, owner)
+                if start not in starts or cost + ins_extra < starts[start][0]:
+                    starts[start] = (cost + ins_extra, ins, facing, key, label, owner)
         splits: dict = {}                             # a splitter cut into a belt of it: half its flow, not an
         if "splitter" in (getattr(self.kn, "unlocked", None) or set()):   # inserter's 50 a minute
             for c, key, label, cost, owner in cands:
@@ -5552,7 +5633,8 @@ class Crew:
                 skip.add(steps[0][1])                 # it would run back into the splitter: another start
                 continue
             plan = {"ins": ins, "facing": facing, "steps": steps, "source": key, "from": label,
-                    "tap": owner if cost in (self.LINK_TAP_COST, self.LINK_SPLIT_COST) else None, "rip": moved,
+                    "tap": owner if cost in (self.LINK_TAP_COST, self.LINK_TAP_COST + ins_extra,
+                                             self.LINK_SPLIT_COST) else None, "rip": moved,
                     "relay": None, "split": split}
             if moved:                                 # where the moved link goes, decided before anything is touched
                 ln = moved[0]

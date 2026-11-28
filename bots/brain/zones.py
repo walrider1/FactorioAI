@@ -1750,6 +1750,9 @@ def after_build(crew, site) -> str:
         if site.params.get("segment_block"):            # a slot factory: ports on laid lines are fed by their taps
             for n in z.live():
                 feed_ports(crew, n)
+        head = head_check(crew, z, now)
+        if head:
+            note = (note + "; " if note else "") + head
         grown = grow_check(crew, z, now)
         if grown:
             note = (note + "; " if note else "") + grown
@@ -1935,6 +1938,10 @@ def survey(world, base, half: int = 160, step: int = 40) -> None:
 # ==================================================================== the segment bus, built
 BUS_BUDGET_MIN = 30.0     # game minutes a bus goal may take (crew.GOAL_BUDGET_MIN["bus"])
 HEAD_SHORT = 0.5          # a head port's sources give less than this share of its demand: plates first
+HEAD_FULL = 0.9           # a fed head port whose belt brings less than this share of what the era takes is short
+HEAD_CHECK_MIN = 15.0     # game minutes between looks at what the head ports really get (after_build)
+HEAD_ASK_MIN = 30.0       # the same head input's own plates are asked again at most this often
+HEAD_DRILLS_MIN = 4       # the head's own field has at least this many drills
 
 
 def step_key(s) -> tuple:
@@ -2093,6 +2100,7 @@ def update_head(crew, n: int, extra=()) -> list[str]:
         return []
     laid = set(site.params.get("laid") or ())
     want = seg.demand(z.active_blocks(n, extra))
+    planned = seg.demand([b for b in seg.blocks if b.ok and not b.growth])
     ports = site.params.setdefault("ports", [])
     have = {pt["item"]: pt for pt in ports}
     out = []
@@ -2101,41 +2109,148 @@ def update_head(crew, n: int, extra=()) -> list[str]:
         if item not in laid or item not in want:
             continue
         rate = round(want[item] * 60, 1)
-        if item in have:
-            have[item]["per_minute"] = rate
-        else:
-            hp["per_minute"] = rate
+        pt = have.get(item)
+        if pt is None:
+            pt = hp
             ports.append(hp)
+        pt["per_minute"] = rate
+        # what the whole era takes of it: the head's own supply is sized to this, ahead of the slots
+        pt["planned_per_minute"] = round(max(want[item], planned.get(item, 0.0)) * 60, 1)
         out.append(item)
     return out
 
 
-def head_supply(crew, n: int) -> str:
-    """Plates into the head: for each unfed head port, the plates first (mines or a dense field, when the spare
-    sources give less than HEAD_SHORT of its demand), then a trunk goal (crew.trunk: a long belt from the nearest
-    spare source, or a link when one is in reach) proposed through the agenda."""
+def head_want(pt) -> float:
+    """A minute of the item the head port is for: what the era's blocks take (planned_per_minute), at least what
+    the built ones do."""
+    return max(float(pt.get("per_minute") or 0), float(pt.get("planned_per_minute") or 0))
+
+
+def head_got(crew, pt) -> float:
+    """A minute of the item the head port's belt really brings: 0 unfed; its chain's share when the chain's ports
+    take more than its source gets (crew._budget, boosts and second trunks counted)."""
+    if not pt.get("fed"):
+        return 0.0
+    want = float(pt.get("per_minute") or 0)
+    gets = getattr(crew, "port_gets", None)
+    if gets is not None and getattr(crew, "links", None) is not None:
+        got = gets(pt)                                # inserters on the way counted (Crew.port_gets)
+        return want if got is None else got
+    links, budget, root_of = getattr(crew, "links", None), getattr(crew, "_budget", None), getattr(crew, "_coal_root",
+                                                                                                    None)
+    if not links or budget is None or root_of is None:
+        return want                                   # fed by the bus or a stub crew: as booked
+    end = tuple(pt.get("end") or ())
+    ln = next((q for q in links if (q.get("port") is pt or tuple((q.get("port") or {}).get("end") or ()) == end)
+               and q.get("boost_into") is None and q.get("kind") not in ("science", "trunk")), None)
+    if ln is None:
+        return want
+    root = root_of(ln)
+    load, supply = budget(pt["item"]).get(tuple(root) if root is not None else None) or [want, want]
+    if load <= 0.5:
+        return supply
+    return want * min(1.0, supply / load)
+
+
+def head_plates_goal(crew, pt, short: float) -> dict | None:
+    """The head's own plates: a field of the ore (a dense one near the base when its patches have room, else the
+    nearest big patch) sized to `short`, its smelting column beside the bus head (column_near), so its plate line
+    is a short belt into the head port, not whatever another line has left over. Run 4f7178: the head's iron came
+    from one 37.5/min mine for 350 game minutes while the bus took 130/min. None for an item that is no plate."""
+    ore = (getattr(crew, "PLATE_ORE", None) or {}).get(pt.get("item"))
+    if ore is None:
+        return None
+    from .outposts import DRILL_PER_MIN, belt_drills
+    unlocked = getattr(getattr(crew, "kn", None), "unlocked", None)
+    cap = belt_drills(unlocked) if unlocked is not None else 27
+    drills = max(HEAD_DRILLS_MIN, min(cap, math.ceil(short / DRILL_PER_MIN) + 1))
+    goal = None
+    try:
+        from .supply import near_field
+        full = getattr(crew, "patch_full", lambda r: False)
+        goal = near_field(crew, ore, short, "furnace") if not full(ore) else None
+    except Exception:  # noqa: BLE001 - a stub crew: the plain outpost
+        goal = None
+    if goal is None:
+        goal = {"do": "build", "module": "outpost", "resource": ore, "count": drills, "near_first": True}
+    goal = dict(goal)
+    goal["count"] = max(int(goal.get("count") or 0), drills) if not goal.get("near_base") else goal["count"]
+    goal["column_near"] = list(pt.get("approach") or pt.get("end"))
+    goal["for_head"] = pt["item"]
+    return goal
+
+
+def head_supply(crew, n: int, now: float | None = None) -> str:
+    """Plates into the head. Every head port, fed or not, is weighed by what its belt really brings (head_got)
+    against what the era takes (head_want). One short of HEAD_FULL gets:
+    - its own plates when the spare sources cannot cover the gap (head_plates_goal: a field whose column stands
+      beside the head; once a HEAD_ASK_MIN), and
+    - a trunk goal: an unfed port's first feed, a fed one's second belt joined from the side (crew.trunk ->
+      _second_trunk); the boost step also feeds the new column's line in by itself."""
     site = bus_site(crew, n)
     if site is None:
         return ""
+    z = crew.zones
+    if now is None:
+        now = crew._minute() if hasattr(crew, "_minute") else 0.0
+    asked = z.__dict__.setdefault("head_asked", {})
     notes = []
     for pt in site.params.get("ports", []):
-        if pt.get("fed") or not pt.get("item"):
+        if not pt.get("item"):
             continue
-        item, want = pt["item"], float(pt.get("per_minute") or 0)
-        more = getattr(crew, "_more_plates", None)
+        item, want = pt["item"], head_want(pt)
+        try:
+            got = head_got(crew, pt)
+        except Exception:  # noqa: BLE001 - a crew without belts: as booked
+            got = want if pt.get("fed") else 0.0
+        if pt.get("fed") and got >= HEAD_FULL * want:
+            continue
+        short = want - got
         try:
             spare = crew.spare_rate(item)
         except Exception:  # noqa: BLE001 - a stub crew
             spare = want
-        if more is not None and item in getattr(crew, "PLATE_ORE", {}) and spare < HEAD_SHORT * want:
-            try:
-                got = more(item, want - spare)
-                if got:
-                    notes.append(got)
-            except Exception as exc:  # noqa: BLE001 - the trunk still takes whatever plates there are
-                notes.append(f"plates for the head failed: {str(exc)[:100]}")
+        if spare < short and now - asked.get(item, -1e9) >= HEAD_ASK_MIN:
+            goal = head_plates_goal(crew, pt, short - spare)
+            if goal is not None:
+                goal["reflex"] = (f"zones: the bus head takes {want:.0f} {item}/min and gets {got:.0f}; the spare "
+                                  f"sources have {spare:.0f}: its own field, its column beside the head")
+                if _propose_front(crew, goal):
+                    asked[item] = now
+                    notes.append(f"the head's own {item} queued ({goal['resource']}, {goal['count']} drills)")
         if propose_trunk(crew, site, item):
-            notes.append(f"trunk of {item} into the bus head queued")
+            notes.append(f"{'second ' if pt.get('fed') else ''}trunk of {item} into the bus head queued")
+    return "; ".join(notes)
+
+
+def _propose_front(crew, goal: dict) -> bool:
+    try:
+        from .agenda import agenda_of
+        ok, _ = agenda_of(crew).propose(crew, goal, who="zones", front=True)
+        return bool(ok)
+    except Exception:  # noqa: BLE001 - a crew without an agenda: queue it plainly
+        urgent = getattr(crew, "urgent", None)
+        if urgent is None or any(g.get("for_head") == goal.get("for_head") for g in urgent):
+            return False
+        urgent.append(goal)
+        return True
+
+
+def head_check(crew, z, now: float) -> str:
+    """Every HEAD_CHECK_MIN: the live bus's head ports weighed again (head_supply). Before this they were looked at
+    only when a bus goal ran, and a port counted as done once any belt fed it."""
+    last = z.__dict__.get("head_checked")
+    if last is not None and now - last < HEAD_CHECK_MIN:
+        return ""
+    z.head_checked = now
+    notes = []
+    for n in z.live():
+        if bus_site(crew, n) is None:
+            continue
+        update_head(crew, n)
+        h = head_supply(crew, n, now)
+        if h:
+            notes.append(h)
     return "; ".join(notes)
 
 
