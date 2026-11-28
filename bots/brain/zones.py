@@ -625,6 +625,33 @@ class Zones:
         centre, yard, fp = self.plan(world, base, log=log)
         return self.apply(centre, yard, fp, log=log)
 
+    # ------------------------------------------------------------ rooms kept for one builder's growth
+    def reserve_room(self, key: str, tiles) -> int:
+        """Keep tiles free for one builder only (a workshop floor's growth): no other building, belt or pole goes
+        there (slot_only); the owner takes them back with release_room as it grows. Returns how many tiles."""
+        tiles = set(tiles) - self.block
+        if not tiles:
+            return 0
+        self.__dict__.setdefault("rooms", {}).setdefault(key, set()).update(tiles)
+        self.block |= tiles
+        self._refresh()
+        return len(tiles)
+
+    def _rooms(self) -> set:
+        """Every tile kept as a room (planners on their own ground keep off them)."""
+        return set().union(*(self.__dict__.get("rooms") or {}).values()) if self.__dict__.get("rooms") else set()
+
+    def room_of(self, key: str) -> set:
+        return set((self.__dict__.get("rooms") or {}).get(key, ()))
+
+    def release_room(self, key: str, tiles=None) -> None:
+        mine = (self.__dict__.get("rooms") or {}).get(key)
+        if not mine:
+            return
+        give = set(mine) if tiles is None else set(tiles) & mine
+        mine -= give
+        self.release(give)
+
     def release(self, tiles) -> None:
         """Give tiles back (a slot the segment does not need after all)."""
         tiles = set(tiles)
@@ -648,7 +675,7 @@ class Zones:
 
     def _ledger_now(self, snap: dict):
         """A ledger of today's ground with every corridor and slot of the floorplan claimed (plan_oil, plan_power)."""
-        scan_p = planning_scan(snap["scan"], snap["blocked"] | rect_tiles(snap["yard"]) | self._head_keep())
+        scan_p = planning_scan(snap["scan"], snap["blocked"] | rect_tiles(snap["yard"]) | self._head_keep() | self._rooms())
         led = _base_ledger(scan_p)
         for cid, c in self.corridors.items():
             claim = _claim("corridor", cid, c.kind)
@@ -709,7 +736,7 @@ class Zones:
         """The oil corridor from the nearest crude field to the spine (atlas floorplan.place_oil) on today's
         ground, around everything reserved and built: (corridors, slots) to add, both empty when none fits."""
         from atlas.layout.floorplan import Floorplan, place_oil
-        scan_p = planning_scan(snap["scan"], snap["blocked"] | rect_tiles(snap["yard"]) | self._head_keep())
+        scan_p = planning_scan(snap["scan"], snap["blocked"] | rect_tiles(snap["yard"]) | self._head_keep() | self._rooms())
         led = _base_ledger(scan_p)
         for cid, c in self.corridors.items():
             claim = _claim("corridor", cid, c.kind)
@@ -760,7 +787,7 @@ class Zones:
         sp = self.corridors.get("spine")
         if sp is None or not sp.cells:
             return None, []
-        scan_p = planning_scan(snap["scan"], snap["blocked"] | rect_tiles(snap["yard"]) | self._head_keep())
+        scan_p = planning_scan(snap["scan"], snap["blocked"] | rect_tiles(snap["yard"]) | self._head_keep() | self._rooms())
         led = _base_ledger(scan_p)
         for cid, c in self.corridors.items():
             claim = _claim("corridor", cid, c.kind)

@@ -36,6 +36,11 @@ Tile = tuple[int, int]
 CW, BH, CH = 9, 5, 8                   # slot width, band height, corridor height (walkway in its middle:
                                        # 4 rows above it and 3 below, room for several fluid lanes)
 PITCH = BH + CH
+# Room kept free below every workshop floor for its growth: rows of slots, held in the zones' reserved land (no
+# other building, belt or pole) and taken back only by that floor as it grows. Run 4f7178: the sulfur and solid
+# fuel workshops failed six times (about 35 game minutes) because the oil floor was boxed in and no crude pipe fit
+# ("no pipe route for crude-oil ... 13 tiles away"); no oil zone was ever reserved (crude 273 tiles from the spine).
+FLOOR_ROOM_ROWS = 4
 POLE = "small-electric-pole"
 
 
@@ -487,10 +492,30 @@ class Workshop(Module):
                 d.idx = len(self.floors)
                 self.floors.append(d)
                 self.district = d
-                w.log(f"[workshop] floor {d.idx} at {spot}: {cols} x {rows} slots")
+                kept = self._keep_room(w, d)
+                w.log(f"[workshop] floor {d.idx} at {spot}: {cols} x {rows} slots"
+                      + (f"; {kept} tiles below it kept for its growth" if kept else ""))
                 return d
         raise BuildError("no flat free area near the base for a workshop floor (it needs about 60 x 50 tiles "
                          "without water, ore or buildings)")
+
+    @staticmethod
+    def _room_key(d: District) -> str:
+        return f"workshop-floor-{getattr(d, 'idx', 0)}"
+
+    def _keep_room(self, w, d: District) -> int:
+        """Reserve FLOOR_ROOM_ROWS rows of slots below a new floor (what of it is free) for its own growth."""
+        z = getattr(w, "zones", None)
+        if z is None or not hasattr(z, "reserve_room"):
+            return 0
+        x0, y0, x1, y1 = d.box()
+        tiles = {(x, y) for x in range(x0, x1 + 1) for y in range(y1 + 1, y1 + 1 + FLOOR_ROOM_ROWS * PITCH)}
+        ore = set().union(*w.resources.values()) if getattr(w, "resources", None) else set()
+        free = {t for t in tiles if t in w.seen and not w.blocked(t) and t not in ore and t not in w.keepout}
+        try:
+            return z.reserve_room(self._room_key(d), free)
+        except Exception:  # noqa: BLE001 - the zones are an aid
+            return 0
 
     def _grow(self, w, base, more: int, d: District | None = None) -> bool:
         d = d or self.district
@@ -498,8 +523,12 @@ class Workshop(Module):
         x0, y0, x1, y1 = d.box()
         w.survey_area((x0 + x1) / 2, y1 + add * PITCH / 2, half=max(20, add * PITCH), step=32)
         tiles = {(x, y) for x in range(x0, x1 + 1) for y in range(y1 + 1, y1 + 1 + add * PITCH)}
-        if not self._area_ok(w, tiles):
+        z = getattr(w, "zones", None)
+        mine = z.room_of(self._room_key(d)) if z is not None and hasattr(z, "room_of") else set()
+        if not self._area_ok(w, tiles, mine):
             return False
+        if mine:
+            z.release_room(self._room_key(d), tiles)        # its own room: built on now
         for t in d.walkways():
             d.nets.walk.discard(t)
         d.rows += add
@@ -507,12 +536,14 @@ class Workshop(Module):
         d.nets.noend |= d.gap_tiles()
         return True
 
-    def _area_ok(self, w, tiles) -> bool:
+    def _area_ok(self, w, tiles, mine=frozenset()) -> bool:
+        """Free land for a floor: seen, nothing on it, no ore, not kept out, not reserved by the floorplan (but a
+        floor's own kept room, `mine`, is its to grow into)."""
         ore = set().union(*w.resources.values()) if w.resources else set()
         z = getattr(w, "zones", None)
         zb = z.refused() if z is not None else ()     # land the hybrid floorplan reserves (zones.py)
-        return all(t in w.seen and not w.blocked(t) and t not in ore and t not in w.keepout and t not in zb
-                   for t in tiles)
+        return all(t in w.seen and t not in ore and t not in w.keepout and
+                   (t in mine or (not w.blocked(t) and t not in zb)) for t in tiles)
 
     def _find_area(self, w: FreeWorld, home, W: int, H: int):
         """The free rectangle nearest home (top-left tile), searched on rings of candidate corners."""
